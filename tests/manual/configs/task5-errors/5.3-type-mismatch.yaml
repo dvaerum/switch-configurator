@@ -1,0 +1,32 @@
+# Test 5.3: Type Mismatch - source_ports String vs Array
+# Objective: Verify enhanced error for THE TODO.md example case!
+# THIS IS THE MOST IMPORTANT ERROR TEST - THE EXACT TODO.md EXAMPLE
+# This should FAIL with the enhanced error message showing helpful tips
+
+switches:
+  - id: error-test-03
+    hostname: cisco-c9300-24u-a
+    management_ip: "192.168.1.100"  # Not used for serial, but required field
+    model: CiscoCatalyst9300_24P_UPOE
+    credentials:
+      username: admin
+      password: admin
+      connection_type: serial
+      serial_device: /dev/serial_cisco_c9300-24u-a
+      baud_rate: 9600
+    vlans:
+      - id: 1
+        name: default
+    ports: []
+    port_mirrors:
+      - session_id: 1
+        source_ports: "GigabitEthernet1/0/33,GigabitEthernet1/0/34,GigabitEthernet1/0/35,GigabitEthernet1/0/36"  # WRONG TYPE - should be array!
+        destination_port: "GigabitEthernet1/0/42"
+        direction: both
+
+# Expected enhanced error:
+# Field path: switches[0].port_mirrors[0].source_ports
+# Error: invalid type: string "33,34,35,36", expected a sequence at line 19
+# Tip: source_ports must be an array, not a string.
+# Instead of: source_ports: "33,34,35,36"
+# Use: source_ports: ["33", "34", "35", "36"]

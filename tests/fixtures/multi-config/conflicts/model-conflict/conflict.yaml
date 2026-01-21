@@ -1,0 +1,10 @@
+switches:
+  - id: test-sw-01
+    hostname: test-switch-01
+    management_ip: 192.168.1.10
+    model: Aruba2540_24G
+    credentials:
+      username: admin
+      password: testpass
+    vlans: []
+    ports: []

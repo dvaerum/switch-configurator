@@ -1,0 +1,144 @@
+# Cisco Catalyst 9300 Edge Case Test
+# Tests: Boundary conditions, special VLAN IDs, port format variations, duplex settings
+
+switches:
+  - id: cisco-edge-test
+    hostname: cisco-c9300-24u-a
+    model: CiscoCatalyst9300_24P_UPOE
+    management_ip: "192.168.1.100"
+
+    settings:
+      ssh_timeout_secs: 30
+      max_retries: 3
+      enforce_port_config: false
+
+    credentials:
+      username: admin
+      password: "admin"
+      connection_type: serial
+      serial_device: /dev/serial_cisco_c9300-24u-a
+      baud_rate: 9600
+
+    vlans:
+      # VLAN 1 - Always exists on Cisco (cannot be deleted)
+      - id: 1
+        name: default
+        description: Minimum VLAN ID
+
+      # VLAN 4094 - Maximum VLAN ID
+      - id: 4094
+        name: max-vlan
+        description: Maximum VLAN ID
+
+      # VLAN 2 - Low VLAN ID
+      - id: 2
+        name: low-vlan
+        description: Low VLAN ID
+
+      # VLAN 4000 - High VLAN ID
+      - id: 4000
+        name: high-vlan
+        description: High VLAN ID
+
+    ports:
+      # Port 1: Using full GigabitEthernet format
+      - port_id: "GigabitEthernet1/0/1"
+        mode: access
+        vlan: 4094
+        description: "Full format with max VLAN"
+        enabled: true
+        poe_enabled: false
+        speed_duplex: auto
+
+      # Port 2: Using Gi short form
+      - port_id: "Gi1/0/2"
+        mode: access
+        vlan: 2
+        description: "Gi short form"
+        enabled: true
+        poe_enabled: false
+        speed_duplex: auto
+
+      # Port 3: Using simple numeric format (will be normalized)
+      - port_id: "3"
+        mode: access
+        vlan: 1
+        description: "Simple numeric format"
+        enabled: true
+        poe_enabled: false
+        speed_duplex: auto
+
+      # Port 4: 10Mbps half-duplex
+      - port_id: "Gi1/0/4"
+        mode: access
+        vlan: 1
+        description: "10Mbps half-duplex"
+        enabled: true
+        poe_enabled: false
+        speed_duplex: 10-half
+
+      # Port 5: 10Mbps full-duplex
+      - port_id: "Gi1/0/5"
+        mode: access
+        vlan: 1
+        description: "10Mbps full-duplex"
+        enabled: true
+        poe_enabled: false
+        speed_duplex: 10-full
+
+      # Port 6: 100Mbps half-duplex
+      - port_id: "Gi1/0/6"
+        mode: access
+        vlan: 1
+        description: "100Mbps half-duplex"
+        enabled: true
+        poe_enabled: false
+        speed_duplex: 100-half
+
+      # Port 7: Trunk with single VLAN
+      - port_id: "Gi1/0/7"
+        mode: trunk
+        vlan: 1
+        allowed_vlans: [1]
+        description: "Trunk with single VLAN"
+        enabled: true
+        poe_enabled: false
+        speed_duplex: auto
+
+      # Port 8: Trunk with all configured VLANs
+      - port_id: "Gi1/0/8"
+        mode: trunk
+        vlan: 1
+        allowed_vlans: [1, 2, 4000, 4094]
+        description: "Trunk with all VLANs"
+        enabled: true
+        poe_enabled: false
+        speed_duplex: 1000-full
+
+      # Port 9: Trunk with no allowed_vlans (should allow all)
+      - port_id: "Gi1/0/9"
+        mode: trunk
+        vlan: 1
+        allowed_vlans: []
+        description: "Trunk allowing all VLANs"
+        enabled: true
+        poe_enabled: false
+        speed_duplex: 1000-full
+
+      # Port 10: Port without description
+      - port_id: "Gi1/0/10"
+        mode: access
+        vlan: 1
+        enabled: true
+        poe_enabled: false
+        speed_duplex: auto
+
+    # Single SPAN session with single source
+    port_mirrors:
+      - session_id: "1"
+        source_ports: ["Gi1/0/1"]
+        destination_port: "Gi1/0/11"
+        direction: both
+
+    validation:
+      enabled: false

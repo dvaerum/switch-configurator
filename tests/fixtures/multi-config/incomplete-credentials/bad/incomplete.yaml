@@ -1,0 +1,13 @@
+merge_priority: 50
+
+switches:
+  - id: cred-test-01
+    hostname: cred-test-switch
+    management_ip: 192.168.1.120
+    model: Aruba2930F
+    # Incomplete credentials - missing password
+    credentials:
+      username: newadmin
+      connection_type: ssh
+    vlans: []
+    ports: []

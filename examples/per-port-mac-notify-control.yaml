@@ -1,0 +1,82 @@
+# Example: Per-Port MAC Notification Control
+# This demonstrates how to enable MAC notifications globally while controlling
+# which individual ports send MAC notification traps.
+
+switches:
+  - id: example-switch
+    hostname: example-switch
+    model: Aruba2930F
+    management_ip: "192.168.1.10"
+
+    credentials:
+      username: admin
+      password: admin
+      connection_type: ssh
+      port: 22
+
+    vlans:
+      - id: 10
+        name: management
+        ip_config: dhcp
+
+      - id: 20
+        name: devices
+        ip_config: none
+
+    ports:
+      # Ports 1-5: Enable MAC notifications for device tracking
+      - port_id: "1-5"
+        mode: access
+        vlan: 20
+        enabled: true
+        poe_enabled: true
+        mac_notify: true  # Enable MAC address change notifications
+        description: "Monitored devices"
+
+      # Ports 6-10: No MAC notifications (security cameras don't need tracking)
+      - port_id: "6-10"
+        mode: access
+        vlan: 20
+        enabled: true
+        poe_enabled: true
+        mac_notify: false  # Explicitly disable MAC notifications
+        description: "Security cameras"
+
+      # Port 24: Uplink - no MAC notifications needed
+      - port_id: "24"
+        mode: trunk
+        vlan: 10
+        allowed_vlans: [10, 20]
+        enabled: true
+        mac_notify: false
+        description: "Uplink"
+
+    # SNMP Configuration
+    snmp:
+      # SNMP communities for read/write access
+      communities:
+        - name: "public"
+          access: operator  # Read-only
+
+        - name: "private"
+          access: unrestricted  # Read-write
+
+      # SNMP trap receivers (monitoring servers)
+      trap_receivers:
+        - host: "192.168.1.100"
+          community: "public"
+          version: "2c"
+
+      # Global trap types to enable
+      # IMPORTANT: Both global and per-port settings must be enabled for traps to be sent:
+      #   1. Global: snmp.enabled_traps must include "mac-notify" (enables SNMP trap type)
+      #   2. Per-port: ports.mac_notify must be true (enables traps for that specific port)
+      # Without the global trap enabled, no MAC notification traps will be sent at all.
+      enabled_traps:
+        - mac-notify      # MAC address learning/changes (required for per-port mac_notify)
+        - link-change     # Port up/down events
+
+# Note: Per-switch settings can be added to each switch config:
+#   settings:
+#     ssh_timeout_secs: 30
+#     max_retries: 3

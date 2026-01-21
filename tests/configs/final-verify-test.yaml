@@ -1,0 +1,77 @@
+# Final verification test: Per-Port MAC Notify Control
+# Testing ports 5-8 with alternating mac_notify settings
+
+switches:
+  - id: test-aruba-2930f
+    hostname: test-aruba-2930f
+    model: Aruba2930F
+    management_ip: "192.168.1.2"
+
+    credentials:
+      username: admin
+      password: admin
+      connection_type: serial
+      serial_device: /dev/serial_aruba-2930F
+      baud_rate: 9600
+
+    vlans:
+      - id: 42
+        name: management
+        description: Management VLAN
+        ip_config: dhcp
+
+      - id: 1000
+        name: test-vlan
+        ip_config: none
+
+    ports:
+      # Port 5: MAC notify ENABLED
+      - port_id: "5"
+        mode: access
+        vlan: 1000
+        description: "Test Port 5 - MAC notify ON"
+        enabled: true
+        mac_notify: true
+
+      # Port 6: MAC notify DISABLED
+      - port_id: "6"
+        mode: access
+        vlan: 1000
+        description: "Test Port 6 - MAC notify OFF"
+        enabled: true
+        mac_notify: false
+
+      # Port 7: MAC notify ENABLED
+      - port_id: "7"
+        mode: access
+        vlan: 1000
+        description: "Test Port 7 - MAC notify ON"
+        enabled: true
+        mac_notify: true
+
+      # Port 8: MAC notify DISABLED
+      - port_id: "8"
+        mode: access
+        vlan: 1000
+        description: "Test Port 8 - MAC notify OFF"
+        enabled: true
+        mac_notify: false
+
+    # SNMP Configuration with global MAC-notify trap enabled
+    snmp:
+      communities:
+        - name: "public"
+          access: operator
+
+      trap_receivers:
+        - host: "192.168.1.1"
+          community: "public"
+          version: "2c"
+
+      enabled_traps:
+        - mac-notify
+
+    settings:
+      ssh_timeout_secs: 30
+      max_retries: 3
+      enforce_port_config: false

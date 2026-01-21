@@ -1,0 +1,71 @@
+# Example SNMP Configuration for Network Switches
+# This demonstrates how to configure SNMP communities, trap receivers, and MAC notifications
+
+switches:
+  - id: aruba-switch-01
+    hostname: aruba-switch-01
+    model: Aruba2930F
+    management_ip: "192.168.1.10"
+
+    credentials:
+      username: admin
+      password: admin
+      connection_type: ssh
+      port: 22
+
+    vlans:
+      - id: 10
+        name: management
+        ip_config: dhcp
+
+      - id: 20
+        name: devices
+        ip_config: none
+
+    ports:
+      # Ports 1-10: Enable MAC notifications for device tracking
+      - port_id: "1-10"
+        mode: access
+        vlan: 20
+        enabled: true
+        poe_enabled: true
+        mac_notify: true  # Enable MAC address change notifications
+        description: "Monitored devices"
+
+      # Port 24: Uplink - no MAC notifications needed
+      - port_id: "24"
+        mode: trunk
+        vlan: 10
+        allowed_vlans: [10, 20]
+        enabled: true
+        mac_notify: false
+        description: "Uplink"
+
+    # SNMP Configuration
+    snmp:
+      # SNMP communities for read/write access
+      communities:
+        - name: "public"
+          access: operator  # Read-only
+
+        - name: "private"
+          access: unrestricted  # Read-write
+
+      # SNMP trap receivers (monitoring servers)
+      trap_receivers:
+        - host: "192.168.1.100"
+          community: "public"
+          version: "2c"  # Optional, defaults to 2c
+
+        - host: "monitoring.example.com"
+          community: "trapcomm"
+
+      # Types of traps to enable
+      enabled_traps:
+        - mac-notify      # MAC address learning/changes
+        - link-change     # Port up/down events
+
+# Note: Per-switch settings can be added to each switch config:
+#   settings:
+#     ssh_timeout_secs: 30
+#     max_retries: 3

@@ -1,0 +1,88 @@
+# Aruba Switch Configuration via Serial Connection
+# This example shows how to configure an Aruba 2930F switch using a serial connection
+
+switches:
+  - id: aruba-2930f-01
+    hostname: aruba-2930f-01
+    model: Aruba2930F
+    management_ip: "192.168.1.10"  # Not used for serial, but required field
+
+    credentials:
+      username: admin
+      password: admin
+      connection_type: serial
+      # Use udev symlinks for stable device paths, e.g.: /dev/serial_aruba-2930F
+      serial_device: /dev/serial_aruba-2930F
+      baud_rate: 9600  # Standard baud rate for Aruba switches
+
+    vlans:
+      - id: 10
+        name: management
+        description: Management VLAN
+        ip_config: dhcp  # Get IP from DHCP server
+
+      - id: 20
+        name: users
+        description: User workstations
+        ip_config:
+          address: "10.0.20.1"
+          netmask: "255.255.255.0"
+
+      - id: 30
+        name: servers
+        description: Server VLAN
+        ip_config:
+          address: "10.0.30.1"
+          netmask: "255.255.255.0"
+
+      - id: 100
+        name: guest
+        description: Guest WiFi
+        ip_config: none  # No IP on this VLAN
+
+    ports:
+      # Access port for management
+      - port_id: "1"
+        mode: access
+        vlan: 10
+        description: Management port
+        enabled: true
+        poe_enabled: false
+
+      # Access ports for users
+      - port_id: "2"
+        mode: access
+        vlan: 20
+        description: User workstation
+        enabled: true
+        poe_enabled: true
+
+      # Trunk port for uplink
+      - port_id: "23"
+        mode: trunk
+        vlan: 10  # Native VLAN
+        allowed_vlans: [10, 20, 30, 100]  # All VLANs allowed
+        description: Uplink to core switch
+        enabled: true
+        poe_enabled: false
+
+      # Trunk port for access point
+      - port_id: "24"
+        mode: trunk
+        vlan: 20  # Native VLAN
+        allowed_vlans: [20, 100]  # User and guest VLANs
+        description: Wireless Access Point
+        enabled: true
+        poe_enabled: true
+
+    port_mirrors:
+      # Mirror port 15 to port 22 for monitoring
+      - session_id: "1"
+        source_ports: ["15"]
+        destination_port: "22"
+        direction: both  # Mirror both rx and tx
+
+# Note: Per-switch settings can be added to each switch config:
+#   settings:
+#     ssh_timeout_secs: 30
+#     max_retries: 3

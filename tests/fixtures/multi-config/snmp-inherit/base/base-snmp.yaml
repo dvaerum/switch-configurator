@@ -1,0 +1,25 @@
+merge_priority: 100
+
+switches:
+  - id: inherit-test-01
+    hostname: inherit-test-switch
+    management_ip: 192.168.1.110
+    model: Aruba2930F
+    credentials:
+      username: admin
+      password: testpass
+      connection_type: ssh
+    vlans: []
+    ports: []
+
+    snmp:
+      communities:
+        - name: public
+          access: unrestricted
+        - name: monitor
+          access: operator
+      trap_receivers:
+        - host: 192.168.1.1
+          community: public
+      enabled_traps:
+        - mac-notify

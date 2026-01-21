@@ -1,0 +1,26 @@
+switches:
+  - id: test-aruba-2540-48g-4sfp
+    hostname: test-aruba-2540-48g-4sfp
+    model: Aruba2540_48G_4SFP
+    management_ip: "192.168.1.2"
+
+    settings:
+      ssh_timeout_secs: 30
+      max_retries: 3
+      enforce_port_config: false
+
+    credentials:
+      username: admin
+      password: admin
+      connection_type: ssh
+      port: 22
+
+      jump_hosts:
+        - host: "jump-host.example.com"
+          ssh_key_path: "/path/to/ssh_key"
+
+    vlans: []
+    ports: []
+
+    validation:
+      enabled: false

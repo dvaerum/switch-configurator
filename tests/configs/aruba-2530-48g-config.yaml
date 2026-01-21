@@ -1,0 +1,177 @@
+# Aruba Switch Configuration via Serial Connection
+# Aruba/HP J9855A 2530-48G-2SFP+ Switch
+
+switches:
+  - id: test-aruba-2530-48g-2sfp
+    hostname: test-aruba-2530-48g-2sfp
+    model: Aruba2530_48G_2SFP  # J9855A 2530-48G-2SFP+ Switch
+    management_ip: "192.168.1.2"  # Not used for serial, but required field
+
+    settings:
+      ssh_timeout_secs: 30
+      max_retries: 3
+      enforce_port_config: true
+
+    credentials:
+      username: admin
+      password: admin
+      connection_type: serial
+      # Find your serial device with: ls -l /dev/serial/by-id/
+      serial_device: /dev/serial_aruba-2530-48g-2sfp+
+      baud_rate: 115200  # Standard baud rate for Aruba switches
+
+    vlans:
+      - id: 42
+        name: management
+        description: Management VLAN
+        ip_config: dhcp  # Get IP from DHCP server
+
+      - id: 100
+        name: servers
+
+      - id: 200
+        name: workstations
+
+      - id: 300
+        name: iot-devices
+
+      - id: 400
+        name: guest-wifi
+
+      - id: 1001
+        name: zone-1
+
+      - id: 1002
+        name: zone-2
+
+      - id: 666
+        name: WAN
+
+      - id: 500
+        name: network-mgmt
+
+      - id: 600
+        name: wireless-aps
+
+    ports:
+      - port_id: "1-2"
+        mode: access
+        vlan: 300
+        description: "Device Group A"
+        enabled: true
+        speed_duplex: "100-full"
+        poe_enabled: true
+
+      - port_id: "3-4"
+        mode: access
+        vlan: 300
+        description: "Device Group B"
+        enabled: true
+        poe_enabled: true
+
+      - port_id: "5-6"
+        mode: access
+        vlan: 500
+        description: "Network Management"
+        enabled: true
+
+      - port_id: "13"
+        mode: access
+        vlan: 1001
+        description: "Endpoint 1"
+        enabled: true
+
+      - port_id: "15"
+        mode: access
+        vlan: 100
+        description: "Server 1"
+        enabled: true
+
+      - port_id: "16"
+        mode: access
+        vlan: 100
+        description: "Server 2"
+        enabled: true
+        mac_notify: true
+
+      - port_id: "17"
+        mode: access
+        vlan: 200
+        description: "Workstation 1"
+        enabled: true
+        speed_duplex: "100-full"
+
+      - port_id: "18"
+        mode: access
+        vlan: 200
+        description: "Workstation 2"
+        enabled: true
+        speed_duplex: "100-full"
+        mac_notify: true
+
+      - port_id: "20"
+        mode: access
+        vlan: 100
+        description: "Application Server"
+        enabled: true
+        mac_notify: true
+
+      - port_id: "21"
+        mode: access
+        vlan: 42
+        description: "Service PC"
+        enabled: true
+
+      - port_id: "47"
+        mode: trunk
+        vlan: 666  # Native VLAN
+        allowed_vlans: [ 500, 600, 42 ]
+        description: WAN
+        enabled: true
+
+      - port_id: "48"
+        mode: trunk
+        vlan: 42  # Native VLAN
+        allowed_vlans: [ 666, 400, 300, 1001, 1002, 100, 200, 500, 600 ]
+        description: Router
+        enabled: true
+
+    port_mirrors:
+      # Mirror port 15 to port 22 for monitoring
+      - session_id: "1"
+        source_ports: ["15"]
+        destination_port: "22"
+        direction: both  # Mirror both rx and tx
+
+    # SNMP Configuration for device tracking
+    snmp:
+      # SNMP communities for access control
+      communities:
+        - name: "public"
+          access: operator  # Read-only access
+
+        - name: "private"
+          access: unrestricted  # Read-write access
+
+      # SNMP trap receivers (monitoring servers)
+      trap_receivers:
+        - host: "192.168.1.1"  # Change to your monitoring server IP
+          community: "public"
+          version: "2c"
+
+      # Types of traps to enable
+      enabled_traps:
+        - mac-notify      # MAC address learning/changes (new device detection)
+        - link-change     # Port up/down events
+
+    # Validation disabled for serial connection deployments
+    # validation:
+    #   enabled: true
+    #   timeout: 60s
+    #   on_failure: rollback
+    #   rollback_method: restore_backup
+    #   tests:
+    #     - type: tcp_port_check
+    #       ports: [22]
+    #       timeout: 10s
+    #       required: true

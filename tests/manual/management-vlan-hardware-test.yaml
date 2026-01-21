@@ -1,0 +1,193 @@
+# Test Configuration for Management VLAN Feature
+# This configuration tests management_vlan on actual hardware via serial connections
+
+switches:
+  # Aruba 2530-48G-2SFP+ Test
+  - id: test-aruba-48g
+    hostname: aruba-2530-48g-test
+    management_ip: 192.168.1.100
+    model: Aruba2530_48G_2SFP
+
+    # Test: Restrict management to VLAN 99
+    management_vlan: 99
+
+    credentials:
+      connection_type: serial
+      serial_device: /dev/serial_aruba-2530-48g-2sfp+
+      baud_rate: 115200
+      username: admin
+      password: admin
+
+    vlans:
+      - id: 1
+        name: default
+        description: Default VLAN
+
+      - id: 99
+        name: management
+        description: Management VLAN with DHCP
+        ip_config: dhcp
+
+      - id: 100
+        name: test-vlan
+        description: Test VLAN for verification
+
+    ports:
+      # Configure a few test ports
+      - port_id: "1"
+        mode: access
+        vlan: 99
+        description: Management test port
+        enabled: true
+
+      - port_id: "2"
+        mode: access
+        vlan: 100
+        description: Regular test port
+        enabled: true
+
+      - port_id: "48"
+        mode: trunk
+        vlan: 1
+        allowed_vlans: [1, 99, 100]
+        description: Trunk port
+
+    settings:
+      ssh_timeout_secs: 60
+      max_retries: 3
+
+  # Aruba 2530-8G PoE+ Test
+  - id: test-aruba-8g
+    hostname: aruba-2530-8g-test
+    management_ip: 192.168.1.101
+    model: Aruba2530_8G_POE
+
+    # Test: Restrict management to VLAN 10
+    management_vlan: 10
+
+    credentials:
+      connection_type: serial
+      serial_device: /dev/serial_aruba-2530-8g-poe+
+      baud_rate: 115200
+      username: admin
+      password: admin
+
+    vlans:
+      - id: 1
+        name: default
+
+      - id: 10
+        name: mgmt
+        description: Management VLAN
+        ip_config: dhcp
+
+    ports:
+      - port_id: "1-4"
+        mode: access
+        vlan: 10
+        description: Management ports
+        enabled: true
+        poe_enabled: true
+
+    settings:
+      ssh_timeout_secs: 60
+      max_retries: 3
+
+  # Cisco Catalyst 9300-24P Test
+  - id: test-cisco-9300
+    hostname: cisco-c9300-test
+    management_ip: 192.168.1.102
+    model: CiscoCatalyst9300_24P_UPOE
+
+    # Test: Create management SVI on VLAN 88
+    management_vlan: 88
+
+    credentials:
+      connection_type: serial
+      serial_device: /dev/serial_cisco_c9300-24u-a
+      baud_rate: 9600
+      username: admin
+      password: admin
+
+    vlans:
+      - id: 1
+        name: default
+
+      - id: 88
+        name: management
+        description: Management SVI with static IP
+        ip_config:
+          address: "192.168.88.1"
+          netmask: "255.255.255.0"
+
+      - id: 100
+        name: data
+        description: Data VLAN
+
+    ports:
+      - port_id: "GigabitEthernet1/0/1-5"
+        mode: access
+        vlan: 88
+        description: Management ports
+        enabled: true
+
+      - port_id: "GigabitEthernet1/0/24"
+        mode: trunk
+        vlan: 1
+        allowed_vlans: [1, 88, 100]
+        description: Uplink
+        enabled: true
+
+    settings:
+      ssh_timeout_secs: 60
+      max_retries: 3
+
+  # FortiSwitch 108F-POE Test
+  - id: test-fortiswitch-108f
+    hostname: fortiswitch-108f-test
+    management_ip: 192.168.1.103
+    model: Fortiswitch124F_FPOE
+
+    # Test: Configure management interface on VLAN 77
+    management_vlan: 77
+
+    credentials:
+      connection_type: serial
+      serial_device: /dev/serial_fortiswitch_108f-poe
+      baud_rate: 115200
+      username: admin
+      password: adminadmin
+
+    vlans:
+      - id: 1
+        name: default
+
+      - id: 77
+        name: mgmt
+        description: Management VLAN with allowaccess
+        ip_config:
+          address: "192.168.77.1"
+          netmask: "255.255.255.0"
+
+      - id: 10
+        name: lan
+        description: LAN VLAN
+
+    ports:
+      - port_id: "port1-6"
+        mode: access
+        vlan: 77
+        description: Management ports
+        enabled: true
+        poe_enabled: true
+
+      - port_id: "port24"
+        mode: trunk
+        vlan: 1
+        allowed_vlans: [1, 77, 10]
+        description: Uplink
+        enabled: true
+
+    settings:
+      ssh_timeout_secs: 60
+      max_retries: 3

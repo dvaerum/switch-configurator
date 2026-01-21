@@ -1,0 +1,95 @@
+# Cisco Catalyst 9300 SNMP and Trap Test
+# Tests: SNMP communities, trap receivers, trap types, mac-notification
+
+switches:
+  - id: cisco-snmp-test
+    hostname: cisco-c9300-24u-a
+    model: CiscoCatalyst9300_24P_UPOE
+    management_ip: "192.168.1.100"
+
+    settings:
+      ssh_timeout_secs: 30
+      max_retries: 3
+      enforce_port_config: false
+
+    credentials:
+      username: admin
+      password: "admin"
+      connection_type: serial
+      serial_device: /dev/serial_cisco_c9300-24u-a
+      baud_rate: 9600
+
+    vlans:
+      - id: 1
+        name: default
+        description: Default VLAN
+
+      - id: 10
+        name: management
+        description: Management VLAN
+
+    ports:
+      # Port 1: Standard port without mac-notification
+      - port_id: "Gi1/0/1"
+        mode: access
+        vlan: 10
+        description: "Standard Port"
+        enabled: true
+        poe_enabled: false
+        mac_notify: false
+        speed_duplex: auto
+
+      # Port 2: PoE device with mac-notification enabled
+      - port_id: "Gi1/0/2"
+        mode: access
+        vlan: 10
+        description: "PoE Device with MAC Notify"
+        enabled: true
+        poe_enabled: true
+        mac_notify: true
+        speed_duplex: auto
+
+      # Port 3: Another port with mac-notification
+      - port_id: "Gi1/0/3"
+        mode: access
+        vlan: 10
+        description: "Workstation with MAC Notify"
+        enabled: true
+        poe_enabled: false
+        mac_notify: true
+        speed_duplex: auto
+
+    # SNMP configuration with multiple communities and trap receivers
+    snmp:
+      # SNMP communities for access control
+      communities:
+        - name: "public"
+          access: operator  # Read-only access (RO)
+
+        - name: "private"
+          access: unrestricted  # Read-write access (RW)
+
+        - name: "monitoring"
+          access: operator  # Read-only
+
+      # Multiple SNMP trap receivers
+      trap_receivers:
+        - host: "192.168.1.200"
+          community: "public"
+          version: "2c"
+
+        - host: "192.168.1.201"
+          community: "public"
+          version: "2c"
+
+        - host: "192.168.1.202"
+          community: "monitoring"
+          version: "2c"
+
+      # Enable trap types
+      enabled_traps:
+        - mac-notify
+        - link-change
+
+    validation:
+      enabled: false

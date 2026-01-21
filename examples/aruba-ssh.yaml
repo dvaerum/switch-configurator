@@ -1,0 +1,76 @@
+# Aruba Switch Configuration via SSH
+# This example shows how to configure an Aruba switch using SSH with password or key authentication
+
+switches:
+  # Example 1: SSH with password authentication
+  - id: aruba-edge-01
+    hostname: aruba-edge-01
+    model: Aruba2530_24G_POE
+    management_ip: "192.168.1.20"
+
+    credentials:
+      username: admin
+      password: "secure-password-here"
+      connection_type: ssh
+      port: 22  # Default SSH port
+
+    vlans:
+      - id: 10
+        name: management
+        ip_config: dhcp
+
+      - id: 20
+        name: data
+        ip_config:
+          address: "10.0.20.1"
+          netmask: "255.255.255.0"
+
+    ports:
+      - port_id: "1"
+        mode: access
+        vlan: 10
+        description: Management
+        enabled: true
+        poe_enabled: false
+        speed_duplex: "100-full"  # Force 100Mbps full-duplex
+
+      - port_id: "24"
+        mode: trunk
+        vlan: 10
+        allowed_vlans: [10, 20]
+        description: Uplink
+        enabled: true
+        poe_enabled: false
+        speed_duplex: "auto"  # Auto-negotiation (default)
+
+  # Example 2: SSH with key-based authentication (more secure)
+  - id: aruba-edge-02
+    hostname: aruba-edge-02
+    model: Aruba2540_24G
+    management_ip: "192.168.1.21"
+
+    credentials:
+      username: admin
+      # Don't set password when using SSH key
+      ssh_key_path: /etc/switch-configurator/ssh_key
+      connection_type: ssh
+      port: 22
+
+    vlans:
+      - id: 10
+        name: management
+        ip_config:
+          address: "10.0.10.1"
+          netmask: "255.255.255.0"
+
+    ports:
+      - port_id: "1"
+        mode: access
+        vlan: 10
+        enabled: true
+        poe_enabled: false
+
+# Note: Per-switch settings can be added to each switch config:
+#   settings:
+#     ssh_timeout_secs: 30
+#     max_retries: 3

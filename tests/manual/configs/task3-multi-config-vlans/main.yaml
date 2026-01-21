@@ -1,0 +1,17 @@
+# Test 3.2: VLANs from Folder, Credentials from Main
+# main.yaml - Contains credentials, NO VLANs (gets from folder)
+
+merge_priority: 50
+
+switches:
+  - id: multi-test-02
+    hostname: cisco-c9300-24u-a
+    management_ip: "192.168.1.100"  # Not used for serial, but required field
+    model: CiscoCatalyst9300_24P_UPOE
+    credentials:
+      username: admin
+      password: admin
+      connection_type: serial
+      serial_device: /dev/serial_cisco_c9300-24u-a
+      baud_rate: 9600
+    # NO vlans field - inherits from folder config

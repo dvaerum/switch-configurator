@@ -1,0 +1,190 @@
+# Comprehensive FortiSwitch 124F Configuration Test
+# Tests all features: VLANs, access/trunk ports, port mirroring, SNMP, PoE
+
+switches:
+  - id: fortiswitch-comprehensive-test
+    hostname: fortiswitch-108f
+    model: Fortiswitch124F_FPOE
+    management_ip: "192.168.1.100"
+
+    settings:
+      ssh_timeout_secs: 30
+      max_retries: 3
+      enforce_port_config: false
+
+    credentials:
+      username: admin
+      password: "adminadmin"
+      connection_type: serial
+      serial_device: /dev/serial_fortiswitch_108f-poe
+      baud_rate: 115200
+
+    vlans:
+      # VLAN 1 - Default (no IP)
+      - id: 1
+        name: default
+        description: Default VLAN
+        ip_config: none
+
+      # VLAN 10 - Management with DHCP
+      - id: 10
+        name: management
+        description: Management VLAN
+        ip_config: dhcp
+
+      # VLAN 20 - Users with static IP
+      - id: 20
+        name: users
+        description: User workstations
+        ip_config:
+          address: "10.0.20.1"
+          netmask: "255.255.255.0"
+
+      # VLAN 30 - Servers with static IP
+      - id: 30
+        name: servers
+        description: Server VLAN
+        ip_config:
+          address: "10.0.30.1"
+          netmask: "255.255.255.0"
+
+      # VLAN 100 - Guest (no IP)
+      - id: 100
+        name: guest
+        description: Guest WiFi
+        ip_config: none
+
+    ports:
+      # Port 1: Management - Access port, PoE disabled
+      - port_id: "1"
+        mode: access
+        vlan: 10
+        description: "Management Port"
+        enabled: true
+        poe_enabled: false
+        speed_duplex: auto
+
+      # Ports 2-5: User workstations - Access ports with PoE
+      - port_id: "2"
+        mode: access
+        vlan: 20
+        description: "User Workstation 1"
+        enabled: true
+        poe_enabled: true
+        speed_duplex: auto
+
+      - port_id: "3"
+        mode: access
+        vlan: 20
+        description: "User Workstation 2"
+        enabled: true
+        poe_enabled: true
+        speed_duplex: auto
+
+      - port_id: "4"
+        mode: access
+        vlan: 20
+        description: "User Workstation 3"
+        enabled: true
+        poe_enabled: true
+        speed_duplex: 100-full
+
+      - port_id: "5"
+        mode: access
+        vlan: 20
+        description: "User Workstation 4"
+        enabled: true
+        poe_enabled: true
+        speed_duplex: auto
+
+      # Ports 6-7: Servers - Access ports, no PoE, 1Gbps
+      - port_id: "6"
+        mode: access
+        vlan: 30
+        description: "Server 1"
+        enabled: true
+        poe_enabled: false
+        speed_duplex: 1000-full
+
+      - port_id: "7"
+        mode: access
+        vlan: 30
+        description: "Server 2"
+        enabled: true
+        poe_enabled: false
+        speed_duplex: 1000-full
+
+      # Port 8: Disabled port (for testing)
+      - port_id: "8"
+        mode: access
+        vlan: 1
+        description: "Disabled Test Port"
+        enabled: false
+        poe_enabled: false
+        speed_duplex: auto
+
+      # Port 10: Monitoring source (will be mirrored)
+      - port_id: "10"
+        mode: access
+        vlan: 30
+        description: "Monitored Server"
+        enabled: true
+        poe_enabled: false
+        speed_duplex: 1000-full
+
+      # Port 22: Network analyzer destination
+      - port_id: "22"
+        mode: access
+        vlan: 10
+        description: "Network Analyzer"
+        enabled: true
+        poe_enabled: false
+        speed_duplex: 1000-full
+
+      # Port 23: Trunk port for uplink
+      - port_id: "23"
+        mode: trunk
+        vlan: 10  # Native VLAN
+        allowed_vlans: [10, 20, 30, 100]
+        description: "Uplink to Core Switch"
+        enabled: true
+        poe_enabled: false
+        speed_duplex: 1000-full
+
+      # Port 24: Trunk port for wireless AP with PoE
+      - port_id: "24"
+        mode: trunk
+        vlan: 20  # Native VLAN
+        allowed_vlans: [20, 100]
+        description: "Wireless Access Point"
+        enabled: true
+        poe_enabled: true
+        speed_duplex: 1000-full
+
+    # Port mirroring configuration
+    port_mirrors:
+      - session_id: "1"
+        source_ports: ["10"]
+        destination_port: "22"
+        direction: both
+
+    # SNMP configuration
+    snmp:
+      communities:
+        - name: "public"
+          access: operator
+
+        - name: "private"
+          access: unrestricted
+
+      trap_receivers:
+        - host: "192.168.1.200"
+          community: "public"
+          version: "2c"
+
+      enabled_traps:
+        - mac-notify
+        - link-change
+
+    validation:
+      enabled: false

@@ -1,0 +1,111 @@
+# Cisco Catalyst 9300 Basic Functionality Test
+# Tests: VLANs, access/trunk ports, PoE, speed settings, basic config
+
+switches:
+  - id: cisco-basic-test
+    hostname: cisco-c9300-24u-a
+    model: CiscoCatalyst9300_24P_UPOE
+    management_ip: "192.168.1.100"
+
+    settings:
+      ssh_timeout_secs: 30
+      max_retries: 3
+      enforce_port_config: false
+
+    credentials:
+      username: admin
+      password: "admin"
+      connection_type: serial
+      serial_device: /dev/serial_cisco_c9300-24u-a
+      baud_rate: 9600
+
+    vlans:
+      # VLAN 1 - Default (always exists on Cisco)
+      - id: 1
+        name: default
+        description: Default VLAN
+
+      # VLAN 10 - Management
+      - id: 10
+        name: management
+        description: Management VLAN
+
+      # VLAN 20 - Users
+      - id: 20
+        name: users
+        description: User workstations
+
+    ports:
+      # Port 1: Management - Access port, auto speed
+      - port_id: "GigabitEthernet1/0/1"
+        mode: access
+        vlan: 10
+        description: "Management Port"
+        enabled: true
+        poe_enabled: false
+        speed_duplex: auto
+
+      # Ports 2-4: User workstations - Access ports with PoE
+      - port_id: "GigabitEthernet1/0/2"
+        mode: access
+        vlan: 20
+        description: "User Workstation 1"
+        enabled: true
+        poe_enabled: true
+        speed_duplex: auto
+
+      - port_id: "GigabitEthernet1/0/3"
+        mode: access
+        vlan: 20
+        description: "User Workstation 2"
+        enabled: true
+        poe_enabled: true
+        speed_duplex: auto
+
+      - port_id: "GigabitEthernet1/0/4"
+        mode: access
+        vlan: 20
+        description: "User Workstation 3"
+        enabled: true
+        poe_enabled: true
+        speed_duplex: auto
+
+      # Port 5: Disabled port (for testing)
+      - port_id: "GigabitEthernet1/0/5"
+        mode: access
+        vlan: 1
+        description: "Disabled Test Port"
+        enabled: false
+        poe_enabled: false
+        speed_duplex: auto
+
+      # Port 6: 100Mbps forced speed
+      - port_id: "GigabitEthernet1/0/6"
+        mode: access
+        vlan: 20
+        description: "100Mbps Device"
+        enabled: true
+        poe_enabled: false
+        speed_duplex: 100-full
+
+      # Port 7: 1Gbps forced speed
+      - port_id: "GigabitEthernet1/0/7"
+        mode: access
+        vlan: 20
+        description: "1Gbps Device"
+        enabled: true
+        poe_enabled: false
+        speed_duplex: 1000-full
+
+      # Port 24: Trunk port (using short form)
+      - port_id: "Gi1/0/24"
+        mode: trunk
+        vlan: 1  # Native VLAN
+        allowed_vlans: [1, 10, 20]
+        description: "Trunk Uplink"
+        enabled: true
+        poe_enabled: false
+        speed_duplex: 1000-full
+
+    validation:
+      enabled: false

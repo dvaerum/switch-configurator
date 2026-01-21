@@ -1,0 +1,24 @@
+# Test 1.3: Port Mirroring Direction Change
+# Objective: Verify direction changes are applied correctly
+# Run after test 1.1 to test changing from 'both' to 'rx'
+
+switches:
+  - id: test-mirror-01
+    hostname: cisco-c9300-24u-a
+    management_ip: "192.168.1.100"  # Not used for serial, but required field
+    model: CiscoCatalyst9300_24P_UPOE
+    credentials:
+      username: admin
+      password: admin
+      connection_type: serial
+      serial_device: /dev/serial_cisco_c9300-24u-a
+      baud_rate: 9600
+    vlans:
+      - id: 1
+        name: default
+    ports: []
+    port_mirrors:
+      - session_id: 1
+        source_ports: ["GigabitEthernet1/0/10", "GigabitEthernet1/0/11", "GigabitEthernet1/0/12", "GigabitEthernet1/0/13"]
+        destination_port: "GigabitEthernet1/0/20"
+        direction: rx  # Changed from 'both' to 'rx'

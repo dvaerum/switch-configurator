@@ -1,0 +1,20 @@
+# Test 3.1: Credentials from Main, Ports from Folder
+# folder/ports.yaml - Contains port config, NO credentials (inherits from main)
+
+merge_priority: 100
+
+switches:
+  - id: multi-test-01
+    hostname: cisco-c9300-24u-a
+    management_ip: "192.168.1.100"  # Must match main.yaml
+    model: CiscoCatalyst9300_24P_UPOE
+    # NO credentials field - inherits from main.yaml
+    vlans:
+      - id: 1
+        name: default
+    ports:
+      - port_id: "GigabitEthernet1/0/1"
+        description: "Port from folder config"
+        mode: access
+        vlan: 1
+        enabled: true

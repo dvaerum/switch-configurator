@@ -1,0 +1,20 @@
+merge_priority: 101
+
+switches:
+  - id: test-sw-01
+    hostname: test-switch-01
+    management_ip: 192.168.1.10
+    model: Aruba2930F
+    credentials:
+      username: admin
+      password: testpass
+    vlans: []  # No VLANs here - they're in vlans.yaml
+    ports:
+      - port_id: "1-5"
+        mode: access
+        vlan: 10  # References VLAN 10 from vlans.yaml
+        enabled: true
+      - port_id: "6"
+        mode: access
+        vlan: 20  # References VLAN 20 from vlans.yaml
+        enabled: true

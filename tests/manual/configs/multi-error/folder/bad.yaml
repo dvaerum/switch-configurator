@@ -1,0 +1,24 @@
+# Test 5.5: Multi-Config Parse Error Shows File Path
+# folder/bad.yaml - This file has ERRORS
+
+switches:
+  - id: multi-error-test
+    hostname: cisco-c9300-24u-a
+    management_ip: "192.168.1.100"  # Not used for serial, but required field
+    model: CiscoCatalyst9300_24P_UPOE
+    credentials:
+      username: admin
+      password: admin
+      connection_type: serial
+      serial_device: /dev/serial_cisco_c9300-24u-a
+      baud_rate: 9600
+    ports:
+      - port_id: "GigabitEthernet1/0/10"
+        mode: invalid_mode_here  # ERROR: Invalid enum value
+        vlan: 1
+
+# Expected enhanced error should show:
+# Error: Failed to load config from folder: tests/manual/configs/multi-error/folder/bad.yaml
+# Field path: switches[0].ports[0].mode
+# Error: unknown variant `invalid_mode_here`, expected `access` or `trunk` at line 16
+# Tip: Valid port modes are 'access' or 'trunk'.

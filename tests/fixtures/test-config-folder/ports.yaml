@@ -1,0 +1,84 @@
+switches:
+  - id: "test-aruba-2530-48g-2sfp"
+    hostname: "test-aruba-2530-48g-2sfp"
+    management_ip: "192.168.1.20"
+    model: Aruba2530_48G_2SFP
+    credentials:
+      username: admin
+      password: admin
+      connection_type: serial
+      serial_device: /dev/serial_aruba-2530-48g-2sfp+
+      baud_rate: 115200
+    vlans: []  # Empty - VLANs come from main config
+
+    ports:
+      - port_id: "33,34,35,36"
+        mode: access
+        vlan: 100
+        description: "Server Group - Zone 1"
+        enabled: true
+        speed_duplex: 'auto'
+
+
+      - port_id: "1,2,3,4"
+        mode: access
+        vlan: 300
+        description: "Devices - Zone 1"
+        enabled: true
+        speed_duplex: "100-full"
+        poe_enabled: true
+
+
+      - port_id: "8,9,10,11,12"
+        mode: access
+        vlan: 300
+        description: "Devices - Zone 2"
+        enabled: true
+        speed_duplex: "auto"
+        poe_enabled: true
+
+
+      - port_id: "17,18,19,20,21,22"
+        mode: access
+        vlan: 500
+        description: "Network Management"
+        enabled: true
+        poe_enabled: false
+
+
+      - port_id: "37,38,39,40"
+        mode: access
+        vlan: 100
+        description: "Application Servers"
+        enabled: true
+        mac_notify: true
+
+      - port_id: "41"
+        mode: access
+        vlan: 42
+        description: "Admin Tool"
+        enabled: true
+
+      - port_id: "43,48"
+        mode: access
+        vlan: 42
+        description: "Management"
+        enabled: true
+
+      - port_id: "13"
+        mode: access
+        vlan: 1001
+        description: "Zone 1"
+
+
+      - port_id: "23"
+        mode: access
+        vlan: 1002
+        description: "Zone 2"
+
+
+    port_mirrors:
+      - session_id: "1"
+        source_ports: ["33", "34", "35", "36"]
+        destination_port: "42"
+        direction: both

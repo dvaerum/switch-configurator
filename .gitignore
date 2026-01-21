@@ -1,0 +1,35 @@
+# Rust
+/target/
+**/*.rs.bk
+*.pdb
+
+# Configuration files with secrets
+config.yaml
+main-config.yaml
+/aruba-*.yaml
+/IT-*.yaml
+*.key
+*.pem
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Nix
+result
+result-*
+.direnv/
+.envrc
+
+# Claude Code
+.claude/settings.local.json

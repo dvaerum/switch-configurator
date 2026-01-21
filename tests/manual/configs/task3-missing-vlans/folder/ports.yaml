@@ -1,0 +1,14 @@
+# Test 3.3: Missing VLANs in All Configs Fails
+# folder/ports.yaml - Also NO VLANs (should fail validation)
+
+switches:
+  - id: fail-test-01
+    hostname: cisco-c9300-24u-a
+    management_ip: "192.168.1.100"  # Must match main.yaml
+    model: CiscoCatalyst9300_24P_UPOE
+    # NO vlans field - combined with main = empty VLANs = FAIL
+    ports:
+      - port_id: "GigabitEthernet1/0/1"
+        mode: access
+        vlan: 1
+        enabled: true

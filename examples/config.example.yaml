@@ -1,0 +1,136 @@
+switches:
+  # Aruba 2530-24G PoE+ Switch
+  - id: aruba-switch-01
+    hostname: aruba-switch-01
+    model: Aruba2530_24G_POE
+    management_ip: 192.168.1.10
+    credentials:
+      username: admin
+      password: your-password-here
+      # ssh_key_path: /path/to/ssh/key
+      port: 22
+    # Optional: Restrict management access to a specific VLAN (vendor-neutral setting)
+    # Aruba: Restricts CLI/WebAgent/SNMP to this VLAN
+    # Cisco: Creates SVI for management
+    # FortiSwitch: Sets allowaccess on VLAN interface
+    # management_vlan: 10
+    vlans:
+      - id: 10
+        name: management
+        description: Management VLAN
+      - id: 20
+        name: production
+        description: Production network
+      - id: 30
+        name: guest
+        description: Guest network
+    ports:
+      - port_id: "1"
+        mode: access
+        vlan: 10
+        description: Management port
+        enabled: true
+        poe_enabled: true
+      - port_id: "2"
+        mode: trunk
+        vlan: 10
+        allowed_vlans: [10, 20, 30]
+        description: Trunk to core switch
+        enabled: true
+        poe_enabled: false
+      - port_id: "5"
+        mode: access
+        vlan: 20
+        description: Production device
+        enabled: true
+        poe_enabled: true
+    port_mirrors:
+      - session_id: "1"
+        source_ports: ["3", "4"]
+        destination_port: "24"
+        direction: both
+
+  # FortiSwitch 124F-FPOE
+  - id: fortiswitch-01
+    hostname: fortiswitch-01
+    model: Fortiswitch124F_FPOE
+    management_ip: 192.168.1.20
+    credentials:
+      username: admin
+      password: your-password-here
+      port: 22
+    vlans:
+      - id: 10
+        name: management
+      - id: 40
+        name: iot
+        description: IoT devices
+    ports:
+      - port_id: "port1"
+        mode: access
+        vlan: 40
+        description: IoT device
+        enabled: true
+        poe_enabled: true
+      - port_id: "port2"
+        mode: trunk
+        vlan: 10
+        allowed_vlans: [10, 40]
+        description: Uplink
+        enabled: true
+        poe_enabled: false
+    port_mirrors: []
+
+  # Cisco Catalyst 9300-24P UPoE
+  - id: cisco-core-01
+    hostname: cisco-core-01
+    model: CiscoCatalyst9300_24P_UPOE
+    management_ip: 192.168.1.30
+    credentials:
+      username: admin
+      password: your-password-here
+      # ssh_key_path: /path/to/ssh/key
+      port: 22
+    vlans:
+      - id: 1
+        name: default
+      - id: 10
+        name: management
+      - id: 20
+        name: production
+      - id: 50
+        name: voice
+        description: VoIP network
+    ports:
+      - port_id: "GigabitEthernet1/0/1"
+        mode: access
+        vlan: 20
+        description: Production server
+        enabled: true
+        poe_enabled: false
+      - port_id: "GigabitEthernet1/0/5"
+        mode: access
+        vlan: 50
+        description: VoIP phone
+        enabled: true
+        poe_enabled: true
+      - port_id: "GigabitEthernet1/0/24"
+        mode: trunk
+        vlan: 1
+        allowed_vlans: [10, 20, 50]
+        description: Trunk to distribution
+        enabled: true
+        poe_enabled: false
+    port_mirrors:
+      - session_id: "1"
+        source_ports: ["GigabitEthernet1/0/1", "GigabitEthernet1/0/2"]
+        destination_port: "GigabitEthernet1/0/23"
+        direction: both
+
+# Note: Settings are configured per-switch, not globally.
+# Each switch can have its own settings:
+#   settings:
+#     ssh_timeout_secs: 30
+#     max_retries: 3
+#     dry_run: false
+#     enforce_port_config: false

@@ -1,0 +1,26 @@
+switches:
+  - id: "test-aruba-2530-48g-2sfp"
+    # No identity fields - they come from main config!
+    # This tests the optional identity fields feature
+
+    ports:
+      - port_id: "33,34,35,36"
+        mode: access
+        vlan: 100
+        description: "Server Group - Zone 1"
+        enabled: true
+        speed_duplex: 'auto'
+
+      - port_id: "1,2,3,4"
+        mode: access
+        vlan: 300
+        description: "Devices - Zone 1"
+        enabled: true
+        speed_duplex: "100-full"
+        poe_enabled: true
+
+    port_mirrors:
+      - session_id: "1"
+        source_ports: ["33", "34", "35", "36"]
+        destination_port: "42"
+        direction: both

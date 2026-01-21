@@ -1,0 +1,11 @@
+switches:
+  - id: test-sw-missing-vlans
+    hostname: test-switch-missing-vlans
+    management_ip: 192.168.1.60
+    model: Aruba2930F
+    credentials:
+      username: admin
+      password: testpass
+    # NOTE: Empty vlans list here too - no VLANs provided in folder either
+    vlans: []
+    ports: []  # Empty ports to avoid VLAN reference errors

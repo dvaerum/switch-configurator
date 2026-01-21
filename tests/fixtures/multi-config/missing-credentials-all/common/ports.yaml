@@ -1,0 +1,11 @@
+switches:
+  - id: test-sw-missing-creds
+    hostname: test-switch-missing-creds
+    management_ip: 192.168.1.50
+    model: Aruba2930F
+    # NOTE: No credentials field here either
+    ports:
+      - port_id: "1"
+        mode: access
+        vlan: 1
+        enabled: true

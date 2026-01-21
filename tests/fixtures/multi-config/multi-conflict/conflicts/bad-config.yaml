@@ -1,0 +1,16 @@
+merge_priority: 50
+
+switches:
+  - id: conflict-test-01
+    # Conflicting hostname (should cause error)
+    hostname: different-hostname
+    # Conflicting management IP (should cause error)
+    management_ip: 192.168.1.999
+    # Conflicting model (should cause error)
+    model: Aruba2540_24G
+    credentials:
+      username: admin
+      password: testpass
+      connection_type: ssh
+    vlans: []
+    ports: []

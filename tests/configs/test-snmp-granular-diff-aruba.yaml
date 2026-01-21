@@ -1,0 +1,98 @@
+# Test: SNMP Granular Diff Optimization for Aruba
+# Purpose: Verify that running config twice doesn't reconfigure SNMP when already correct
+# Expected: First run sets SNMP, second run shows NO SNMP commands (granular diff working)
+
+switches:
+  - id: test-snmp-aruba-2530-48g
+    hostname: test-snmp-aruba-2530-48g
+    model: Aruba2530_48G_2SFP
+    management_ip: "192.168.1.100"
+
+    settings:
+      ssh_timeout_secs: 30
+      max_retries: 3
+      enforce_port_config: false
+
+    credentials:
+      username: admin
+      password: admin
+      connection_type: serial
+      serial_device: /dev/serial_aruba-2530-48g-2sfp+
+      baud_rate: 115200
+
+    vlans:
+      - id: 1
+        name: default
+
+      - id: 10
+        name: test-vlan
+
+    ports:
+      - port_id: "1"
+        mode: access
+        vlan: 10
+        enabled: true
+
+    # SNMP config to test granular diff
+    snmp:
+      communities:
+        - name: "testpublic"
+          access: operator
+
+        - name: "testprivate"
+          access: unrestricted
+
+      trap_receivers:
+        - host: "10.0.0.100"
+          community: "testpublic"
+          version: "2c"
+
+      enabled_traps:
+        - link-change
+
+  - id: test-snmp-aruba-2930f
+    hostname: test-snmp-aruba-2930f
+    model: Aruba2930F
+    management_ip: "192.168.1.101"
+
+    settings:
+      ssh_timeout_secs: 30
+      max_retries: 3
+      enforce_port_config: false
+
+    credentials:
+      username: admin
+      password: admin
+      connection_type: serial
+      serial_device: /dev/serial_aruba-2930F
+      baud_rate: 115200
+
+    vlans:
+      - id: 1
+        name: default
+
+      - id: 20
+        name: test-vlan-2930
+
+    ports:
+      - port_id: "1"
+        mode: access
+        vlan: 20
+        enabled: true
+
+    snmp:
+      communities:
+        - name: "testpublic"
+          access: operator
+
+        - name: "testprivate"
+          access: unrestricted
+
+      trap_receivers:
+        - host: "10.0.0.100"
+          community: "testpublic"
+          version: "2c"
+
+      enabled_traps:
+        - link-change
+        - mac-notify

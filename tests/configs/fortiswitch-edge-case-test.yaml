@@ -1,0 +1,128 @@
+# FortiSwitch Edge Case Test
+# Tests: Boundary conditions, special VLAN IDs, port ranges, empty configs
+
+switches:
+  - id: fortiswitch-edge-test
+    hostname: fortiswitch-108f
+    model: Fortiswitch124F_FPOE
+    management_ip: "192.168.1.100"
+
+    settings:
+      ssh_timeout_secs: 30
+      max_retries: 3
+      enforce_port_config: false
+
+    credentials:
+      username: admin
+      password: "adminadmin"
+      connection_type: serial
+      serial_device: /dev/serial_fortiswitch_108f-poe
+      baud_rate: 115200
+
+    vlans:
+      # VLAN 1 - Minimum VLAN ID
+      - id: 1
+        name: default
+        description: Minimum VLAN ID
+        ip_config: none
+
+      # VLAN 4094 - Maximum VLAN ID
+      - id: 4094
+        name: max-vlan
+        description: Maximum VLAN ID
+        ip_config: none
+
+      # VLAN 2 - Low VLAN ID
+      - id: 2
+        name: low-vlan
+        description: Low VLAN ID
+        ip_config: none
+
+      # VLAN 4000 - High VLAN ID
+      - id: 4000
+        name: high-vlan
+        description: High VLAN ID
+        ip_config: none
+
+      # VLAN 100 - With static IP at network boundary
+      - id: 100
+        name: boundary-ip
+        description: Boundary IP test
+        ip_config:
+          address: "255.255.255.254"
+          netmask: "255.255.255.252"
+
+    ports:
+      # Port 1: Minimum port with VLAN 4094
+      - port_id: "1"
+        mode: access
+        vlan: 4094
+        description: "Port with max VLAN"
+        enabled: true
+        poe_enabled: false
+        speed_duplex: auto
+
+      # Port 2: 10Mbps half-duplex (minimum speed)
+      - port_id: "2"
+        mode: access
+        vlan: 1
+        description: "10Mbps half-duplex"
+        enabled: true
+        poe_enabled: false
+        speed_duplex: 10-half
+
+      # Port 3: 10Mbps full-duplex
+      - port_id: "3"
+        mode: access
+        vlan: 1
+        description: "10Mbps full-duplex"
+        enabled: true
+        poe_enabled: false
+        speed_duplex: 10-full
+
+      # Port 4: 100Mbps half-duplex
+      - port_id: "4"
+        mode: access
+        vlan: 1
+        description: "100Mbps half-duplex"
+        enabled: true
+        poe_enabled: false
+        speed_duplex: 100-half
+
+      # Port 5: Trunk with single VLAN
+      - port_id: "5"
+        mode: trunk
+        vlan: 1
+        allowed_vlans: [1]
+        description: "Trunk with single VLAN"
+        enabled: true
+        poe_enabled: false
+        speed_duplex: auto
+
+      # Port 6: Trunk with all configured VLANs
+      - port_id: "6"
+        mode: trunk
+        vlan: 1
+        allowed_vlans: [1, 2, 100, 4000, 4094]
+        description: "Trunk with all VLANs"
+        enabled: true
+        poe_enabled: false
+        speed_duplex: 1000-full
+
+      # Port 7: Empty description
+      - port_id: "7"
+        mode: access
+        vlan: 1
+        enabled: true
+        poe_enabled: false
+        speed_duplex: auto
+
+    # Single mirror session with single source
+    port_mirrors:
+      - session_id: "1"
+        source_ports: ["1"]
+        destination_port: "8"
+        direction: both
+
+    validation:
+      enabled: false

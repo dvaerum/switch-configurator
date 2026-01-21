@@ -1,0 +1,18 @@
+# Test 5.1: Missing management_ip Error
+# Objective: Verify helpful error for missing required field
+# This should FAIL at parse time with enhanced error message
+
+switches:
+  - id: error-test-01
+    hostname: cisco-c9300-24u-a
+    # management_ip MISSING - should show helpful error
+    model: CiscoCatalyst9300_24P_UPOE
+    credentials:
+      username: admin
+      password: admin
+      connection_type: serial
+      serial_device: /dev/serial_cisco_c9300-24u-a
+      baud_rate: 9600
+    vlans:
+      - id: 1
+        name: default

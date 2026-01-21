@@ -1,0 +1,15 @@
+# Test 3.3: Missing VLANs in All Configs Fails
+# main.yaml - NO VLANs (should fail after merge)
+
+switches:
+  - id: fail-test-01
+    hostname: cisco-c9300-24u-a
+    management_ip: "192.168.1.100"  # Not used for serial, but required field
+    model: CiscoCatalyst9300_24P_UPOE
+    credentials:
+      username: admin
+      password: admin
+      connection_type: serial
+      serial_device: /dev/serial_cisco_c9300-24u-a
+      baud_rate: 9600
+    # NO vlans field - should FAIL validation

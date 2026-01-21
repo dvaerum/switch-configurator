@@ -1,0 +1,132 @@
+# Port Range Configuration Example
+# Demonstrates various port range syntax options for concise configuration
+#
+# Port range syntax:
+#   "1-5"          - Range: ports 1,2,3,4,5
+#   "1,3,5"        - List: ports 1,3,5
+#   "1-5,7,10-12"  - Mixed: ports 1,2,3,4,5,7,10,11,12
+#
+# Benefits:
+#   - Write 1 config line instead of 20+ for identical ports
+#   - Easier maintenance and less error-prone
+#   - Cleaner, more readable configuration
+
+switches:
+  - id: office-switch-01
+    hostname: office-switch-01
+    model: Aruba2930F
+    management_ip: "192.168.1.10"
+    credentials:
+      username: admin
+      password: admin
+      connection_type: ssh
+
+    vlans:
+      - id: 10
+        name: management
+        description: Management VLAN
+        ip_config:
+          address: "10.0.10.1"
+          netmask: "255.255.255.0"
+
+      - id: 20
+        name: users
+        description: User workstations
+        ip_config: none
+
+      - id: 30
+        name: guests
+        description: Guest network
+        ip_config: none
+
+      - id: 999
+        name: disabled
+        description: Disabled/unused ports
+        ip_config: none
+
+    ports:
+      # ====================
+      # RANGE SYNTAX EXAMPLES
+      # ====================
+
+      # Simple range: Ports 1-10 for user workstations with PoE
+      - port_id: "1-10"
+        mode: access
+        vlan: 20
+        description: User workstations (with PoE)
+        enabled: true
+        poe_enabled: true
+
+      # Comma-separated list: Specific ports for servers (no PoE needed)
+      - port_id: "11,13,15"
+        mode: access
+        vlan: 20
+        description: Servers (no PoE)
+        enabled: true
+        poe_enabled: false
+
+      # Mixed syntax: Complex selection for guest network
+      # Expands to: 16,17,18,19,21
+      - port_id: "16-19,21"
+        mode: access
+        vlan: 30
+        description: Guest network ports
+        enabled: true
+        poe_enabled: false
+
+      # Disabled ports for security (large range)
+      - port_id: "12,14,20,22"
+        mode: access
+        vlan: 999
+        description: Unused - security disabled
+        enabled: false
+        poe_enabled: false
+
+      # Traditional single port syntax still works
+      - port_id: "23"
+        mode: trunk
+        vlan: 10
+        allowed_vlans: [10, 20, 30]
+        description: Uplink to core switch
+        enabled: true
+        poe_enabled: false
+
+      - port_id: "24"
+        mode: trunk
+        vlan: 10
+        allowed_vlans: [10, 20, 30]
+        description: Uplink to backup switch
+        enabled: true
+        poe_enabled: false
+
+    port_mirrors:
+      # Port mirroring also supports range syntax in source_ports
+      # Monitor ports 1-5 and 11 for security analysis
+      - session_id: "1"
+        source_ports: ["1-5", "11"]  # Expands to: 1,2,3,4,5,11
+        destination_port: "22"       # Must be single port
+        direction: both
+
+# Note: Per-switch settings can be added to each switch config:
+#   settings:
+#     ssh_timeout_secs: 30
+#     max_retries: 3
+
+# ====================
+# VENDOR-SPECIFIC EXAMPLES
+# ====================
+
+# For Cisco switches, range syntax works with their port naming:
+#   port_id: "GigabitEthernet1/0/1-48"
+#   port_id: "TenGigabitEthernet1/1/1-4"
+
+# For FortiSwitch:
+#   port_id: "port1-24"
+#   port_id: "port1-10,port15,port20-24"
+
+# ====================
+# CONFIGURATION SUMMARY
+# ====================
+# Without port ranges, this config would require 21 individual port entries.
+# With port ranges, it only requires 6 port entries.
+# Reduction: 71% fewer configuration lines!

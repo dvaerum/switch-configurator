@@ -1,0 +1,44 @@
+switches:
+  - id: aruba-switch-01
+    hostname: aruba-switch-01
+    model: Aruba2930F
+    management_ip: "192.168.1.10"
+    credentials:
+      username: admin
+      password: admin
+      connection_type: serial
+      serial_device: /dev/ttyUSB0
+      baud_rate: 9600
+    vlans:
+      # Example 1: VLAN with DHCP IP address
+      - id: 10
+        name: management
+        ip_config: dhcp  # Get IP address from DHCP server
+
+      # Example 2: VLAN with static IP address
+      - id: 20
+        name: servers
+        ip_config:
+          address: "192.168.20.1"
+          netmask: "255.255.255.0"
+
+      # Example 3: VLAN with no IP address (default)
+      - id: 30
+        name: guest
+        ip_config: none  # No IP address configured
+
+      # Example 4: VLAN without ip_config specified (defaults to 'none')
+      - id: 40
+        name: iot
+        # ip_config not specified - defaults to 'none'
+
+    ports:
+      - port_id: "1"
+        mode: access
+        vlan: 10
+        enabled: true
+
+# Note: Per-switch settings can be added to each switch config:
+#   settings:
+#     ssh_timeout_secs: 30
+#     max_retries: 3

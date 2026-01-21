@@ -1,0 +1,28 @@
+# Cargo build configuration for faster compilation
+
+[build]
+# Cargo automatically uses all available CPU cores
+# Increase parallel rustc invocations
+# This affects how many crates can be compiled in parallel
+pipelining = true
+
+[target.x86_64-unknown-linux-gnu]
+# Use mold linker if available (much faster than default ld)
+# Falls back to lld if mold not available, then to default linker
+# Uncomment one of these based on what's available:
+# linker = "clang"
+# rustflags = ["-C", "link-arg=-fuse-ld=mold"]
+
+# Alternative: use lld (LLVM linker, faster than GNU ld)
+# linker = "clang"
+# rustflags = ["-C", "link-arg=-fuse-ld=lld"]
+
+# For maximum speed during development, disable some checks
+[profile.dev.package."*"]
+opt-level = 0
+debug = false  # Disable debug info for dependencies (keeps them for our code)
+
+[term]
+# Show more detailed progress during compilation
+verbose = false
+color = "auto"

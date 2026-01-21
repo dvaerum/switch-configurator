@@ -1,0 +1,163 @@
+# Management VLAN Configuration Example
+#
+# This example demonstrates how to configure management VLANs across different switch vendors.
+# The management_vlan setting is vendor-neutral and applies vendor-specific commands:
+#
+# - Aruba: Restricts management access (CLI, WebAgent, SNMP) to only the specified VLAN
+#   Command: "management-vlan <id>"
+#
+# - Cisco: Creates an SVI (Switched Virtual Interface) for the management VLAN
+#   Commands: "interface vlan <id>", "ip address <ip> <netmask>", "no shutdown"
+#
+# - FortiSwitch: Configures VLAN interface with allowaccess for management services
+#   Commands: "config system interface", "edit vlan<id>", "set allowaccess ping https ssh snmp"
+
+switches:
+  # Aruba Example: Management VLAN restricts access to VLAN 10 only
+  - id: aruba-mgmt-example
+    hostname: aruba-switch-01
+    management_ip: 192.168.1.10
+    model: Aruba2930F
+
+    # Specify which VLAN should be used for management access
+    management_vlan: 10
+
+    credentials:
+      connection_type: serial
+      serial_device: /dev/serial_aruba-2530-48g-2sfp+
+      baud_rate: 115200
+      username: admin
+      password: admin
+
+    vlans:
+      # Management VLAN with DHCP
+      - id: 10
+        name: management
+        description: Management VLAN for switch access
+        ip_config: dhcp
+
+      # Other VLANs
+      - id: 20
+        name: users
+        description: User network
+
+      - id: 30
+        name: servers
+        description: Server network
+
+    ports:
+      # Uplink port in trunk mode with all VLANs
+      - port_id: "24"
+        mode: trunk
+        allowed_vlans: [10, 20, 30]
+        description: Uplink to core
+
+      # Management ports (VLAN 10)
+      - port_id: "1-5"
+        mode: access
+        vlan: 10
+        description: Management ports
+        poe_enabled: true
+
+  # Cisco Example: Management VLAN with static IP on SVI
+  - id: cisco-c9300-example
+    hostname: cisco-switch-01
+    management_ip: 192.168.1.11
+    model: CiscoCatalyst9300_24P_UPOE
+
+    # Specify which VLAN should be used for management (creates SVI)
+    management_vlan: 99
+
+    credentials:
+      connection_type: serial
+      serial_device: /dev/serial_cisco_c9300-24u-a
+      baud_rate: 9600
+      username: admin
+      password: admin
+
+    vlans:
+      # Management VLAN with static IP
+      - id: 99
+        name: management
+        description: Management SVI
+        ip_config:
+          address: "192.168.99.1"
+          netmask: "255.255.255.0"
+
+      # Other VLANs
+      - id: 100
+        name: data
+        description: Data VLAN
+
+      - id: 200
+        name: voice
+        description: Voice VLAN
+
+    ports:
+      # Uplink port
+      - port_id: "GigabitEthernet1/0/24"
+        mode: trunk
+        allowed_vlans: [99, 100, 200]
+        description: Uplink
+
+      # Management ports
+      - port_id: "GigabitEthernet1/0/1-5"
+        mode: access
+        vlan: 99
+        description: Management access
+
+  # FortiSwitch Example: Management VLAN with allowaccess
+  - id: fortiswitch-mgmt-example
+    hostname: fortiswitch-01
+    management_ip: 192.168.1.12
+    model: Fortiswitch124F_FPOE
+
+    # Specify which VLAN should be used for management (sets allowaccess)
+    management_vlan: 88
+
+    credentials:
+      connection_type: serial
+      serial_device: /dev/serial_fortiswitch_108f-poe
+      baud_rate: 115200
+      username: admin
+      password: adminadmin
+
+    vlans:
+      # Management VLAN with static IP
+      - id: 88
+        name: mgmt
+        description: Management VLAN
+        ip_config:
+          address: "192.168.88.1"
+          netmask: "255.255.255.0"
+
+      # Other VLANs
+      - id: 10
+        name: lan
+        description: LAN VLAN
+
+      - id: 20
+        name: guest
+        description: Guest VLAN
+
+    ports:
+      # Uplink port
+      - port_id: "port24"
+        mode: trunk
+        allowed_vlans: [88, 10, 20]
+        description: Uplink to firewall
+
+      # Management ports
+      - port_id: "port1-4"
+        mode: access
+        vlan: 88
+        description: Management access
+        poe_enabled: true
+
+# Important Notes:
+#
+# 1. The management_vlan field must reference a VLAN ID that exists in the vlans list
+# 2. For Cisco and FortiSwitch, the management VLAN should have an ip_config (static or dhcp)
+# 3. For Aruba, management-vlan is a security feature that restricts access
+# 4. Ensure the management VLAN has proper connectivity to your management network
+# 5. Test thoroughly before deploying to production switches

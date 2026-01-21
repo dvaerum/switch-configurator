@@ -1,0 +1,19 @@
+# Test 4.2: At Least One VLAN Required
+# Objective: Verify minimal valid config has at least VLAN 1
+# This should SUCCEED
+
+switches:
+  - id: minimal-test
+    hostname: cisco-c9300-24u-a
+    management_ip: "192.168.1.100"  # Not used for serial, but required field
+    model: CiscoCatalyst9300_24P_UPOE
+    credentials:
+      username: admin
+      password: admin
+      connection_type: serial
+      serial_device: /dev/serial_cisco_c9300-24u-a
+      baud_rate: 9600
+    vlans:
+      - id: 1
+        name: default
+    ports: []

@@ -1,0 +1,313 @@
+# Aruba SNMP Trap Testing Configuration Examples
+# Demonstrates comprehensive SNMP trap configuration and testing scenarios
+# Based on Aruba 2530-48G switch via serial connection
+
+# This example shows:
+# 1. Complete SNMP configuration with communities, trap receivers, and trap types
+# 2. Per-port MAC notification control (both enabled and disabled ports)
+# 3. Port ranges and individual port configurations
+# 4. VLAN configurations with DHCP
+# 5. Port mirroring setup
+
+switches:
+  - id: aruba-test-01
+    hostname: aruba-test-01
+    model: Aruba2530_48G_2SFP
+    management_ip: "192.168.1.2"
+
+    settings:
+      ssh_timeout_secs: 30
+      max_retries: 3
+      enforce_port_config: true
+
+    credentials:
+      username: admin
+      password: your-password-here
+      connection_type: serial
+      # Use udev symlinks for stable device paths
+      # Example: /dev/serial_aruba-2530-48g-2sfp+
+      serial_device: /dev/serial_aruba-2530-48g-2sfp+
+      baud_rate: 115200  # Standard for Aruba switches
+
+    vlans:
+      - id: 42
+        name: management
+        description: Management VLAN
+        ip_config: dhcp
+
+      - id: 666
+        name: trunk-vlan
+        description: Trunk VLAN for uplinks
+
+      - id: 999
+        name: guest
+        description: Guest network
+
+      - id: 1000
+        name: office
+        description: Office network
+
+      - id: 1001
+        name: lab
+        description: Lab network
+
+      - id: 1002
+        name: iot
+        description: IoT devices
+
+      - id: 1020
+        name: printers
+        description: Printer VLAN
+
+      - id: 1060
+        name: cameras
+        description: IP cameras
+
+      - id: 2088
+        name: servers
+        description: Server VLAN
+
+      - id: 2090
+        name: storage
+        description: Storage network
+
+    ports:
+      # Office ports (1-2) - 100Mbps full duplex, MAC notify enabled
+      - port_id: "1-2"
+        mode: access
+        vlan: 1000
+        enabled: true
+        description: "Office workstations"
+        speed_duplex: "100-full"
+        mac_notify: true  # Enable MAC change notifications
+
+      # Office ports (3-4) - Auto negotiation, MAC notify enabled
+      - port_id: "3-4"
+        mode: access
+        vlan: 1000
+        enabled: true
+        description: "Office workstations auto"
+        mac_notify: true
+
+      # Server ports (5-6) - Server VLAN
+      - port_id: "5-6"
+        mode: access
+        vlan: 2088
+        enabled: true
+        description: "Servers"
+
+      # Lab port
+      - port_id: "13"
+        mode: access
+        vlan: 1001
+        enabled: true
+        description: "Lab equipment"
+
+      # Printer ports (15-16) - No MAC notify
+      - port_id: "15-16"
+        mode: access
+        vlan: 1020
+        enabled: true
+        description: "Printers"
+        mac_notify: false  # Explicitly disable MAC notifications
+
+      # Camera ports (17-18) - 100Mbps full duplex, MAC notify enabled
+      - port_id: "17-18"
+        mode: access
+        vlan: 1060
+        enabled: true
+        description: "IP Cameras"
+        speed_duplex: "100-full"
+        mac_notify: true
+
+      # Additional printer port
+      - port_id: "20"
+        mode: access
+        vlan: 1020
+        enabled: true
+        description: "Network printer"
+        mac_notify: false
+
+      # Management port
+      - port_id: "21"
+        mode: access
+        vlan: 42
+        enabled: true
+        description: "Management"
+
+      # Trunk port for inter-switch connection
+      - port_id: "47"
+        mode: trunk
+        vlan: 666  # Native VLAN
+        allowed_vlans: [2088, 2090, 42]
+        enabled: true
+        description: "Trunk to core switch"
+
+      # Uplink trunk port with all VLANs
+      - port_id: "48"
+        mode: trunk
+        vlan: 42  # Native VLAN
+        allowed_vlans: [666, 999, 1000, 1001, 1002, 1020, 1060, 2088, 2090]
+        enabled: true
+        description: "Uplink trunk"
+
+    # Port mirroring configuration for traffic analysis
+    port_mirrors:
+      - session_id: 1
+        source_ports: ["1", "3", "5"]
+        destination_port: "22"  # Mirror traffic to this port for analysis
+        direction: both
+
+    # SNMP Configuration - Complete trap setup
+    snmp:
+      # Community strings with access levels
+      communities:
+        - name: "public"
+          access: unrestricted
+        - name: "monitoring"
+          access: manager
+
+      # Trap receivers (monitoring servers)
+      trap_receivers:
+        - host: "192.168.1.100"
+          community: "public"
+          version: 2
+        - host: "192.168.1.101"
+          community: "monitoring"
+          version: 2
+
+      # Enabled trap types
+      # Note: link-change is enabled by default on Aruba switches
+      enabled_traps:
+        - mac-notify    # MAC address table changes (requires per-port mac_notify: true)
+        - link-change   # Port link up/down notifications
+
+---
+
+# Additional Test Scenario: All SNMP Traps Enabled
+# This configuration enables all available SNMP trap types for comprehensive monitoring
+
+switches:
+  - id: aruba-test-all-traps
+    hostname: aruba-test-all-traps
+    model: Aruba2530_48G_2SFP
+    management_ip: "192.168.1.2"
+
+    settings:
+      ssh_timeout_secs: 30
+      max_retries: 3
+      enforce_port_config: true
+
+    credentials:
+      username: admin
+      password: your-password-here
+      connection_type: serial
+      serial_device: /dev/serial_aruba-2530-48g-2sfp+
+      baud_rate: 115200
+
+    vlans:
+      - id: 100
+        name: test-vlan
+        description: Test VLAN
+        ip_config: dhcp
+
+    ports:
+      # Test ports with MAC notification enabled
+      - port_id: "16"
+        mode: access
+        vlan: 100
+        enabled: true
+        mac_notify: true
+
+      - port_id: "18"
+        mode: access
+        vlan: 100
+        enabled: true
+        mac_notify: true
+
+      - port_id: "20"
+        mode: access
+        vlan: 100
+        enabled: true
+        mac_notify: true
+
+      # Test port with MAC notification disabled
+      - port_id: "15"
+        mode: access
+        vlan: 100
+        enabled: true
+        mac_notify: false
+
+      - port_id: "17"
+        mode: access
+        vlan: 100
+        enabled: true
+        mac_notify: false
+
+    snmp:
+      communities:
+        - name: "public"
+          access: unrestricted
+
+      trap_receivers:
+        - host: "192.168.1.100"
+          community: "public"
+
+      # All trap types enabled for comprehensive monitoring
+      enabled_traps:
+        - mac-notify
+        - link-change
+        - authentication
+        - stp
+        - all  # Enables all other trap types
+
+---
+
+# Test Scenario: MAC-Notify Only (Link-Change Disabled)
+# This configuration tests disabling link-change traps while keeping mac-notify
+
+switches:
+  - id: aruba-test-mac-only
+    hostname: aruba-test-mac-only
+    model: Aruba2530_48G_2SFP
+    management_ip: "192.168.1.2"
+
+    settings:
+      ssh_timeout_secs: 30
+      max_retries: 3
+      enforce_port_config: true
+
+    credentials:
+      username: admin
+      password: your-password-here
+      connection_type: serial
+      serial_device: /dev/serial_aruba-2530-48g-2sfp+
+      baud_rate: 115200
+
+    vlans:
+      - id: 100
+        name: test-vlan
+        description: Test VLAN
+
+    ports:
+      - port_id: "10"
+        mode: access
+        vlan: 100
+        enabled: true
+        mac_notify: true
+
+    snmp:
+      communities:
+        - name: "public"
+          access: unrestricted
+
+      trap_receivers:
+        - host: "192.168.1.100"
+          community: "public"
+
+      # Only MAC notification enabled
+      # Note: To disable link-change traps (which are enabled by default),
+      # simply don't include "link-change" in the enabled_traps list.
+      # The configurator will send the appropriate disable command.
+      enabled_traps:
+        - mac-notify

@@ -1,0 +1,51 @@
+# Test: SNMP Granular Diff Optimization for FortiSwitch
+# Purpose: Verify that running config twice doesn't reconfigure SNMP when already correct
+# Expected: First run sets SNMP, second run shows NO SNMP commands (granular diff working)
+
+switches:
+  - id: test-snmp-fortiswitch-108f
+    hostname: test-snmp-fortiswitch-108f
+    model: Fortiswitch124F_FPOE
+    management_ip: "192.168.1.103"
+
+    settings:
+      ssh_timeout_secs: 30
+      max_retries: 3
+      enforce_port_config: false
+
+    credentials:
+      username: admin
+      password: adminadmin
+      connection_type: serial
+      serial_device: /dev/serial_fortiswitch_108f-poe
+      baud_rate: 115200
+
+    vlans:
+      - id: 1
+        name: default
+
+      - id: 40
+        name: test-vlan-forti
+
+    ports:
+      - port_id: "port1"
+        mode: access
+        vlan: 40
+        enabled: true
+        poe_enabled: false
+
+    snmp:
+      communities:
+        - name: "testpublic"
+          access: operator
+
+        - name: "testprivate"
+          access: unrestricted
+
+      trap_receivers:
+        - host: "10.0.0.100"
+          community: "testpublic"
+          version: "2c"
+
+      enabled_traps:
+        - link-change

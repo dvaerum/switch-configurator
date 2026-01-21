@@ -1,0 +1,1002 @@
+use crate::config::{validate_switch_config, AppConfig, ConfigStore};
+use crate::models::{
+    Credentials, Port, PortMirror, SnmpConfig, SwitchConfig, SwitchModel, Vlan,
+};
+use crate::vendors;
+use axum::{
+    extract::{Path, Query, State},
+    http::StatusCode,
+    response::IntoResponse,
+    Json,
+};
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+use tracing::{error, info, warn};
+
+/// Request body for PUT /switches/{id}/config (create/overwrite)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetSwitchConfigRequest {
+    /// Unique identifier - optional, if provided must match URL parameter
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+
+    /// Switch hostname (required for new switches)
+    pub hostname: Option<String>,
+
+    /// Switch model (required for new switches)
+    pub model: Option<SwitchModel>,
+
+    /// Management IP address (required for new switches)
+    pub management_ip: Option<String>,
+
+    /// SSH/Serial credentials (required for new switches)
+    pub credentials: Option<Credentials>,
+
+    /// VLANs to configure
+    #[serde(default)]
+    pub vlans: Vec<Vlan>,
+
+    /// Ports to configure
+    #[serde(default)]
+    pub ports: Vec<Port>,
+
+    /// Port mirroring configurations
+    #[serde(default)]
+    pub port_mirrors: Vec<PortMirror>,
+
+    /// SNMP configuration
+    #[serde(default)]
+    pub snmp: Option<SnmpConfig>,
+
+    /// Management VLAN
+    #[serde(default)]
+    pub management_vlan: Option<u16>,
+}
+
+/// Request body for PATCH /switches/{id}/config (partial update)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PatchSwitchConfigRequest {
+    /// Unique identifier - optional, if provided must match URL parameter
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+
+    /// Optional hostname update
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hostname: Option<String>,
+
+    /// Optional model update
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<SwitchModel>,
+
+    /// Optional management IP update
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub management_ip: Option<String>,
+
+    /// Optional credentials update
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credentials: Option<Credentials>,
+
+    /// VLANs to add/update (merged by VLAN id)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vlans: Option<Vec<Vlan>>,
+
+    /// Ports to add/update (merged by port_id)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ports: Option<Vec<Port>>,
+
+    /// Port mirrors to add/update (merged by session_id)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port_mirrors: Option<Vec<PortMirror>>,
+
+    /// SNMP configuration (replaces entire SNMP config if provided)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snmp: Option<SnmpConfig>,
+
+    /// Management VLAN
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub management_vlan: Option<u16>,
+}
+
+/// Health check endpoint
+pub async fn health() -> impl IntoResponse {
+    Json(json!({
+        "status": "ok",
+        "service": "switch-configurator"
+    }))
+}
+
+/// List all configured switches
+pub async fn list_switches(State(store): State<ConfigStore>) -> impl IntoResponse {
+    let config = store.config.read().await;
+    let switches: Vec<_> = config
+        .switches
+        .iter()
+        .map(|s| {
+            json!({
+                "id": s.id,
+                "hostname": s.hostname,
+                "model": s.model,
+                "management_ip": s.management_ip,
+                "vlans": s.vlans.len(),
+                "ports": s.ports.len(),
+            })
+        })
+        .collect();
+
+    Json(json!({
+        "switches": switches,
+        "count": switches.len()
+    }))
+}
+
+/// Apply configuration to a specific switch
+///
+/// Always runs asynchronously in background and returns 202 Accepted immediately.
+/// Client should poll /api/status to check progress:
+/// - `currently_configuring` field shows which switch is being configured (null when done)
+/// - `switches[].last_result` shows the outcome after completion
+///
+/// Returns 409 Conflict if another configuration is already in progress.
+pub async fn apply_config(
+    State(store): State<ConfigStore>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let config = store.config.read().await;
+
+    let switch_config = match config
+        .switches
+        .iter()
+        .find(|s| s.id == id)
+    {
+        Some(cfg) => cfg.clone(),
+        None => {
+            // Record error
+            store.status.record_error(
+                "NotFound".to_string(),
+                format!("Switch with id '{}' not found", id),
+                Some(id.clone()),
+                "apply_config".to_string(),
+            ).await;
+
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": format!("Switch with id '{}' not found", id)})),
+            )
+                .into_response();
+        }
+    };
+
+    drop(config);
+
+    // Check if this specific switch is busy (being configured or has pending reload)
+    if store.status.is_switch_busy(&id).await {
+        let reason = if store.status.is_currently_configuring(&id).await {
+            "is already being configured"
+        } else {
+            "has a pending config reload queued"
+        };
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": format!("Switch '{}' {}", id, reason),
+                "switch_id": id
+            })),
+        )
+            .into_response();
+    }
+
+    // Spawn background task and return immediately
+    let store_clone = store.clone();
+    let id_clone = id.clone();
+    let switch_config_clone = switch_config.clone();
+
+    tokio::spawn(async move {
+        match apply_config_impl(store_clone, id_clone.clone(), switch_config_clone).await {
+            Ok(results) => {
+                info!("Apply completed for switch '{}': {} results", id_clone, results.len());
+            }
+            Err(e) => {
+                error!("Apply failed for switch '{}': {}", id_clone, e);
+            }
+        }
+    });
+
+    (
+        StatusCode::ACCEPTED,
+        Json(json!({
+            "status": "accepted",
+            "message": format!("Configuration apply started for switch '{}'", id),
+            "switch_id": id,
+            "poll_url": "/api/status",
+            "hint": "Poll /api/status and check 'currently_configuring' array. When empty or switch not in list, check switches[].last_result for the outcome."
+        })),
+    )
+        .into_response()
+}
+
+/// Internal implementation of apply_config that can be called sync or async
+async fn apply_config_impl(
+    store: ConfigStore,
+    id: String,
+    switch_config: SwitchConfig,
+) -> Result<Vec<crate::models::ConfigResult>, String> {
+    let enforce_port_config = switch_config.settings.enforce_port_config;
+
+    // Mark this switch as currently being configured
+    store.status.set_currently_configuring(id.clone()).await;
+
+    info!("Applying configuration to switch: {} ({})", id, switch_config.hostname.as_ref().unwrap_or(&id));
+
+    // Create vendor-specific implementation
+    let mut vendor = match vendors::create_vendor_with_runtime(&switch_config, &crate::config::RuntimeConfig::default(), enforce_port_config) {
+        Ok(v) => v,
+        Err(e) => {
+            error!("Failed to create vendor implementation: {}", e);
+
+            // Record error
+            store.status.record_error(
+                "VendorCreation".to_string(),
+                e.to_string(),
+                Some(id.clone()),
+                "apply_config".to_string(),
+            ).await;
+            store.status.record_apply_failure(&id, &e.to_string()).await;
+            store.status.clear_currently_configuring(&id).await;
+
+            return Err(e.to_string());
+        }
+    };
+
+    // Connect to switch
+    if let Err(e) = vendor.connect().await {
+        error!("Failed to connect to switch: {}", e);
+
+        // Record error
+        store.status.record_error(
+            "Connection".to_string(),
+            e.to_string(),
+            Some(id.clone()),
+            "apply_config".to_string(),
+        ).await;
+        store.status.record_apply_failure(&id, &format!("Connection failed: {}", e)).await;
+        store.status.clear_currently_configuring(&id).await;
+
+        return Err(format!("Connection failed: {}", e));
+    }
+
+    // Apply configuration
+    let results = match vendor.apply_configuration().await {
+        Ok(r) => r,
+        Err(e) => {
+            error!("Failed to apply configuration: {}", e);
+            let _ = vendor.disconnect().await;
+
+            // Record error
+            store.status.record_error(
+                "ApplyConfiguration".to_string(),
+                e.to_string(),
+                Some(id.clone()),
+                "apply_config".to_string(),
+            ).await;
+            store.status.record_apply_failure(&id, &e.to_string()).await;
+            store.status.clear_currently_configuring(&id).await;
+
+            return Err(format!("Configuration failed: {}", e));
+        }
+    };
+
+    // Save configuration
+    if let Err(e) = vendor.save_configuration().await {
+        error!("Failed to save configuration: {}", e);
+
+        // Record error (non-fatal)
+        store.status.record_error(
+            "SaveConfiguration".to_string(),
+            e.to_string(),
+            Some(id.clone()),
+            "apply_config".to_string(),
+        ).await;
+    }
+
+    // Disconnect
+    let _ = vendor.disconnect().await;
+
+    info!("Successfully applied configuration to {} ({})", id, switch_config.hostname.as_ref().unwrap_or(&id));
+
+    // Record success
+    store.status.record_apply_success(&id).await;
+    store.status.clear_currently_configuring(&id).await;
+
+    Ok(results)
+}
+
+/// Get running configuration from a switch
+pub async fn get_config(
+    State(store): State<ConfigStore>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let config = store.config.read().await;
+
+    let switch_config = match config
+        .switches
+        .iter()
+        .find(|s| s.id == id)
+    {
+        Some(cfg) => cfg.clone(),
+        None => {
+            // Record error
+            store.status.record_error(
+                "NotFound".to_string(),
+                format!("Switch with id '{}' not found", id),
+                Some(id.clone()),
+                "get_config".to_string(),
+            ).await;
+
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": format!("Switch with id '{}' not found", id)})),
+            )
+                .into_response();
+        }
+    };
+
+    let enforce_port_config = switch_config.settings.enforce_port_config;
+    drop(config);
+
+    // Check if this switch is busy (would conflict, especially for serial)
+    if store.status.is_switch_busy(&id).await {
+        let reason = if store.status.is_currently_configuring(&id).await {
+            "is currently being configured"
+        } else {
+            "has a pending config reload queued"
+        };
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": format!("Switch '{}' {}", id, reason),
+                "switch_id": id
+            })),
+        )
+            .into_response();
+    }
+
+    // Create vendor-specific implementation
+    let mut vendor = match vendors::create_vendor_with_runtime(&switch_config, &crate::config::RuntimeConfig::default(), enforce_port_config) {
+        Ok(v) => v,
+        Err(e) => {
+            error!("Failed to create vendor implementation: {}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": e.to_string()})),
+            )
+                .into_response();
+        }
+    };
+
+    // Connect and get config
+    if let Err(e) = vendor.connect().await {
+        error!("Failed to connect to switch: {}", e);
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("Connection failed: {}", e)})),
+        )
+            .into_response();
+    }
+
+    let running_config = match vendor.get_running_config().await {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            error!("Failed to get running config: {}", e);
+            let _ = vendor.disconnect().await;
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("Failed to retrieve config: {}", e)})),
+            )
+                .into_response();
+        }
+    };
+
+    // Parse the current state from the running config
+    let parsed_state = match vendor.parse_current_state().await {
+        Ok(state) => Some(state),
+        Err(e) => {
+            warn!("Failed to parse current state (raw config still available): {}", e);
+            None
+        }
+    };
+
+    let _ = vendor.disconnect().await;
+
+    (
+        StatusCode::OK,
+        Json(json!({
+            "id": switch_config.id,
+            "hostname": switch_config.hostname,
+            "model": switch_config.model,
+            "management_ip": switch_config.management_ip,
+            "raw_config": running_config,
+            "parsed_state": parsed_state
+        })),
+    )
+        .into_response()
+}
+
+/// Reload configuration from YAML files and apply to all switches
+///
+/// POST /config/reload
+///
+/// Re-reads YAML configuration files from disk, updates in-memory config,
+/// and applies configuration to all switches. Each switch is configured
+/// in a separate background task running in parallel.
+///
+/// Returns 202 Accepted immediately with status of which switches will be configured.
+/// Switches that are currently busy (already being configured) will be skipped.
+/// Poll /api/status to check progress.
+pub async fn reload_config(State(store): State<ConfigStore>) -> impl IntoResponse {
+    info!("Global configuration reload requested");
+
+    // Get config paths from status tracker
+    let config_paths = match store.status.get_config_paths().await {
+        Some(paths) => paths,
+        None => {
+            error!("Configuration metadata not available for reload");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "Configuration metadata not available. Service may not be fully initialized."
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    let (config_file, config_folders) = config_paths;
+
+    // Reload configuration from YAML files
+    let reload_result = if config_folders.is_empty() {
+        AppConfig::load(&config_file)
+    } else {
+        AppConfig::load_multi(&config_file, &config_folders)
+    };
+
+    let new_config = match reload_result {
+        Ok(config) => config,
+        Err(e) => {
+            error!("Failed to reload configuration from files: {}", e);
+            store.status.record_error(
+                "ConfigReload".to_string(),
+                e.to_string(),
+                None,
+                "reload_config".to_string(),
+            ).await;
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": format!("Failed to reload configuration: {}", e)
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    info!("Reloaded configuration with {} switches", new_config.switches.len());
+
+    // Update the entire in-memory config
+    {
+        let mut config = store.config.write().await;
+        *config = new_config.clone();
+    }
+
+    // Re-initialize switch statuses with updated configuration
+    store.status.initialize_switches(&new_config.switches).await;
+
+    // Track which switches we'll configure and which are busy
+    let mut switches_to_configure = Vec::new();
+    let mut switches_skipped = Vec::new();
+
+    for switch_config in &new_config.switches {
+        if store.status.is_switch_busy(&switch_config.id).await {
+            warn!("Switch '{}' is busy, skipping configuration", switch_config.id);
+            switches_skipped.push(switch_config.id.clone());
+        } else {
+            switches_to_configure.push(switch_config.clone());
+        }
+    }
+
+    // Spawn background tasks for each switch (in parallel)
+    for switch_config in switches_to_configure.iter().cloned() {
+        let store_clone = store.clone();
+        let id = switch_config.id.clone();
+
+        tokio::spawn(async move {
+            match apply_config_impl(store_clone, id.clone(), switch_config).await {
+                Ok(results) => {
+                    info!("Reload+apply completed for switch '{}': {} results", id, results.len());
+                }
+                Err(e) => {
+                    error!("Reload+apply failed for switch '{}': {}", id, e);
+                }
+            }
+        });
+    }
+
+    let configuring_ids: Vec<String> = switches_to_configure.iter().map(|s| s.id.clone()).collect();
+
+    info!(
+        "Started configuration for {} switches, skipped {} busy switches",
+        configuring_ids.len(),
+        switches_skipped.len()
+    );
+
+    (
+        StatusCode::ACCEPTED,
+        Json(json!({
+            "status": "accepted",
+            "message": format!(
+                "Configuration reload started for {} switch(es)",
+                configuring_ids.len()
+            ),
+            "switches_configuring": configuring_ids,
+            "switches_skipped": switches_skipped,
+            "poll_url": "/api/status",
+            "hint": "Poll /api/status and check 'currently_configuring' array. When empty, all switches are done. Check switches[].last_result for outcomes."
+        })),
+    )
+        .into_response()
+}
+
+/// Reload configuration from YAML files and apply to a specific switch
+///
+/// POST /switches/{id}/reload
+///
+/// This does the same as POST /config/reload but only applies to one switch.
+/// It re-reads YAML files from disk, updates in-memory config, and applies
+/// only to the specified switch.
+///
+/// Returns 202 Accepted immediately and processes in background.
+pub async fn reload_switch_config(
+    State(store): State<ConfigStore>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    info!("Switch-specific reload requested for: {}", id);
+
+    // Check if this switch is busy FIRST (before doing any I/O)
+    if store.status.is_switch_busy(&id).await {
+        let reason = if store.status.is_currently_configuring(&id).await {
+            "is already being configured"
+        } else {
+            "has a pending config reload queued"
+        };
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": format!("Switch '{}' {}", id, reason),
+                "switch_id": id
+            })),
+        )
+            .into_response();
+    }
+
+    // Get config paths from status tracker
+    let config_paths = match store.status.get_config_paths().await {
+        Some(paths) => paths,
+        None => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "Configuration metadata not available. Service may not be fully initialized."
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    let (config_file, config_folders) = config_paths;
+
+    // Reload configuration from YAML files
+    let reload_result = if config_folders.is_empty() {
+        AppConfig::load(&config_file)
+    } else {
+        AppConfig::load_multi(&config_file, &config_folders)
+    };
+
+    let new_config = match reload_result {
+        Ok(config) => config,
+        Err(e) => {
+            error!("Failed to reload configuration: {}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": format!("Failed to reload configuration: {}", e)
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    // Find the specific switch in the new config
+    let switch_config = match new_config.switches.iter().find(|s| s.id == id) {
+        Some(cfg) => cfg.clone(),
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({
+                    "error": format!("Switch with id '{}' not found in configuration files", id)
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    // Update the in-memory config for just this switch
+    {
+        let mut config = store.config.write().await;
+        if let Some(existing) = config.switches.iter_mut().find(|s| s.id == id) {
+            *existing = switch_config.clone();
+        } else {
+            // Switch is new in config files, add it
+            config.switches.push(switch_config.clone());
+        }
+    }
+
+    // Re-initialize switch status with updated configuration
+    store.status.initialize_switches(&[switch_config.clone()]).await;
+
+    // Spawn background task to apply configuration
+    let store_clone = store.clone();
+    let id_clone = id.clone();
+    let switch_config_clone = switch_config.clone();
+
+    tokio::spawn(async move {
+        match apply_config_impl(store_clone, id_clone.clone(), switch_config_clone).await {
+            Ok(results) => {
+                info!("Reload+apply completed for switch '{}': {} results", id_clone, results.len());
+            }
+            Err(e) => {
+                error!("Reload+apply failed for switch '{}': {}", id_clone, e);
+            }
+        }
+    });
+
+    (
+        StatusCode::ACCEPTED,
+        Json(json!({
+            "status": "accepted",
+            "message": format!("Configuration reload and apply started for switch '{}'", id),
+            "switch_id": id,
+            "poll_url": "/api/status",
+            "hint": "Poll /api/status and check 'currently_configuring' array. When empty or switch not in list, check switches[].last_result for the outcome."
+        })),
+    )
+        .into_response()
+}
+
+/// Get detailed service status
+pub async fn status(State(store): State<ConfigStore>) -> impl IntoResponse {
+    let service_status = store.status.get_status(store.api_port).await;
+    Json(service_status)
+}
+
+/// Set (create or overwrite) switch configuration in memory
+///
+/// PUT /switches/{id}/desired-config
+///
+/// Creates a new switch config or completely replaces an existing one.
+/// The `id` in the request body is optional. If provided, it must match the URL parameter.
+/// For new switches, hostname, model, management_ip, and credentials are required.
+pub async fn set_switch_config(
+    State(store): State<ConfigStore>,
+    Path(id): Path<String>,
+    Json(request): Json<SetSwitchConfigRequest>,
+) -> impl IntoResponse {
+    // Validate ID matches if provided in body
+    if let Some(ref body_id) = request.id {
+        if body_id != &id {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": format!(
+                        "ID mismatch: URL parameter '{}' does not match request body id '{}'",
+                        id, body_id
+                    )
+                })),
+            )
+                .into_response();
+        }
+    }
+
+    // Check if switch already exists
+    let mut config = store.config.write().await;
+    let existing_index = config.switches.iter().position(|s| s.id == id);
+
+    // For new switches, validate required fields
+    if existing_index.is_none() {
+        let mut missing = Vec::new();
+        if request.hostname.is_none() {
+            missing.push("hostname");
+        }
+        if request.model.is_none() {
+            missing.push("model");
+        }
+        if request.management_ip.is_none() {
+            missing.push("management_ip");
+        }
+        if request.credentials.is_none() {
+            missing.push("credentials");
+        }
+
+        if !missing.is_empty() {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": format!(
+                        "New switch '{}' requires fields: {}",
+                        id,
+                        missing.join(", ")
+                    )
+                })),
+            )
+                .into_response();
+        }
+    }
+
+    // Build the new switch config (use URL id, not body id)
+    let mut new_config = SwitchConfig {
+        id: id.clone(),
+        hostname: request.hostname,
+        model: request.model,
+        management_ip: request.management_ip,
+        credentials: request.credentials,
+        vlans: request.vlans,
+        ports: request.ports,
+        port_mirrors: request.port_mirrors,
+        snmp: request.snmp,
+        management_vlan: request.management_vlan,
+        validation: None,
+        vendor_specific: std::collections::HashMap::new(),
+        settings: crate::config::Settings::default(),
+    };
+
+    // Validate the configuration (expands port ranges, validates fields and VLAN references)
+    if let Err(e) = validate_switch_config(&mut new_config) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "Configuration validation failed",
+                "details": e.to_string()
+            })),
+        )
+            .into_response();
+    }
+
+    // Insert or replace
+    let is_new = existing_index.is_none();
+    if let Some(idx) = existing_index {
+        info!("Replacing switch config for '{}'", id);
+        config.switches[idx] = new_config;
+    } else {
+        info!("Creating new switch config for '{}'", id);
+        config.switches.push(new_config);
+    }
+
+    drop(config);
+
+    (
+        if is_new { StatusCode::CREATED } else { StatusCode::OK },
+        Json(json!({
+            "status": "ok",
+            "message": if is_new {
+                format!("Switch '{}' created", id)
+            } else {
+                format!("Switch '{}' config replaced", id)
+            },
+            "switch_id": id
+        })),
+    )
+        .into_response()
+}
+
+/// Patch (partial update) switch configuration in memory
+///
+/// PATCH /switches/{id}/desired-config
+///
+/// Updates specific fields of an existing switch config.
+/// The `id` in the request body is optional. If provided, it must match the URL parameter.
+/// The switch must already exist.
+///
+/// Merge behavior:
+/// - Simple fields (hostname, model, etc.): Replace if provided
+/// - vlans: Merge by VLAN id (add new, update existing)
+/// - ports: Merge by port_id (add new, update existing)
+/// - port_mirrors: Merge by session_id (add new, update existing)
+/// - snmp: Replace entire config if provided
+pub async fn patch_switch_config(
+    State(store): State<ConfigStore>,
+    Path(id): Path<String>,
+    Json(request): Json<PatchSwitchConfigRequest>,
+) -> impl IntoResponse {
+    // Validate ID matches if provided in body
+    if let Some(ref body_id) = request.id {
+        if body_id != &id {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": format!(
+                        "ID mismatch: URL parameter '{}' does not match request body id '{}'",
+                        id, body_id
+                    )
+                })),
+            )
+                .into_response();
+        }
+    }
+
+    let mut config = store.config.write().await;
+
+    // Find existing switch index
+    let switch_index = match config.switches.iter().position(|s| s.id == id) {
+        Some(idx) => idx,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({
+                    "error": format!("Switch '{}' not found. Use PUT to create new switches.", id)
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    info!("Patching switch config for '{}'", id);
+
+    // Clone original for rollback in case validation fails
+    let original_switch = config.switches[switch_index].clone();
+
+    // Apply patches to the switch
+    let switch = &mut config.switches[switch_index];
+
+    // Update simple fields if provided
+    if let Some(hostname) = request.hostname {
+        switch.hostname = Some(hostname);
+    }
+    if let Some(model) = request.model {
+        switch.model = Some(model);
+    }
+    if let Some(management_ip) = request.management_ip {
+        switch.management_ip = Some(management_ip);
+    }
+    if let Some(credentials) = request.credentials {
+        switch.credentials = Some(credentials);
+    }
+    if let Some(management_vlan) = request.management_vlan {
+        switch.management_vlan = Some(management_vlan);
+    }
+
+    // Merge VLANs by id
+    if let Some(new_vlans) = request.vlans {
+        for new_vlan in new_vlans {
+            if let Some(existing) = switch.vlans.iter_mut().find(|v| v.id == new_vlan.id) {
+                *existing = new_vlan;
+            } else {
+                switch.vlans.push(new_vlan);
+            }
+        }
+    }
+
+    // Merge ports by port_id
+    if let Some(new_ports) = request.ports {
+        for new_port in new_ports {
+            if let Some(existing) = switch.ports.iter_mut().find(|p| p.port_id == new_port.port_id)
+            {
+                *existing = new_port;
+            } else {
+                switch.ports.push(new_port);
+            }
+        }
+    }
+
+    // Merge port_mirrors by session_id
+    if let Some(new_mirrors) = request.port_mirrors {
+        for new_mirror in new_mirrors {
+            if let Some(existing) = switch
+                .port_mirrors
+                .iter_mut()
+                .find(|m| m.session_id == new_mirror.session_id)
+            {
+                *existing = new_mirror;
+            } else {
+                switch.port_mirrors.push(new_mirror);
+            }
+        }
+    }
+
+    // Replace SNMP config entirely if provided
+    if request.snmp.is_some() {
+        switch.snmp = request.snmp;
+    }
+
+    // Validate the updated configuration
+    // Note: validate_switch_config expands port ranges, validates fields and VLAN references
+    let switch = &mut config.switches[switch_index];
+    if let Err(e) = validate_switch_config(switch) {
+        // Restore original config on validation failure
+        config.switches[switch_index] = original_switch;
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "Configuration validation failed",
+                "details": e.to_string()
+            })),
+        )
+            .into_response();
+    }
+
+    drop(config);
+
+    (
+        StatusCode::OK,
+        Json(json!({
+            "status": "ok",
+            "message": format!("Switch '{}' config updated", id),
+            "switch_id": id
+        })),
+    )
+        .into_response()
+}
+
+/// Get the in-memory configuration for a specific switch (not the running config from hardware)
+///
+/// GET /switches/{id}/desired-config
+///
+/// Returns the current desired configuration stored in memory for the given switch.
+/// This is different from GET /switches/{id}/config which retrieves the actual
+/// running configuration from the switch hardware via SSH.
+pub async fn get_desired_config(
+    State(store): State<ConfigStore>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let config = store.config.read().await;
+
+    match config.switches.iter().find(|s| s.id == id) {
+        Some(switch) => (StatusCode::OK, Json(json!(switch))).into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": format!("Switch '{}' not found", id)})),
+        )
+            .into_response(),
+    }
+}
+
+/// Delete a switch configuration from memory
+///
+/// DELETE /switches/{id}/config
+///
+/// Removes the switch from in-memory configuration.
+/// Note: This does NOT affect the switch hardware or any YAML files.
+pub async fn delete_switch_config(
+    State(store): State<ConfigStore>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let mut config = store.config.write().await;
+
+    let original_len = config.switches.len();
+    config.switches.retain(|s| s.id != id);
+
+    if config.switches.len() < original_len {
+        info!("Deleted switch config for '{}'", id);
+        (
+            StatusCode::OK,
+            Json(json!({
+                "status": "ok",
+                "message": format!("Switch '{}' deleted", id)
+            })),
+        )
+            .into_response()
+    } else {
+        (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": format!("Switch '{}' not found", id)})),
+        )
+            .into_response()
+    }
+}

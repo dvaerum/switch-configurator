@@ -1,0 +1,152 @@
+# SSH Jump Host (Bastion) Configuration Examples
+# This file demonstrates how to configure switches behind jump hosts/bastion servers
+
+switches:
+  # Example 1: Single jump host with embedded username
+  - id: remote-switch-01
+    hostname: switch-behind-bastion
+    model: Aruba2930F
+    management_ip: "10.0.10.20"  # Internal IP address
+
+    credentials:
+      username: admin
+      password: switch-password
+      connection_type: ssh
+      port: 22
+
+      # Single jump host with user@host:port format
+      jump_hosts:
+        - host: "bastion-user@bastion.company.com:22"
+          ssh_key_path: "/home/user/.ssh/bastion_key"
+
+    vlans:
+      - id: 10
+        name: management
+        ip_config: dhcp
+
+    ports:
+      - port_id: "1-10"
+        mode: access
+        vlan: 10
+        enabled: true
+
+  # Example 2: Single jump host with explicit username override
+  - id: remote-switch-02
+    hostname: internal-switch
+    model: Aruba2540_24G
+    management_ip: "192.168.100.50"
+
+    credentials:
+      username: admin
+      ssh_key_path: "/path/to/switch_key"
+
+      jump_hosts:
+        - host: "embedded-user@bastion.example.com:2222"
+          username: "override-user"  # Overrides embedded-user
+          port: 3333                  # Overrides 2222
+          ssh_key_path: "/path/to/bastion_key"
+
+  # Example 3: Multi-hop jump chain with mixed authentication
+  - id: deep-switch-01
+    hostname: deeply-nested-switch
+    model: CiscoCatalyst9300_24P_UPOE
+    management_ip: "172.16.50.10"
+
+    credentials:
+      username: admin
+      password: admin-password
+
+      # Chain of jump hosts (local -> jump1 -> jump2 -> jump3 -> switch)
+      jump_hosts:
+        # First hop: Direct connection from local machine
+        - host: "jumpuser1@jump1.company.com:22"
+          ssh_key_path: "/path/to/jump1_key"
+
+        # Second hop: Through jump1
+        - host: "jumpuser2@jump2.internal.company.com:2222"
+          password: "jump2-password"
+
+        # Third hop: Through jump2
+        - host: "jump3.internal"  # Uses target username "admin" by default
+          ssh_key_path: "/path/to/jump3_key"
+          port: 22
+
+  # Example 4: Jump host with both SSH key and password (fallback)
+  - id: failover-switch-01
+    hostname: failover-switch
+    model: Aruba2530_24G_POE
+    management_ip: "10.20.30.40"
+
+    credentials:
+      username: admin
+      password: switch-pass
+
+      jump_hosts:
+        - host: "bastion.company.com"
+          username: "bastion-user"
+          ssh_key_path: "/path/to/bastion_key"  # Tried first
+          password: "bastion-password"          # Fallback if key fails
+
+  # Example 5: Simple jump host with minimal configuration
+  - id: simple-jump-01
+    hostname: simple-switch
+    model: Fortiswitch124F_FPOE
+    management_ip: "192.168.1.100"
+
+    credentials:
+      username: admin
+      password: switch-password
+
+      # Simplest form - uses target username, default port 22
+      jump_hosts:
+        - host: "bastion.example.com"
+          ssh_key_path: "/home/user/.ssh/id_rsa"
+
+  # Example 6: Multiple switches using the same jump host
+  - id: office-switch-01
+    hostname: office-sw-01
+    model: Aruba2930F
+    management_ip: "10.100.1.10"
+
+    credentials:
+      username: admin
+      password: office-password
+      jump_hosts:
+        - host: "jumpuser@office-bastion.company.com"
+          ssh_key_path: "/path/to/office_bastion_key"
+
+    vlans:
+      - id: 100
+        name: office-vlan
+
+    ports:
+      - port_id: "1-24"
+        mode: access
+        vlan: 100
+        enabled: true
+        poe_enabled: true
+
+  - id: office-switch-02
+    hostname: office-sw-02
+    model: Aruba2930F
+    management_ip: "10.100.1.20"
+
+    credentials:
+      username: admin
+      password: office-password
+
+      # Same jump host as office-switch-01
+      jump_hosts:
+        - host: "jumpuser@office-bastion.company.com"
+          ssh_key_path: "/path/to/office_bastion_key"
+
+    vlans:
+      - id: 100
+        name: office-vlan
+
+    ports:
+      - port_id: "1-24"
+        mode: access
+        vlan: 100
+        enabled: true
+        poe_enabled: true

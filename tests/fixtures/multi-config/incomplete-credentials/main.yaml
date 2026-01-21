@@ -1,0 +1,22 @@
+merge_priority: 5
+
+switches:
+  - id: cred-test-01
+    hostname: cred-test-switch
+    management_ip: 192.168.1.120
+    model: Aruba2930F
+    credentials:
+      username: admin
+      password: goodpass
+      connection_type: ssh
+    vlans:
+      - id: 10
+        name: management
+    ports:
+      - port_id: "1"
+        mode: access
+        vlan: 10
+        enabled: true
+    settings:
+      dry_run: true
+      enforce_port_config: false

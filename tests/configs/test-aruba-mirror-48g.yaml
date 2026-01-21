@@ -1,0 +1,48 @@
+switches:
+  - id: aruba-2530-48g-test
+    hostname: aruba-2530-48g-test
+    management_ip: "192.168.1.100"
+    model: Aruba2530_48G_2SFP
+    credentials:
+      connection_type: serial
+      serial_device: /dev/serial_aruba-2530-48g-2sfp+
+      baud_rate: 9600
+      username: admin
+      password: admin
+    vlans:
+      - id: 1
+        name: default
+    ports:
+      - port_id: "33"
+        mode: access
+        vlan: 1
+        enabled: true
+        name: "Source Port 33"
+      - port_id: "34"
+        mode: access
+        vlan: 1
+        enabled: true
+        name: "Source Port 34"
+      - port_id: "35"
+        mode: access
+        vlan: 1
+        enabled: true
+        name: "Source Port 35"
+      - port_id: "36"
+        mode: access
+        vlan: 1
+        enabled: true
+        name: "Source Port 36"
+      - port_id: "42"
+        mode: access
+        vlan: 1
+        enabled: true
+        name: "Destination Port"
+    port_mirrors:
+      - session_id: "1"
+        source_ports: ["33", "34", "35", "36"]
+        destination_port: "42"
+        direction: both
+    settings:
+      ssh_timeout_secs: 90
+      max_retries: 3

@@ -1,0 +1,27 @@
+# Test 5.4: Invalid Enum - Port Mode
+# Objective: Verify helpful error for invalid enum value
+# This should FAIL with error listing valid options
+
+switches:
+  - id: error-test-04
+    hostname: cisco-c9300-24u-a
+    management_ip: "192.168.1.100"  # Not used for serial, but required field
+    model: CiscoCatalyst9300_24P_UPOE
+    credentials:
+      username: admin
+      password: admin
+      connection_type: serial
+      serial_device: /dev/serial_cisco_c9300-24u-a
+      baud_rate: 9600
+    vlans:
+      - id: 1
+        name: default
+    ports:
+      - port_id: "GigabitEthernet1/0/1"
+        mode: wrong_mode  # Invalid enum - should be 'access' or 'trunk'
+        vlan: 1
+
+# Expected enhanced error:
+# Field path: switches[0].ports[0].mode
+# Error: unknown variant `wrong_mode`, expected `access` or `trunk`
+# Tip: Valid port modes are 'access' or 'trunk'.

@@ -1,0 +1,27 @@
+merge_priority: 5
+
+switches:
+  - id: sw-01
+    hostname: switch-01
+    management_ip: 192.168.1.10
+    model: Aruba2930F
+    credentials:
+      username: admin
+      password: testpass
+    vlans: []
+    ports: []
+    settings:
+      dry_run: true
+      enforce_port_config: false
+  - id: sw-02
+    hostname: switch-02
+    management_ip: 192.168.1.20
+    model: Aruba2930F
+    credentials:
+      username: admin
+      password: testpass
+    vlans: []
+    ports: []
+    settings:
+      dry_run: true
+      enforce_port_config: false

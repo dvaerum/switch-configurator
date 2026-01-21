@@ -1,0 +1,18 @@
+# Test 3.2: VLANs from Folder, Credentials from Main
+# folder/vlans.yaml - Contains VLANs
+
+merge_priority: 100
+
+switches:
+  - id: multi-test-02
+    hostname: cisco-c9300-24u-a
+    management_ip: "192.168.1.100"  # Must match main.yaml
+    model: CiscoCatalyst9300_24P_UPOE
+    vlans:
+      - id: 1
+        name: default
+      - id: 10
+        name: data
+      - id: 20
+        name: voice
+    ports: []

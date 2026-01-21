@@ -1,0 +1,80 @@
+# VLAN IP Configuration Examples
+# This example demonstrates all supported VLAN IP configuration modes
+
+switches:
+  - id: aruba-demo
+    hostname: aruba-demo
+    model: Aruba2930F
+    management_ip: "192.168.1.10"
+
+    credentials:
+      username: admin
+      password: admin
+      connection_type: ssh
+
+    vlans:
+      # Example 1: DHCP/BOOTP - Get IP address from DHCP server
+      # Use case: Management VLAN where DHCP server assigns IP
+      - id: 10
+        name: management-dhcp
+        description: Management VLAN with DHCP
+        ip_config: dhcp
+
+      # Example 2: Static IP - Manually configured IP address
+      # Use case: Gateway VLAN with fixed IP address
+      - id: 20
+        name: users-gateway
+        description: User VLAN with static gateway IP
+        ip_config:
+          address: "10.0.20.1"
+          netmask: "255.255.255.0"
+
+      # Example 3: Another static IP with different subnet
+      - id: 30
+        name: servers-gateway
+        description: Server VLAN with static gateway IP
+        ip_config:
+          address: "10.0.30.1"
+          netmask: "255.255.255.0"
+
+      # Example 4: No IP address - Pure Layer 2 VLAN
+      # Use case: VLANs that don't need Layer 3 routing on this switch
+      - id: 40
+        name: guest-wifi
+        description: Guest WiFi VLAN (no IP on switch)
+        ip_config: none
+
+      # Example 5: No IP address (implicit default)
+      # If ip_config is not specified, it defaults to 'none'
+      - id: 50
+        name: iot-devices
+        description: IoT devices VLAN
+        # ip_config not specified - defaults to 'none'
+
+      # Example 6: Static IP with /24 subnet
+      - id: 100
+        name: lab-network
+        description: Lab environment
+        ip_config:
+          address: "172.16.100.1"
+          netmask: "255.255.255.0"
+
+      # Example 7: Static IP with /16 subnet
+      - id: 200
+        name: wide-network
+        description: Large network segment
+        ip_config:
+          address: "172.20.0.1"
+          netmask: "255.255.0.0"
+
+    ports:
+      - port_id: "1"
+        mode: access
+        vlan: 10
+        enabled: true
+        poe_enabled: false
+
+# Note: Per-switch settings can be added to each switch config:
+#   settings:
+#     ssh_timeout_secs: 30
+#     max_retries: 3

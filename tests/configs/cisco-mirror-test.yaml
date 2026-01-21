@@ -1,0 +1,102 @@
+# Cisco Catalyst 9300 Port Mirroring Test
+# Tests: SPAN sessions, different directions (rx, tx, both), multiple sessions
+
+switches:
+  - id: cisco-mirror-test
+    hostname: cisco-c9300-24u-a
+    model: CiscoCatalyst9300_24P_UPOE
+    management_ip: "192.168.1.100"
+
+    settings:
+      ssh_timeout_secs: 30
+      max_retries: 3
+      enforce_port_config: false
+
+    credentials:
+      username: admin
+      password: "admin"
+      connection_type: serial
+      serial_device: /dev/serial_cisco_c9300-24u-a
+      baud_rate: 9600
+
+    vlans:
+      - id: 1
+        name: default
+        description: Default VLAN
+
+      - id: 100
+        name: monitoring
+        description: Monitoring VLAN
+
+    ports:
+      # Ports 1-4: Source ports for mirroring
+      - port_id: "Gi1/0/1"
+        mode: access
+        vlan: 1
+        description: "SPAN Source 1"
+        enabled: true
+        poe_enabled: false
+        speed_duplex: auto
+
+      - port_id: "Gi1/0/2"
+        mode: access
+        vlan: 1
+        description: "SPAN Source 2"
+        enabled: true
+        poe_enabled: false
+        speed_duplex: auto
+
+      - port_id: "Gi1/0/3"
+        mode: access
+        vlan: 1
+        description: "SPAN Source 3 (RX only)"
+        enabled: true
+        poe_enabled: false
+        speed_duplex: auto
+
+      - port_id: "Gi1/0/4"
+        mode: access
+        vlan: 1
+        description: "SPAN Source 4 (TX only)"
+        enabled: true
+        poe_enabled: false
+        speed_duplex: auto
+
+      # Ports 10-11: Destination ports for SPAN
+      - port_id: "Gi1/0/10"
+        mode: access
+        vlan: 100
+        description: "Network Analyzer 1"
+        enabled: true
+        poe_enabled: false
+        speed_duplex: 1000-full
+
+      - port_id: "Gi1/0/11"
+        mode: access
+        vlan: 100
+        description: "Network Analyzer 2"
+        enabled: true
+        poe_enabled: false
+        speed_duplex: 1000-full
+
+    port_mirrors:
+      # Session 1: Mirror ports 1-2 to port 10 (both directions)
+      - session_id: "1"
+        source_ports: ["Gi1/0/1", "Gi1/0/2"]
+        destination_port: "Gi1/0/10"
+        direction: both
+
+      # Session 2: Mirror port 3 to port 11 (RX only)
+      - session_id: "2"
+        source_ports: ["Gi1/0/3"]
+        destination_port: "Gi1/0/11"
+        direction: rx
+
+      # Session 3: Mirror port 4 to port 11 (TX only)
+      - session_id: "3"
+        source_ports: ["Gi1/0/4"]
+        destination_port: "Gi1/0/11"
+        direction: tx
+
+    validation:
+      enabled: false

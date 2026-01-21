@@ -1,0 +1,41 @@
+# Test 2.1: Port Name Removed When Not in Config
+# Objective: Verify port names are cleared when omitted from config
+#
+# SETUP REQUIRED: Before running this test, manually set port names:
+#   Serial or SSH to switch and run:
+#   configure terminal
+#   interface GigabitEthernet1/0/5
+#     description Old Server Port
+#   interface GigabitEthernet1/0/10
+#     description Old Workstation
+#   end
+#
+# Then run this config - it should REMOVE the descriptions
+
+switches:
+  - id: test-names-01
+    hostname: cisco-c9300-24u-a
+    management_ip: "192.168.1.100"  # Not used for serial, but required field
+    model: CiscoCatalyst9300_24P_UPOE
+    credentials:
+      username: admin
+      password: admin
+      connection_type: serial
+      serial_device: /dev/serial_cisco_c9300-24u-a
+      baud_rate: 9600
+    vlans:
+      - id: 1
+        name: default
+      - id: 10
+        name: data
+    ports:
+      - port_id: "GigabitEthernet1/0/5"
+        mode: access
+        vlan: 10
+        enabled: true
+        # Note: NO description field - should clear existing description
+      - port_id: "GigabitEthernet1/0/10"
+        mode: access
+        vlan: 10
+        enabled: true
+        # Note: NO description field - should clear existing description

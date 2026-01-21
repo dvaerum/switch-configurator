@@ -1,0 +1,41 @@
+# Test 2.5: Reset Ports Uses Correct Command
+# Objective: Verify reset_ports() uses "no description" on Cisco
+#
+# SETUP REQUIRED: Configure descriptions on ports 6-10:
+#   configure terminal
+#   interface GigabitEthernet1/0/6
+#     description Test Port 6
+#   interface GigabitEthernet1/0/7
+#     description Test Port 7
+#   interface GigabitEthernet1/0/8
+#     description Test Port 8
+#   interface GigabitEthernet1/0/9
+#     description Test Port 9
+#   interface GigabitEthernet1/0/10
+#     description Test Port 10
+#   end
+#
+# This config only defines ports 1-5, so ports 6-10 should be reset
+# Use --debug mode to verify "no description" is used
+
+switches:
+  - id: test-reset-01
+    hostname: cisco-c9300-24u-a
+    management_ip: "192.168.1.100"  # Not used for serial, but required field
+    model: CiscoCatalyst9300_24P_UPOE
+    credentials:
+      username: admin
+      password: admin
+      connection_type: serial
+      serial_device: /dev/serial_cisco_c9300-24u-a
+      baud_rate: 9600
+    vlans:
+      - id: 1
+        name: default
+    ports:
+      - port_id: "GigabitEthernet1/0/1-5"
+        mode: access
+        vlan: 1
+        enabled: true
+    settings:
+      enforce_port_config: true  # This enables resetting unconfigured ports

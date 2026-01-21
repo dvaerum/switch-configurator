@@ -1,0 +1,17 @@
+merge_priority: 100
+
+switches:
+  - id: test-sw-01
+    hostname: test-switch-01
+    management_ip: 192.168.1.10
+    model: Aruba2930F
+    credentials:
+      username: admin
+      password: testpass
+    vlans: []
+    ports: []
+    port_mirrors:
+      - session_id: "1"
+        source_ports: ["1", "2"]
+        destination_port: "24"
+        direction: both

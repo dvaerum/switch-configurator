@@ -1,0 +1,107 @@
+# Example configuration with validation tests
+# This demonstrates the configuration validation feature
+
+switches:
+  - id: aruba-switch-01
+    hostname: aruba-switch-01
+    model: Aruba2930F
+    management_ip: "192.168.1.10"
+    credentials:
+      username: admin
+      password: admin
+      connection_type: ssh
+      port: 22
+
+    vlans:
+      - id: 10
+        name: management
+        ip_config: dhcp
+
+      - id: 20
+        name: servers
+        ip_config:
+          address: "192.168.20.1"
+          netmask: "255.255.255.0"
+
+      - id: 30
+        name: cameras
+        ip_config: none
+
+    ports:
+      - port_id: "1-5"
+        mode: access
+        vlan: 10
+        enabled: true
+        poe_enabled: true
+        description: "Management devices"
+
+      - port_id: "10-15"
+        mode: access
+        vlan: 30
+        enabled: true
+        poe_enabled: true
+        description: "IP Cameras"
+
+      - port_id: "24"
+        mode: trunk
+        vlan: 10
+        allowed_vlans: [10, 20, 30]
+        enabled: true
+        description: "Uplink"
+
+    # Validation configuration
+    validation:
+      enabled: true
+      timeout: 60s
+      on_failure: rollback  # Options: rollback, save_anyway, manual
+      rollback_method: restore_backup  # Options: reload, restore_backup, revert_commands
+
+      tests:
+        # Test 1: Basic connectivity - can we still execute commands?
+        - type: command_execution
+          command: "show version"
+          timeout: 10s
+          required: true
+
+        # Test 2: Ping the management IP from the host
+        - type: ping_management_ip
+          count: 3
+          timeout: 10s
+          required: true
+
+        # Test 3: Verify SSH and HTTPS ports are accessible
+        - type: tcp_port_check
+          ports: [22, 443]
+          timeout: 10s
+          required: true
+
+        # Test 4: Verify switch can reach its gateway
+        - type: gateway_reachable
+          target: "192.168.1.1"
+          source_vlan: 10
+          timeout: 10s
+          required: true
+
+        # Test 5: Verify critical camera is reachable
+        - type: device_reachable
+          device_ip: "192.168.30.100"
+          device_name: "Main Entrance Camera"
+          count: 3
+          timeout: 10s
+          required: false  # Warning only, don't fail if camera is offline
+
+        # Test 6: Verify critical ports are up
+        - type: port_status
+          critical_ports: ["1", "24"]
+          timeout: 10s
+          required: true
+
+        # Test 7: Verify VLAN configuration is correct
+        - type: vlan_membership
+          timeout: 10s
+          required: true
+
+# Note: Per-switch settings can be added to each switch config:
+#   settings:
+#     ssh_timeout_secs: 30
+#     max_retries: 3

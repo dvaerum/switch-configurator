@@ -1,0 +1,12 @@
+switches:
+  - id: test-sw-01
+    hostname: test-switch-01
+    # Missing management_ip - should fail
+    model: Aruba2930F
+    credentials:
+      username: admin
+      password: testpass
+    vlans:
+      - id: 1
+        name: default
+    ports: []

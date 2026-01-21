@@ -1,0 +1,125 @@
+# Port Mirroring (SPAN) Configuration Examples
+# This example demonstrates port mirroring for network monitoring and troubleshooting
+
+switches:
+  - id: aruba-monitoring
+    hostname: aruba-monitoring
+    model: Aruba2930F
+    management_ip: "192.168.1.10"
+
+    credentials:
+      username: admin
+      password: admin
+      connection_type: ssh
+
+    vlans:
+      - id: 10
+        name: management
+        ip_config: dhcp
+
+      - id: 20
+        name: users
+        ip_config:
+          address: "10.0.20.1"
+          netmask: "255.255.255.0"
+
+    ports:
+      # Regular access ports
+      - port_id: "1"
+        mode: access
+        vlan: 20
+        description: User workstation 1
+        enabled: true
+        poe_enabled: true
+
+      - port_id: "2"
+        mode: access
+        vlan: 20
+        description: User workstation 2
+        enabled: true
+        poe_enabled: true
+
+      - port_id: "5"
+        mode: access
+        vlan: 20
+        description: Server to monitor
+        enabled: true
+        poe_enabled: false
+
+      - port_id: "10"
+        mode: access
+        vlan: 20
+        description: Another monitored port
+        enabled: true
+        poe_enabled: false
+
+      # Monitoring/analyzer ports (destinations)
+      - port_id: "22"
+        mode: access
+        vlan: 10
+        description: Network analyzer 1
+        enabled: true
+        poe_enabled: false
+
+      - port_id: "23"
+        mode: access
+        vlan: 10
+        description: Network analyzer 2
+        enabled: true
+        poe_enabled: false
+
+      # Uplink
+      - port_id: "24"
+        mode: trunk
+        vlan: 10
+        allowed_vlans: [10, 20]
+        description: Uplink
+        enabled: true
+        poe_enabled: false
+
+    port_mirrors:
+      # Example 1: Single source port to single destination
+      # Use case: Monitor a specific server
+      - session_id: "1"
+        source_ports: ["5"]
+        destination_port: "22"
+        direction: both  # Mirror both incoming and outgoing traffic
+
+      # Example 2: Multiple source ports to single destination
+      # Use case: Monitor multiple user workstations
+      # Note: Aruba switches typically support only one mirror session
+      # If you need multiple sessions, you may need to combine source ports
+      # - session_id: "2"
+      #   source_ports: ["1", "2", "10"]
+      #   destination_port: "23"
+      #   direction: both
+
+      # Direction options:
+      # - both: Mirror both ingress (rx) and egress (tx) traffic
+      # - rx: Mirror only incoming traffic
+      # - tx: Mirror only outgoing traffic
+
+# Note: Per-switch settings can be added to each switch config:
+#   settings:
+#     ssh_timeout_secs: 30
+#     max_retries: 3
+
+# Common port mirroring use cases:
+#
+# 1. Network Troubleshooting:
+#    Mirror a problematic port to analyze traffic with Wireshark
+#
+# 2. Security Monitoring:
+#    Mirror traffic to an IDS/IPS for security analysis
+#
+# 3. Network Performance Analysis:
+#    Monitor high-traffic ports to identify bottlenecks
+#
+# 4. Compliance:
+#    Mirror traffic for regulatory compliance monitoring
+#
+# Important notes:
+# - Aruba switches typically support one mirror session at a time
+# - The destination port should be connected to a network analyzer or monitoring tool
+# - Mirrored traffic may impact switch performance if source ports have high traffic
+# - The destination port will receive a copy of all traffic from source ports

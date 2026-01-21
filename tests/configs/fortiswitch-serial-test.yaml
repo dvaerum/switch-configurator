@@ -1,0 +1,37 @@
+switches:
+  - id: fortiswitch-test-01
+    hostname: fortiswitch-108f
+    model: Fortiswitch124F_FPOE
+    management_ip: "192.168.1.100"  # Not used for serial, but required field
+
+    settings:
+      ssh_timeout_secs: 30
+      max_retries: 3
+      enforce_port_config: false
+
+    credentials:
+      username: admin
+      password: "adminadmin"  # FortiSwitch password
+      connection_type: serial
+      serial_device: /dev/serial_fortiswitch_108f-poe
+      baud_rate: 115200
+
+    vlans:
+      - id: 1
+        name: default
+
+      - id: 10
+        name: management
+
+    ports:
+      - port_id: "1"
+        mode: access
+        vlan: 10
+        description: "Test Port 1"
+        enabled: true
+        poe_enabled: false
+
+    port_mirrors: []
+    snmp: {}
+    validation:
+      enabled: false

@@ -1,0 +1,28 @@
+# Simple config to query switch state and verify per-port MAC notify
+switches:
+  - id: test-aruba-2930f
+    hostname: test-aruba-2930f
+    model: Aruba2930F
+    management_ip: "192.168.1.2"
+
+    credentials:
+      username: admin
+      password: admin
+      connection_type: serial
+      serial_device: /dev/serial_aruba-2930F
+      baud_rate: 9600
+
+    vlans:
+      - id: 1000
+        name: test-vlan
+
+    ports:
+      - port_id: "1"
+        mode: access
+        vlan: 1000
+        enabled: true
+
+    settings:
+      ssh_timeout_secs: 30
+      max_retries: 3
+      enforce_port_config: false

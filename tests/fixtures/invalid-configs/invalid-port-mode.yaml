@@ -1,0 +1,17 @@
+switches:
+  - id: test-sw-01
+    hostname: test-switch-01
+    management_ip: 192.168.1.10
+    model: Aruba2930F
+    credentials:
+      username: admin
+      password: testpass
+    vlans:
+      - id: 1
+        name: default
+      - id: 10
+        name: data
+    ports:
+      - port_id: "1"
+        mode: wrong_mode  # Invalid enum value
+        vlan: 10

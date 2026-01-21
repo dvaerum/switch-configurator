@@ -1,0 +1,26 @@
+# Test 2.2: Port Name Changed from Old to New
+# Objective: Verify port names are updated when changed
+# Run after test 2.1 setup (where port has "Old Server Port")
+
+switches:
+  - id: test-names-01
+    hostname: cisco-c9300-24u-a
+    management_ip: "192.168.1.100"  # Not used for serial, but required field
+    model: CiscoCatalyst9300_24P_UPOE
+    credentials:
+      username: admin
+      password: admin
+      connection_type: serial
+      serial_device: /dev/serial_cisco_c9300-24u-a
+      baud_rate: 9600
+    vlans:
+      - id: 1
+        name: default
+      - id: 10
+        name: data
+    ports:
+      - port_id: "GigabitEthernet1/0/5"
+        description: "New Server Port"  # Changed from "Old Server Port"
+        mode: access
+        vlan: 10
+        enabled: true

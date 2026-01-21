@@ -1,0 +1,41 @@
+# Test 5.6: Line Number Accuracy
+# Objective: Verify error messages show EXACT line numbers
+# This file has an error on a SPECIFIC line to test accuracy
+
+switches:
+  - id: error-test-06
+    hostname: cisco-c9300-24u-a
+    management_ip: "192.168.1.100"  # Not used for serial, but required field
+    model: CiscoCatalyst9300_24P_UPOE
+    credentials:
+      username: admin
+      password: admin
+      connection_type: serial
+      serial_device: /dev/serial_cisco_c9300-24u-a
+      baud_rate: 9600
+    vlans:
+      - id: 1
+        name: default
+      - id: 10
+        name: production
+      - id: 20
+        name: guest
+      - id: 30
+        name: iot
+    ports:
+      - port_id: "GigabitEthernet1/0/1"
+        mode: access
+        vlan: 1
+      - port_id: "GigabitEthernet1/0/2"
+        mode: access
+        vlan: 10
+      - port_id: "GigabitEthernet1/0/3"
+        mode: invalid_mode_for_testing  # ERROR ON THIS LINE (line 31)
+        vlan: 20
+
+# Expected error:
+# Field path: switches[0].ports[2].mode
+# Error: unknown variant `invalid_mode_for_testing`, expected `access` or `trunk` at line 31
+# Tip: Valid port modes are 'access' or 'trunk'.
+#
+# Purpose: Verify that line 31 is EXACTLY reported, not off by ±1 or ±2

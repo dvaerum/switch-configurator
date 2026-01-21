@@ -1,0 +1,13 @@
+# Test 5.2: Missing credentials Error
+# Objective: Verify helpful error for missing credentials
+# This should FAIL at parse time with enhanced error message
+
+switches:
+  - id: error-test-02
+    hostname: cisco-c9300-24u-a
+    management_ip: "192.168.1.100"  # Not used for serial, but required field
+    model: CiscoCatalyst9300_24P_UPOE
+    # credentials MISSING - should show helpful error with examples
+    vlans:
+      - id: 1
+        name: default

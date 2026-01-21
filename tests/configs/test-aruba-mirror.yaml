@@ -1,0 +1,48 @@
+switches:
+  - id: aruba-2530-8g-test
+    hostname: aruba-2530-8g-test
+    management_ip: "192.168.1.100"
+    model: Aruba2530_8G_POE
+    credentials:
+      connection_type: serial
+      serial_device: /dev/serial_aruba-2530-8g-poe+
+      baud_rate: 9600
+      username: admin
+      password: admin
+    vlans:
+      - id: 1
+        name: default
+    ports:
+      - port_id: "1"
+        mode: access
+        vlan: 1
+        enabled: true
+        name: "Source Port 1"
+      - port_id: "2"
+        mode: access
+        vlan: 1
+        enabled: true
+        name: "Source Port 2"
+      - port_id: "3"
+        mode: access
+        vlan: 1
+        enabled: true
+        name: "Source Port 3"
+      - port_id: "4"
+        mode: access
+        vlan: 1
+        enabled: true
+        name: "Source Port 4"
+      - port_id: "8"
+        mode: access
+        vlan: 1
+        enabled: true
+        name: "Destination Port"
+    port_mirrors:
+      - session_id: "1"
+        source_ports: ["1", "2", "3", "4"]
+        destination_port: "8"
+        direction: both
+    settings:
+      ssh_timeout_secs: 60
+      max_retries: 3

@@ -1,0 +1,22 @@
+switches:
+  - id: test-sw-01
+    hostname: test-switch-01
+    management_ip: 192.168.1.10
+    model: Aruba2930F
+    credentials:
+      username: admin
+      password: testpass
+    vlans:
+      - id: 10
+        name: management
+      - id: 100
+        name: users
+    ports:
+      - port_id: "1"
+        mode: access
+        vlan: 10
+        enabled: true
+      - port_id: "2-5"
+        mode: access
+        vlan: 100
+        enabled: true

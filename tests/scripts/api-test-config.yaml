@@ -1,0 +1,21 @@
+# Minimal config for API testing
+# This config is used by the manual API test script
+
+switches:
+  - id: existing-sw-01
+    hostname: existing-switch-1
+    model: Aruba2930F
+    management_ip: 192.168.1.1
+    credentials:
+      username: admin
+      password: testpassword
+    vlans:
+      - id: 1
+        name: default
+      - id: 10
+        name: management
+    ports:
+      - port_id: "1"
+        mode: access
+        vlan: 10
+        enabled: true

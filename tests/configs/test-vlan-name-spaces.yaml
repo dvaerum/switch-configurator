@@ -1,0 +1,22 @@
+# Test config for VLAN name with spaces
+switches:
+  - id: test-aruba-2930f
+    hostname: test-aruba-2930f
+    model: Aruba2930F
+    management_ip: "192.168.1.99"
+
+    credentials:
+      username: admin
+      password: admin
+      connection_type: serial
+      serial_device: /dev/serial_aruba-2930F
+      baud_rate: 115200
+
+    vlans:
+      - id: 999
+        name: "Test VLAN with spaces"
+        description: "Testing quoted names"
+        ip_config: none
+
+    ports: []
+    port_mirrors: []

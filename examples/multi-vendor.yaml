@@ -1,0 +1,142 @@
+# Multi-Vendor Switch Configuration
+# This example demonstrates managing switches from different vendors in a single configuration
+
+switches:
+  # Aruba Core Switch
+  - id: aruba-core-01
+    hostname: aruba-core-01
+    model: Aruba2930F
+    management_ip: "192.168.1.10"
+
+    credentials:
+      username: admin
+      password: admin
+      connection_type: ssh
+
+    vlans:
+      - id: 10
+        name: management
+        ip_config:
+          address: "10.0.10.1"
+          netmask: "255.255.255.0"
+
+      - id: 20
+        name: users
+        ip_config:
+          address: "10.0.20.1"
+          netmask: "255.255.255.0"
+
+      - id: 30
+        name: servers
+        ip_config:
+          address: "10.0.30.1"
+          netmask: "255.255.255.0"
+
+    ports:
+      - port_id: "23"
+        mode: trunk
+        vlan: 10
+        allowed_vlans: [10, 20, 30]
+        description: Uplink to Cisco core
+        enabled: true
+        poe_enabled: false
+
+      - port_id: "24"
+        mode: trunk
+        vlan: 10
+        allowed_vlans: [10, 20, 30]
+        description: Uplink to FortiSwitch
+        enabled: true
+        poe_enabled: false
+
+  # Cisco Access Switch
+  - id: cisco-access-01
+    hostname: cisco-access-01
+    model: CiscoCatalyst9300_24P_UPOE
+    management_ip: "192.168.1.30"
+
+    credentials:
+      username: admin
+      password: cisco123
+      connection_type: ssh
+
+    vlans:
+      - id: 10
+        name: management
+        ip_config: dhcp
+
+      - id: 20
+        name: users
+        ip_config: none
+
+      - id: 30
+        name: servers
+        ip_config: none
+
+    ports:
+      # Access ports for users
+      - port_id: "GigabitEthernet1/0/1"
+        mode: access
+        vlan: 20
+        description: User workstation
+        enabled: true
+        poe_enabled: true
+
+      # Trunk uplink
+      - port_id: "TenGigabitEthernet1/1/1"
+        mode: trunk
+        vlan: 10
+        allowed_vlans: [10, 20, 30]
+        description: Uplink to Aruba core
+        enabled: true
+        poe_enabled: false
+
+  # FortiSwitch Edge Switch
+  - id: fortiswitch-edge-01
+    hostname: fortiswitch-edge-01
+    model: Fortiswitch124F_FPOE
+    management_ip: "192.168.1.40"
+
+    credentials:
+      username: admin
+      password: fortinet
+      connection_type: ssh
+
+    vlans:
+      - id: 10
+        name: management
+        ip_config: dhcp
+
+      - id: 20
+        name: users
+        ip_config: none
+
+    ports:
+      # Access ports
+      - port_id: "port1"
+        mode: access
+        vlan: 20
+        description: User device
+        enabled: true
+        poe_enabled: true
+
+      - port_id: "port2"
+        mode: access
+        vlan: 20
+        description: User device
+        enabled: true
+        poe_enabled: true
+
+      # Uplink to core
+      - port_id: "port24"
+        mode: trunk
+        vlan: 10
+        allowed_vlans: [10, 20]
+        description: Uplink to Aruba core
+        enabled: true
+        poe_enabled: false
+
+# Note: Per-switch settings can be added to each switch config:
+#   settings:
+#     ssh_timeout_secs: 30
+#     max_retries: 3

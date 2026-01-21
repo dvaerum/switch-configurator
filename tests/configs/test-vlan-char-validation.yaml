@@ -1,0 +1,23 @@
+# Test config for VLAN name character validation
+# Testing which characters are actually valid on Aruba switches
+switches:
+  - id: test-aruba-2530-8g
+    hostname: test-aruba-2530-8g
+    model: Aruba2530_8G_POE
+    management_ip: "192.168.1.99"
+
+    credentials:
+      username: admin
+      password: admin
+      connection_type: serial
+      serial_device: /dev/serial_aruba-2530-8g-poe+
+      baud_rate: 115200
+
+    vlans:
+      # Test ` character (backtick)
+      - id: 900
+        name: "Test`VLAN"
+        ip_config: none
+
+    ports: []
+    port_mirrors: []

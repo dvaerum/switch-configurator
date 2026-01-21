@@ -1,0 +1,48 @@
+# Test 2.4: Multiple Ports Mixed Name Operations
+# Objective: Verify complex scenario with add/remove/update
+#
+# SETUP REQUIRED: Manually configure descriptions:
+#   configure terminal
+#   interface GigabitEthernet1/0/1
+#     description Port 1 Old
+#   interface GigabitEthernet1/0/2
+#     description Port 2 Old
+#   interface GigabitEthernet1/0/3
+#     description Port 3 Old
+#   end
+#
+# Expected behavior:
+#   Port 1: UPDATE description to "Port 1 New"
+#   Port 2: REMOVE description (no description field)
+#   Port 3: KEEP description "Port 3 Old" (unchanged)
+
+switches:
+  - id: test-mixed-01
+    hostname: cisco-c9300-24u-a
+    management_ip: "192.168.1.100"  # Not used for serial, but required field
+    model: CiscoCatalyst9300_24P_UPOE
+    credentials:
+      username: admin
+      password: admin
+      connection_type: serial
+      serial_device: /dev/serial_cisco_c9300-24u-a
+      baud_rate: 9600
+    vlans:
+      - id: 1
+        name: default
+    ports:
+      - port_id: "GigabitEthernet1/0/1"
+        description: "Port 1 New"  # UPDATE
+        mode: access
+        vlan: 1
+        enabled: true
+      - port_id: "GigabitEthernet1/0/2"
+        # NO description - REMOVE
+        mode: access
+        vlan: 1
+        enabled: true
+      - port_id: "GigabitEthernet1/0/3"
+        description: "Port 3 Old"  # KEEP (unchanged)
+        mode: access
+        vlan: 1
+        enabled: true

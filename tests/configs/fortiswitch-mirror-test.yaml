@@ -1,0 +1,104 @@
+# FortiSwitch Port Mirroring Test
+# Tests: Multiple mirror sessions, different directions (rx, tx, both)
+
+switches:
+  - id: fortiswitch-mirror-test
+    hostname: fortiswitch-108f
+    model: Fortiswitch124F_FPOE
+    management_ip: "192.168.1.100"
+
+    settings:
+      ssh_timeout_secs: 30
+      max_retries: 3
+      enforce_port_config: false
+
+    credentials:
+      username: admin
+      password: "adminadmin"
+      connection_type: serial
+      serial_device: /dev/serial_fortiswitch_108f-poe
+      baud_rate: 115200
+
+    vlans:
+      - id: 1
+        name: default
+        description: Default VLAN
+        ip_config: none
+
+      - id: 100
+        name: monitoring
+        description: Monitoring VLAN
+        ip_config: none
+
+    ports:
+      # Ports 1-4: Source ports for mirroring
+      - port_id: "1"
+        mode: access
+        vlan: 1
+        description: "Mirror Source 1"
+        enabled: true
+        poe_enabled: false
+        speed_duplex: auto
+
+      - port_id: "2"
+        mode: access
+        vlan: 1
+        description: "Mirror Source 2"
+        enabled: true
+        poe_enabled: false
+        speed_duplex: auto
+
+      - port_id: "3"
+        mode: access
+        vlan: 1
+        description: "Mirror Source 3 (RX only)"
+        enabled: true
+        poe_enabled: false
+        speed_duplex: auto
+
+      - port_id: "4"
+        mode: access
+        vlan: 1
+        description: "Mirror Source 4 (TX only)"
+        enabled: true
+        poe_enabled: false
+        speed_duplex: auto
+
+      # Ports 5-6: Destination ports for mirroring
+      - port_id: "5"
+        mode: access
+        vlan: 100
+        description: "Network Analyzer 1"
+        enabled: true
+        poe_enabled: false
+        speed_duplex: 1000-full
+
+      - port_id: "6"
+        mode: access
+        vlan: 100
+        description: "Network Analyzer 2"
+        enabled: true
+        poe_enabled: false
+        speed_duplex: 1000-full
+
+    port_mirrors:
+      # Session 1: Mirror ports 1-2 to port 5 (both directions)
+      - session_id: "1"
+        source_ports: ["1", "2"]
+        destination_port: "5"
+        direction: both
+
+      # Session 2: Mirror port 3 to port 6 (RX only)
+      - session_id: "2"
+        source_ports: ["3"]
+        destination_port: "6"
+        direction: rx
+
+      # Session 3: Mirror port 4 to port 6 (TX only)
+      - session_id: "3"
+        source_ports: ["4"]
+        destination_port: "6"
+        direction: tx
+
+    validation:
+      enabled: false

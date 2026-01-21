@@ -1,0 +1,21 @@
+# Test 4.1: Empty VLANs After Merge Fails
+# Objective: Verify validation catches switches with no VLANs
+# This should FAIL with a clear error message
+
+switches:
+  - id: empty-vlan-test
+    hostname: cisco-c9300-24u-a
+    management_ip: "192.168.1.100"  # Not used for serial, but required field
+    model: CiscoCatalyst9300_24P_UPOE
+    credentials:
+      username: admin
+      password: admin
+      connection_type: serial
+      serial_device: /dev/serial_cisco_c9300-24u-a
+      baud_rate: 9600
+    vlans: []  # Empty - should FAIL validation
+    ports:
+      - port_id: "GigabitEthernet1/0/1"
+        mode: access
+        vlan: 1
+        enabled: true

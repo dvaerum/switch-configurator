@@ -1,0 +1,50 @@
+# Test: SNMP Granular Diff Optimization for Cisco
+# Purpose: Verify that running config twice doesn't reconfigure SNMP when already correct
+# Expected: First run sets SNMP, second run shows NO SNMP commands (granular diff working)
+
+switches:
+  - id: test-snmp-cisco-c9300
+    hostname: test-snmp-cisco-c9300
+    model: CiscoCatalyst9300_24P_UPOE
+    management_ip: "192.168.1.102"
+
+    settings:
+      ssh_timeout_secs: 60
+      max_retries: 3
+      enforce_port_config: false
+
+    credentials:
+      username: admin
+      password: admin
+      connection_type: serial
+      serial_device: /dev/serial_cisco_c9300-24u-a
+      baud_rate: 9600
+
+    vlans:
+      - id: 1
+        name: default
+
+      - id: 30
+        name: test-vlan-cisco
+
+    ports:
+      - port_id: "Gi1/0/1"
+        mode: access
+        vlan: 30
+        enabled: true
+
+    snmp:
+      communities:
+        - name: "testpublic"
+          access: operator
+
+        - name: "testprivate"
+          access: unrestricted
+
+      trap_receivers:
+        - host: "10.0.0.100"
+          community: "testpublic"
+          version: "2c"
+
+      enabled_traps:
+        - link-change

@@ -1,0 +1,1054 @@
+use anyhow::{Context, Result};
+use std::io::{self, Write as StdWrite};
+use std::time::Duration;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio_serial::SerialPortBuilderExt;
+use tracing::{debug, info, trace, warn};
+
+#[cfg(unix)]
+use std::os::unix::io::AsRawFd;
+
+pub struct SerialClient {
+    port: Option<tokio_serial::SerialStream>,
+    device: String,
+    baud_rate: u32,
+    debug_mode: bool,
+    dry_run: bool,
+}
+
+impl SerialClient {
+    pub fn new(device: String, baud_rate: u32) -> Self {
+        Self {
+            port: None,
+            device,
+            baud_rate,
+            debug_mode: false,
+            dry_run: false,
+        }
+    }
+
+    /// Enable debug mode (prompts before each command)
+    pub fn with_debug_mode(mut self, enabled: bool) -> Self {
+        self.debug_mode = enabled;
+        self
+    }
+
+    /// Enable dry-run mode (shows commands without executing)
+    pub fn with_dry_run(mut self, enabled: bool) -> Self {
+        self.dry_run = enabled;
+        self
+    }
+
+    /// Connect to the serial device
+    pub async fn connect(&mut self) -> Result<()> {
+        debug!("Opening serial device: {} at {} baud", self.device, self.baud_rate);
+
+        // Check if device exists before attempting to open
+        let device_path = std::path::Path::new(&self.device);
+        if !device_path.exists() {
+            let available_devices = self.list_available_serial_devices();
+            anyhow::bail!(
+                "Serial device does not exist: {}\n\
+                 \n\
+                 Possible causes:\n\
+                 - Device not connected to the system\n\
+                 - Incorrect device path in configuration\n\
+                 - Device not recognized by the operating system\n\
+                 \n\
+                 Available serial devices:\n\
+                 {}",
+                self.device,
+                if available_devices.is_empty() {
+                    "  <none found>".to_string()
+                } else {
+                    available_devices.iter().map(|d| format!("  - {}", d)).collect::<Vec<_>>().join("\n")
+                }
+            );
+        }
+
+        // Check if device is already locked by another process
+        self.check_device_lock()?;
+
+        let port = tokio_serial::new(&self.device, self.baud_rate)
+            .timeout(Duration::from_secs(10))
+            .open_native_async()
+            .with_context(|| {
+                format!(
+                    "Failed to open serial device: {}. \
+                     This may be a permissions issue. \
+                     Try running with sudo or add your user to the 'dialout' group (Linux) or 'uucp' group (BSD).",
+                    self.device
+                )
+            })?;
+
+        self.port = Some(port);
+        debug!("Serial connection established to {}", self.device);
+
+        // Give the device a moment to stabilize
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        // Clear any initial data
+        self.clear_buffer().await?;
+
+        Ok(())
+    }
+
+    /// List available serial devices on the system
+    fn list_available_serial_devices(&self) -> Vec<String> {
+        let mut devices = Vec::new();
+
+        // Check common serial device paths on Linux/Unix
+        let search_paths = vec![
+            "/dev/ttyUSB",  // USB serial adapters
+            "/dev/ttyACM",  // ACM devices (Arduino, etc.)
+            "/dev/ttyS",    // Built-in serial ports
+            "/dev/cu.",     // macOS serial devices
+            "/dev/serial/by-id/",  // Linux by-id symlinks
+        ];
+
+        for base_path in search_paths {
+            if base_path.ends_with('/') {
+                // It's a directory, list its contents
+                if let Ok(entries) = std::fs::read_dir(base_path) {
+                    for entry in entries.flatten() {
+                        if let Ok(path) = entry.path().canonicalize() {
+                            if let Some(path_str) = path.to_str() {
+                                devices.push(path_str.to_string());
+                            }
+                        }
+                    }
+                }
+            } else {
+                // It's a prefix pattern, glob for matches
+                for i in 0..10 {
+                    let device = format!("{}{}", base_path, i);
+                    if std::path::Path::new(&device).exists() {
+                        devices.push(device);
+                    }
+                }
+            }
+        }
+
+        devices.sort();
+        devices.dedup();
+        devices
+    }
+
+    /// Clear the input buffer
+    async fn clear_buffer(&mut self) -> Result<()> {
+        if let Some(port) = &mut self.port {
+            let mut temp_buf = [0u8; 1024];
+            tokio::select! {
+                _ = port.read(&mut temp_buf) => {},
+                _ = tokio::time::sleep(Duration::from_millis(100)) => {},
+            }
+        }
+        Ok(())
+    }
+
+    /// Send login credentials
+    pub async fn login(&mut self, username: &str, password: &str) -> Result<()> {
+        info!("Logging in as user: {}", username);
+
+        if self.dry_run {
+            info!("   🔍 [DRY-RUN] Would login (skipped)");
+            return Ok(());
+        }
+
+        // Send a carriage return to see what state we're in
+        self.send_raw("\r").await?;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        // Try to determine current state
+        let mut state_check = self.check_current_state(Duration::from_secs(2)).await?;
+
+        debug!("Current state check: {}", state_check);
+
+        // Check for Cisco initial configuration dialog prompt
+        if state_check.contains("initial configuration dialog") {
+            debug!("Cisco initial configuration dialog detected, declining...");
+            self.send_raw("no\r").await?;
+            tokio::time::sleep(Duration::from_millis(500)).await;
+
+            // Wait for the next prompt (usually a login or command prompt)
+            state_check = self.check_current_state(Duration::from_secs(2)).await?;
+            debug!("State after declining initial config: {}", state_check);
+        }
+
+        if state_check.contains("login:") || state_check.contains("Username:") {
+            // Need to login
+            debug!("Login prompt detected, logging in...");
+
+            // Send username
+            self.send_raw(&format!("{}\r", username)).await?;
+            tokio::time::sleep(Duration::from_millis(500)).await;
+
+            // Send password (password prompt should appear)
+            self.send_raw(&format!("{}\r", password)).await?;
+
+            // Wait for command prompt after login
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        } else if state_check.contains('#') || state_check.contains('>') {
+            // Already at a prompt
+            debug!("Already at command prompt, skipping login");
+        } else {
+            // Unknown state - this can happen on Aruba switches when the previous user logged out
+            // Try pressing enter again (sometimes twice is needed for Aruba)
+            debug!("Unknown state, sending enter and waiting... (attempt 1)");
+            self.send_raw("\r").await?;
+            tokio::time::sleep(Duration::from_millis(800)).await;
+
+            state_check = self.check_current_state(Duration::from_secs(2)).await?;
+            debug!("State check after first retry: {}", state_check);
+
+            // If still nothing, try one more time
+            if !state_check.contains("login:") && !state_check.contains("Username:")
+                && !state_check.contains('#') && !state_check.contains('>') {
+                debug!("Still unknown state, sending enter again... (attempt 2)");
+                self.send_raw("\r").await?;
+                tokio::time::sleep(Duration::from_secs(1)).await;
+
+                state_check = self.check_current_state(Duration::from_secs(2)).await?;
+                debug!("State check after second retry: {}", state_check);
+
+                // Check if we now have a login prompt
+                if state_check.contains("login:") || state_check.contains("Username:") {
+                    debug!("Login prompt appeared after retries, logging in...");
+
+                    // Send username
+                    self.send_raw(&format!("{}\r", username)).await?;
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+
+                    // Send password
+                    self.send_raw(&format!("{}\r", password)).await?;
+
+                    // Wait for command prompt after login
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                }
+            } else if state_check.contains("login:") || state_check.contains("Username:") {
+                // Login prompt appeared after first retry
+                debug!("Login prompt appeared after first retry, logging in...");
+
+                // Send username
+                self.send_raw(&format!("{}\r", username)).await?;
+                tokio::time::sleep(Duration::from_millis(500)).await;
+
+                // Send password
+                self.send_raw(&format!("{}\r", password)).await?;
+
+                // Wait for command prompt after login
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+        }
+
+        debug!("Login/prompt detection successful");
+
+        // Check if we need to enter privileged exec mode (Cisco switches)
+        self.enter_privileged_mode().await?;
+
+        // Verify the connection is actually working by checking for a response
+        self.verify_connectivity().await?;
+
+        Ok(())
+    }
+
+    /// Enter privileged exec mode if we're in user mode (Cisco switches)
+    async fn enter_privileged_mode(&mut self) -> Result<()> {
+        debug!("Checking privilege level...");
+
+        // Send newline to get current prompt
+        self.send_raw("\r").await?;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        let prompt = self.check_current_state(Duration::from_secs(2)).await?;
+        let prompt_trimmed = prompt.trim();
+
+        // Check if we're in user mode (prompt ends with >)
+        // Examples: "Switch>", "Router>", "hostname>"
+        if prompt_trimmed.ends_with('>') {
+            debug!("In user mode (>), entering privileged exec mode...");
+
+            self.send_raw("enable\r").await?;
+            tokio::time::sleep(Duration::from_millis(500)).await;
+
+            let response = self.check_current_state(Duration::from_secs(2)).await?;
+
+            // Check if enable password is required
+            if response.contains("Password:") {
+                debug!("Enable password required, but no enable password configured");
+                debug!("Attempting to continue without enable password...");
+                // Try pressing enter (no enable password configured)
+                self.send_raw("\r").await?;
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+
+            // Verify we're now in privileged mode
+            self.send_raw("\r").await?;
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            let final_prompt = self.check_current_state(Duration::from_secs(2)).await?;
+            let final_prompt_trimmed = final_prompt.trim();
+
+            if final_prompt_trimmed.ends_with('#') {
+                debug!("Successfully entered privileged exec mode (#)");
+            } else if final_prompt_trimmed.ends_with('>') {
+                warn!("Still in user mode after enable command. Enable password may be required.");
+                warn!("Add 'enable_password' to switch credentials if commands fail.");
+            } else {
+                debug!("Privilege level unclear, but continuing anyway");
+            }
+        } else if prompt_trimmed.ends_with('#') {
+            debug!("Already in privileged exec mode (#)");
+        } else {
+            debug!("Unknown prompt format: '{}', assuming OK", prompt_trimmed);
+        }
+
+        Ok(())
+    }
+
+    /// Verify serial connectivity by checking for prompt response
+    /// This helps detect locked devices or unresponsive switches early
+    async fn verify_connectivity(&mut self) -> Result<()> {
+        debug!("Verifying serial device connectivity...");
+
+        // Send a newline and wait for prompt response
+        self.send_raw("\r").await?;
+
+        // Try to get a response within 3 seconds
+        let response = self.check_current_state(Duration::from_secs(3)).await?;
+
+        // Check if we got any meaningful response (should have a prompt)
+        let clean_response = regex::Regex::new(r"\x1b\[[0-9;?]*[A-Za-z]")
+            .unwrap()
+            .replace_all(&response, "");
+
+        if clean_response.trim().is_empty() {
+            anyhow::bail!(
+                "Serial device not responding. \
+                 Possible causes: (1) Device locked by another process (e.g., picocom, minicom, screen), \
+                 (2) Switch powered off or not connected, (3) Wrong baud rate (configured: {})",
+                self.baud_rate
+            );
+        }
+
+        debug!("Serial connectivity verified - device is responding");
+        Ok(())
+    }
+
+    /// Check current state by reading available data
+    async fn check_current_state(&mut self, timeout: Duration) -> Result<String> {
+        if let Some(port) = &mut self.port {
+            let mut accumulated = String::new();
+            let mut buf = [0u8; 1024];
+            let start = tokio::time::Instant::now();
+
+            loop {
+                if start.elapsed() > timeout {
+                    break;
+                }
+
+                tokio::select! {
+                    result = port.read(&mut buf) => {
+                        match result {
+                            Ok(n) if n > 0 => {
+                                let data = String::from_utf8_lossy(&buf[..n]);
+                                accumulated.push_str(&data);
+                            }
+                            Ok(_) => {
+                                tokio::time::sleep(Duration::from_millis(10)).await;
+                            }
+                            Err(ref e) if e.kind() == io::ErrorKind::TimedOut => {
+                                tokio::time::sleep(Duration::from_millis(10)).await;
+                            }
+                            Err(e) => return Err(e.into()),
+                        }
+                    }
+                    _ = tokio::time::sleep(Duration::from_millis(100)) => {
+                        if !accumulated.is_empty() {
+                            break;
+                        }
+                    }
+                }
+            }
+
+            Ok(accumulated)
+        } else {
+            anyhow::bail!("Not connected")
+        }
+    }
+
+    /// Send raw data to the serial port
+    async fn send_raw(&mut self, data: &str) -> Result<()> {
+        if let Some(port) = &mut self.port {
+            // Use \r for line endings (Aruba switches expect carriage return)
+            let data_with_cr = if data.ends_with('\n') {
+                data.replace('\n', "\r")
+            } else if !data.ends_with('\r') && !data.is_empty() {
+                format!("{}\r", data)
+            } else {
+                data.to_string()
+            };
+
+            AsyncWriteExt::write_all(port, data_with_cr.as_bytes()).await?;
+            AsyncWriteExt::flush(port).await?;
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            Ok(())
+        } else {
+            anyhow::bail!("Not connected")
+        }
+    }
+
+    /// Wait for command prompt to appear
+    async fn wait_for_prompt(&mut self, timeout_secs: u64) -> Result<String> {
+        if let Some(port) = &mut self.port {
+            let mut output = Vec::new();
+            let mut buf = [0u8; 1024];
+            let timeout = Duration::from_secs(timeout_secs);
+            let start = tokio::time::Instant::now();
+            let mut last_data_time = tokio::time::Instant::now();
+
+            loop {
+                if start.elapsed() > timeout {
+                    let text = String::from_utf8_lossy(&output);
+                    let clean = regex::Regex::new(r"\x1b\[[0-9;?]*[A-Za-z]")
+                        .unwrap()
+                        .replace_all(&text, "");
+                    warn!("Timeout waiting for prompt. Last received (clean): {:?}", &clean[clean.len().saturating_sub(200)..]);
+                    anyhow::bail!("Timeout waiting for prompt");
+                }
+
+                tokio::select! {
+                    result = port.read(&mut buf) => {
+                        match result {
+                            Ok(n) if n > 0 => {
+                                output.extend_from_slice(&buf[..n]);
+                                last_data_time = tokio::time::Instant::now();
+
+                                // Check if we have a prompt
+                                let text = String::from_utf8_lossy(&output);
+                                trace!("Received data (raw): {:?}", &text[text.len().saturating_sub(100)..]);
+
+                                // Remove ANSI escape sequences for checking
+                                let clean = regex::Regex::new(r"\x1b\[[0-9;?]*[A-Za-z]")
+                                    .unwrap()
+                                    .replace_all(&text, "");
+
+                                trace!("Received data (clean, last 100 chars): {:?}", &clean[clean.len().saturating_sub(100)..]);
+
+                                // Look for prompt pattern at end of output OR on the last line
+                                // This handles cases where log messages appear after the prompt (Cisco IOS)
+                                // Requires at least one word char before # or >
+                                // Matches: switch#, switch>, switch(config)#, switch(vlan-42)#, etc.
+                                // Also matches FortiSwitch format: S108FPTV21002683 (console) #
+                                // Pattern allows spaces: hostname, space, (context), space, # or >
+                                // Does NOT match standalone # (which appears in comments)
+
+                                // Check the last line for a prompt (handles Cisco log messages after prompt)
+                                let last_line = clean.lines().last().unwrap_or("");
+                                let last_line_trimmed = last_line.trim();
+
+                                // Prompt pattern without $ anchor for line-by-line checking
+                                let prompt_pattern = r"^[\w-]+\s*(\([^\)]+\))?\s*[>#]\s*$";
+                                let prompt_regex = regex::Regex::new(prompt_pattern).unwrap();
+
+                                // Also check for interactive prompts like Username:, Password:, etc.
+                                let interactive_regex = regex::Regex::new(r"(Username|username|Password|password|Enable password):\s*$").unwrap();
+
+                                // Check for Aruba "Press any key to continue" prompt
+                                let press_key_regex = regex::Regex::new(r"Press any key to continue\s*$").unwrap();
+
+                                // Check for "-- MORE --" paging prompt
+                                let more_regex = regex::Regex::new(r"--\s*MORE\s*--").unwrap();
+
+                                // Check if the last line (or any recent line) has a prompt
+                                // This allows detection even when Cisco sends log messages after the prompt
+                                let has_prompt_on_line = prompt_regex.is_match(last_line_trimmed) || {
+                                    // Also check the previous few lines in case log messages pushed it up
+                                    clean.lines().rev().take(3).any(|line| {
+                                        let trimmed = line.trim();
+                                        prompt_regex.is_match(trimmed)
+                                    })
+                                };
+
+                                // ADDITIONAL CHECK: Handle cases where command echo and prompt are on same line
+                                // Example: "no pageHP-2530-8G-PoEP# " (no newline between command and prompt)
+                                // Look for prompt pattern at the END of the output, even if not at start of line
+                                let end_prompt_pattern = r"[\w-]+\s*(\([^\)]+\))?\s*[>#]\s*$";
+                                let end_prompt_regex = regex::Regex::new(end_prompt_pattern).unwrap();
+                                let has_prompt_at_end = end_prompt_regex.is_match(clean.trim());
+
+                                if press_key_regex.is_match(&clean) {
+                                    debug!("Detected 'Press any key to continue' prompt, sending ENTER");
+                                    // Send ENTER to dismiss the prompt
+                                    AsyncWriteExt::write_all(port, b"\r").await?;
+                                    AsyncWriteExt::flush(port).await?;
+                                    // Clear accumulated output and restart waiting
+                                    output.clear();
+                                    last_data_time = tokio::time::Instant::now();
+                                    trace!("Waiting for actual prompt after dismissing continuation screen...");
+                                } else if more_regex.is_match(&clean) {
+                                    debug!("Detected '-- MORE --' paging prompt, sending SPACE to continue");
+                                    // Send SPACE to get next page (SPACE is standard for MORE prompts)
+                                    AsyncWriteExt::write_all(port, b" ").await?;
+                                    AsyncWriteExt::flush(port).await?;
+                                    // Keep accumulated output (it's part of the command response)
+                                    last_data_time = tokio::time::Instant::now();
+                                    trace!("Continuing to read paged output...");
+                                } else if has_prompt_on_line || has_prompt_at_end {
+                                    if has_prompt_at_end {
+                                        trace!("Prompt detected at end of output! Pattern matched.");
+                                    } else {
+                                        trace!("Prompt detected on line! Pattern matched.");
+                                    }
+                                    return Ok(text.to_string());
+                                } else if interactive_regex.is_match(&clean) {
+                                    trace!("Interactive prompt detected (Username/Password)!");
+                                    return Ok(text.to_string());
+                                } else {
+                                    trace!("No prompt match yet. Waiting for more data...");
+                                }
+                            }
+                            Ok(_) => {
+                                tokio::time::sleep(Duration::from_millis(10)).await;
+                            }
+                            Err(ref e) if e.kind() == io::ErrorKind::TimedOut => {
+                                tokio::time::sleep(Duration::from_millis(10)).await;
+                            }
+                            Err(e) => return Err(e.into()),
+                        }
+                    }
+                    _ = tokio::time::sleep(Duration::from_millis(300)) => {
+                        // If no data for 300ms and we have output, check for prompt
+                        if last_data_time.elapsed() > Duration::from_millis(300) && !output.is_empty() {
+                            let text = String::from_utf8_lossy(&output);
+                            let clean = regex::Regex::new(r"\x1b\[[0-9;?]*[A-Za-z]")
+                                .unwrap()
+                                .replace_all(&text, "");
+
+                            // Check for Aruba "Press any key to continue" prompt
+                            let press_key_regex = regex::Regex::new(r"Press any key to continue\s*$").unwrap();
+
+                            // Check for "-- MORE --" paging prompt
+                            let more_regex = regex::Regex::new(r"--\s*MORE\s*--").unwrap();
+
+                            if press_key_regex.is_match(&clean) {
+                                debug!("Detected 'Press any key to continue' prompt (timeout path), sending ENTER");
+                                // Send ENTER to dismiss the prompt
+                                AsyncWriteExt::write_all(port, b"\r").await?;
+                                AsyncWriteExt::flush(port).await?;
+                                // Clear accumulated output and restart waiting
+                                output.clear();
+                                last_data_time = tokio::time::Instant::now();
+                                trace!("Waiting for actual prompt after dismissing continuation screen...");
+                                continue;
+                            } else if more_regex.is_match(&clean) {
+                                debug!("Detected '-- MORE --' paging prompt (timeout path), sending SPACE to continue");
+                                // Send SPACE to get next page
+                                AsyncWriteExt::write_all(port, b" ").await?;
+                                AsyncWriteExt::flush(port).await?;
+                                // Keep accumulated output (it's part of the command response)
+                                last_data_time = tokio::time::Instant::now();
+                                trace!("Continuing to read paged output...");
+                                continue;
+                            }
+
+                            // Check the last line for a prompt (handles Cisco log messages after prompt)
+                            let last_line = clean.lines().last().unwrap_or("");
+                            let last_line_trimmed = last_line.trim();
+
+                            // Prompt pattern for line-by-line checking
+                            let prompt_pattern = r"^[\w-]+\s*(\([^\)]+\))?\s*[>#]\s*$";
+                            let prompt_regex = regex::Regex::new(prompt_pattern).unwrap();
+                            let interactive_regex = regex::Regex::new(r"(Username|username|Password|password|Enable password):\s*$").unwrap();
+
+                            // Check if the last line (or any recent line) has a prompt
+                            let has_prompt_on_line = prompt_regex.is_match(last_line_trimmed) || {
+                                clean.lines().rev().take(3).any(|line| {
+                                    let trimmed = line.trim();
+                                    prompt_regex.is_match(trimmed)
+                                })
+                            };
+
+                            if has_prompt_on_line || interactive_regex.is_match(&clean) {
+                                return Ok(text.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        anyhow::bail!("Not connected")
+    }
+
+    /// Execute a command and return the output
+    pub async fn execute_command(&mut self, command: &str) -> Result<String> {
+        info!("📝 Command: {}", command);
+
+        // Debug mode: prompt for confirmation
+        if self.debug_mode {
+            print!("   Execute this command? [Y/n/q]: ");
+            io::stdout().flush()?;
+
+            let mut input = String::new();
+            io::stdin().read_line(&mut input)?;
+            let response = input.trim().to_lowercase();
+
+            match response.as_str() {
+                "q" | "quit" | "exit" => {
+                    anyhow::bail!("User aborted execution");
+                }
+                "n" | "no" => {
+                    info!("   ⏭️  Skipped by user");
+                    return Ok(String::new());
+                }
+                _ => {
+                    // "y", "yes", or empty (default yes)
+                }
+            }
+        }
+
+        // Dry-run mode: skip execution (except for read-only commands and session settings)
+        let is_readonly = command.trim().starts_with("show ");
+        let is_session_setting = command.trim() == "no page"
+            || command.trim() == "terminal length 0"
+            || command.trim() == "terminal pager 0";
+
+        if self.dry_run && !is_readonly && !is_session_setting {
+            info!("   🔍 [DRY-RUN] Would execute (skipped)");
+            return Ok(String::new());
+        }
+
+        // In dry-run mode, allow 'show' commands and session settings to execute
+        if self.dry_run && (is_readonly || is_session_setting) {
+            if is_readonly {
+                info!("   🔍 [DRY-RUN] Executing read-only command");
+            } else {
+                info!("   🔍 [DRY-RUN] Executing session setting");
+            }
+        }
+
+        // Clear any pending data
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        self.clear_buffer().await?;
+
+        if let Some(port) = &mut self.port {
+            // Send the command with \r (not \r\n)
+            let cmd = format!("{}\r", command);
+            AsyncWriteExt::write_all(port, cmd.as_bytes()).await?;
+            AsyncWriteExt::flush(port).await?;
+
+            // Wait for prompt - use longer timeout for "show" commands that return lots of data
+            let timeout = if command.starts_with("show") { 30 } else { 10 };
+            let output = self.wait_for_prompt(timeout).await?;
+
+            // Check for errors in output
+            // Note: "Invalid input: enable" when already in privileged mode is benign
+            let has_error = (output.contains("Invalid input") && !output.contains("Invalid input: enable"))
+                || output.contains("Error:")
+                || output.contains("Unknown command");
+
+            if has_error {
+                warn!("Command may have failed: {}", command);
+                debug!("Output contains error indication: {}", output.trim());
+            }
+
+            if !output.is_empty() {
+                debug!("Command output: {} bytes", output.len());
+                debug!("Output (first 200 chars): {}", &output.chars().take(200).collect::<String>());
+            }
+
+            Ok(output)
+        } else {
+            anyhow::bail!("Not connected. Call connect first")
+        }
+    }
+
+    /// Execute multiple commands in sequence
+    pub async fn execute_commands(&mut self, commands: &[String]) -> Result<Vec<String>> {
+        let mut results = Vec::new();
+
+        for command in commands {
+            let output = self.execute_command(command).await?;
+            results.push(output);
+        }
+
+        Ok(results)
+    }
+
+    /// Check if the device file is locked by another process
+    #[cfg(unix)]
+    fn check_device_lock(&self) -> Result<()> {
+        use std::fs::OpenOptions;
+        use std::os::unix::fs::OpenOptionsExt;
+
+        // Try to open the device with non-blocking flag to test for locks
+        match OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY)
+            .open(&self.device)
+        {
+            Ok(file) => {
+                // Try to acquire an exclusive lock (non-blocking)
+                let fd = file.as_raw_fd();
+                let lock_result = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
+
+                if lock_result != 0 {
+                    let err = std::io::Error::last_os_error();
+                    if err.kind() == io::ErrorKind::WouldBlock {
+                        anyhow::bail!(
+                            "Serial device {} is locked by another process (e.g., picocom, minicom, screen). \
+                             Please close the other program and try again.",
+                            self.device
+                        );
+                    }
+                }
+
+                // Release the lock
+                unsafe { libc::flock(fd, libc::LOCK_UN) };
+                Ok(())
+            }
+            Err(e) => {
+                // Device couldn't be opened - check if it's a lock issue
+                if e.kind() == io::ErrorKind::PermissionDenied {
+                    anyhow::bail!(
+                        "Permission denied accessing {}. Ensure you have access rights (dialout group membership).",
+                        self.device
+                    );
+                }
+                // Other errors will be caught when tokio_serial tries to open
+                Ok(())
+            }
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn check_device_lock(&self) -> Result<()> {
+        // Lock checking not implemented for non-Unix systems
+        Ok(())
+    }
+
+    /// Disconnect from the serial device
+    pub async fn disconnect(&mut self) -> Result<()> {
+        if let Some(_port) = self.port.take() {
+            debug!("Serial connection closed");
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs::File;
+    use std::io::Write;
+    use tempfile::TempDir;
+
+    // ============================================================================
+    // Prompt Detection Tests (Critical for Recent Changes)
+    // ============================================================================
+
+    #[test]
+    fn test_press_any_key_prompt_detection() {
+        // Test the regex pattern used to detect Aruba's welcome screen prompt
+        let press_key_regex = regex::Regex::new(r"Press any key to continue\s*$").unwrap();
+
+        // Should match various formats
+        assert!(press_key_regex.is_match("Press any key to continue"));
+        assert!(press_key_regex.is_match("Press any key to continue "));
+        assert!(press_key_regex.is_match("Press any key to continue  "));
+        assert!(press_key_regex.is_match("some preamble text\nPress any key to continue"));
+        assert!(press_key_regex.is_match("Multi\nline\ntext\nPress any key to continue"));
+
+        // Should NOT match if there's text after
+        assert!(!press_key_regex.is_match("Press any key to continue and then more"));
+        assert!(!press_key_regex.is_match("Press any key"));
+        assert!(!press_key_regex.is_match("press any key to continue")); // Case sensitive
+    }
+
+    #[test]
+    fn test_more_paging_prompt_detection() {
+        // Test the regex pattern used to detect "-- MORE --" paging prompts
+        let more_regex = regex::Regex::new(r"--\s*MORE\s*--").unwrap();
+
+        // Should match various spacing formats
+        assert!(more_regex.is_match("-- MORE --"));
+        assert!(more_regex.is_match("--MORE--"));
+        assert!(more_regex.is_match("--  MORE  --"));
+        assert!(more_regex.is_match("-- MORE --"));
+        assert!(more_regex.is_match("some text\n-- MORE --\nmore text"));
+        assert!(more_regex.is_match("output\n-- MORE --, next page: Space"));
+
+        // Should not match incomplete patterns
+        assert!(!more_regex.is_match("MORE"));
+        assert!(!more_regex.is_match("- MORE -"));
+        assert!(!more_regex.is_match("-- more --")); // Case sensitive
+    }
+
+    #[test]
+    fn test_switch_prompt_regex() {
+        // Test the regex pattern used to detect switch command prompts
+        // Pattern now uses ^ and $ to match individual lines (not entire accumulated output)
+        // In actual code, lines are trimmed before matching
+        let prompt_regex = regex::Regex::new(r"^[\w-]+\s*(\([^\)]+\))?\s*[>#]\s*$").unwrap();
+
+        // Valid prompts that should match (on a single line, after trimming)
+        assert!(prompt_regex.is_match("switch#"));
+        assert!(prompt_regex.is_match("switch>"));
+        assert!(prompt_regex.is_match("router#"));
+        assert!(prompt_regex.is_match("hostname>"));
+        assert!(prompt_regex.is_match("switch(config)#"));
+        assert!(prompt_regex.is_match("switch(vlan-42)#"));
+        assert!(prompt_regex.is_match("switch(config-if)#"));
+        assert!(prompt_regex.is_match("hostname-with-dashes#"));
+        assert!(prompt_regex.is_match("test-switch#"));
+        assert!(prompt_regex.is_match("test_switch#"));
+        assert!(prompt_regex.is_match("switch123#"));
+        assert!(prompt_regex.is_match("switch# ")); // Trailing space
+
+        // Leading/trailing whitespace: In actual code, lines are trimmed first
+        assert!(prompt_regex.is_match("  switch#  ".trim()));
+
+        // Should NOT match standalone # or > (could appear in output/comments)
+        assert!(!prompt_regex.is_match("#"));
+        assert!(!prompt_regex.is_match(">"));
+        assert!(!prompt_regex.is_match("just text #"));
+        assert!(!prompt_regex.is_match("# comment"));
+
+        // Should not match if there's text after the prompt (on same line)
+        assert!(!prompt_regex.is_match("switch# show running"));
+
+        // Should not match if there's text before the prompt (on same line)
+        // Note: multiline strings won't match because ^ requires start of string
+        assert!(!prompt_regex.is_match("output line\nswitch#"));
+
+        // Test line-by-line detection logic (as used in actual code)
+        // This is the key scenario for Cisco: prompt on one line, log message on another
+        let multiline_output = "description Management Port\nSwitch(config-if)#\n*Nov 26 08:07:29.324: %SYS-5-CONFIG_I: Configured from console by console";
+        let has_prompt = multiline_output.lines().any(|line| {
+            let trimmed = line.trim();
+            prompt_regex.is_match(trimmed)
+        });
+        assert!(has_prompt, "Should detect prompt on second line despite log message on third line");
+    }
+
+    #[test]
+    fn test_interactive_prompt_detection() {
+        // Test the regex pattern for login/password prompts
+        let interactive_regex = regex::Regex::new(
+            r"(Username|username|Password|password|Enable password):\s*$"
+        ).unwrap();
+
+        // Valid interactive prompts
+        assert!(interactive_regex.is_match("Username: "));
+        assert!(interactive_regex.is_match("username: "));
+        assert!(interactive_regex.is_match("Password: "));
+        assert!(interactive_regex.is_match("password: "));
+        assert!(interactive_regex.is_match("Enable password: "));
+        assert!(interactive_regex.is_match("output\nUsername: "));
+
+        // Edge case: "Enter username:" WILL match because it ends with "username:"
+        // This is acceptable behavior - we want to catch username prompts regardless
+        // of preamble text
+        assert!(interactive_regex.is_match("Enter username: "));
+
+        // Should not match incomplete formats (no colon and space at end)
+        assert!(!interactive_regex.is_match("Username"));
+        assert!(!interactive_regex.is_match("Password"));
+
+        // Should not match if there's text after the prompt
+        assert!(!interactive_regex.is_match("Username: admin"));
+        assert!(!interactive_regex.is_match("Password: followed by text"));
+    }
+
+    #[test]
+    fn test_ansi_escape_sequence_removal() {
+        // Test that ANSI escape sequences are properly removed before prompt matching
+        let ansi_regex = regex::Regex::new(r"\x1b\[[0-9;?]*[A-Za-z]").unwrap();
+
+        // Common ANSI sequences from switch output
+        let test_cases = vec![
+            ("\x1b[24;40Hswitch# \x1b[?25h", "switch# "),
+            ("\x1b[?6l\x1b[1;24rswitch#", "switch#"),
+            ("\x1b[2Jswitch#", "switch#"),
+            ("\x1b[1;1Houtput\x1b[2Kswitch#", "outputswitch#"),
+            ("no escapes here", "no escapes here"),
+        ];
+
+        for (input, expected) in test_cases {
+            let clean = ansi_regex.replace_all(input, "");
+            assert_eq!(clean, expected, "Failed to clean: {:?}", input);
+        }
+    }
+
+    // ============================================================================
+    // Dry-Run Mode and Command Classification Tests
+    // ============================================================================
+
+    #[test]
+    fn test_session_setting_classification() {
+        // Helper function to classify commands (extracted from execute_command logic)
+        fn is_session_setting(cmd: &str) -> bool {
+            cmd.trim() == "no page"
+                || cmd.trim() == "terminal length 0"
+                || cmd.trim() == "terminal pager 0"
+        }
+
+        // These should be classified as session settings
+        assert!(is_session_setting("no page"));
+        assert!(is_session_setting("terminal length 0"));
+        assert!(is_session_setting("terminal pager 0"));
+        assert!(is_session_setting("  no page  ")); // With whitespace
+
+        // These should NOT be classified as session settings
+        assert!(!is_session_setting("configure terminal"));
+        assert!(!is_session_setting("interface 1"));
+        assert!(!is_session_setting("no shutdown"));
+        assert!(!is_session_setting("show running-config"));
+        assert!(!is_session_setting("write memory"));
+    }
+
+    #[test]
+    fn test_readonly_command_classification() {
+        // Helper function to classify commands
+        fn is_readonly(cmd: &str) -> bool {
+            cmd.trim().starts_with("show ")
+        }
+
+        // These should be classified as read-only
+        assert!(is_readonly("show running-config"));
+        assert!(is_readonly("show vlan"));
+        assert!(is_readonly("show interfaces"));
+        assert!(is_readonly("show version"));
+        assert!(is_readonly("  show running-config  ")); // With whitespace
+
+        // These should NOT be classified as read-only
+        assert!(!is_readonly("configure terminal"));
+        assert!(!is_readonly("interface 1"));
+        assert!(!is_readonly("no shutdown"));
+        assert!(!is_readonly("showing")); // Starts with 'show' but not 'show '
+    }
+
+    // ============================================================================
+    // Device Lock Tests (Existing)
+    // ============================================================================
+
+    #[test]
+    #[cfg(unix)]
+    fn test_check_device_lock_on_nonexistent_device() {
+        // Test that checking a non-existent device doesn't panic
+        let client = SerialClient::new("/dev/nonexistent_serial_device_12345".to_string(), 9600);
+
+        // Should not error - the check will be performed when actual connection is attempted
+        let result = client.check_device_lock();
+
+        // Non-existent devices return Ok - the actual error will occur during tokio_serial open
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_check_device_lock_with_regular_file() {
+        // Create a temporary file
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("test_file");
+        let mut file = File::create(&file_path).unwrap();
+        file.write_all(b"test data").unwrap();
+        drop(file);
+
+        // Test lock detection with unlocked file
+        let client = SerialClient::new(file_path.to_str().unwrap().to_string(), 9600);
+        let result = client.check_device_lock();
+
+        // Should succeed - file exists and is not locked
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_check_device_lock_with_locked_file() {
+        use std::os::unix::io::AsRawFd;
+
+        // Create a temporary file
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("locked_test_file");
+        let file = File::create(&file_path).unwrap();
+
+        // Acquire an exclusive lock on the file
+        let fd = file.as_raw_fd();
+        let lock_result = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
+        assert_eq!(lock_result, 0, "Failed to lock test file");
+
+        // Now try to check the lock with SerialClient
+        let client = SerialClient::new(file_path.to_str().unwrap().to_string(), 9600);
+        let result = client.check_device_lock();
+
+        // Should fail with lock error
+        assert!(result.is_err());
+        let error_msg = result.unwrap_err().to_string();
+        assert!(
+            error_msg.contains("locked by another process"),
+            "Expected lock error message, got: {}",
+            error_msg
+        );
+
+        // Clean up: release the lock
+        unsafe { libc::flock(fd, libc::LOCK_UN) };
+        drop(file);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_check_device_lock_nonexistent_path() {
+        // Test with a path in a directory that doesn't exist
+        let client = SerialClient::new("/nonexistent/directory/device".to_string(), 9600);
+        let result = client.check_device_lock();
+
+        // Should return Ok - path errors are handled during actual connection attempt
+        // The check_device_lock only catches lock issues
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    #[cfg(not(unix))]
+    fn test_check_device_lock_on_non_unix() {
+        // On non-Unix systems, the check should always succeed
+        let client = SerialClient::new("COM1".to_string(), 9600);
+        let result = client.check_device_lock();
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_serial_client_creation() {
+        let client = SerialClient::new("/dev/ttyUSB0".to_string(), 115200);
+
+        assert_eq!(client.device, "/dev/ttyUSB0");
+        assert_eq!(client.baud_rate, 115200);
+        assert!(client.port.is_none());
+    }
+
+    #[test]
+    fn test_serial_client_with_debug_mode() {
+        let client = SerialClient::new("/dev/ttyUSB0".to_string(), 9600)
+            .with_debug_mode(true);
+
+        assert_eq!(client.debug_mode, true);
+    }
+
+    #[test]
+    fn test_serial_client_with_dry_run() {
+        let client = SerialClient::new("/dev/ttyUSB0".to_string(), 9600)
+            .with_dry_run(true);
+
+        assert_eq!(client.dry_run, true);
+    }
+}
+
+impl Drop for SerialClient {
+    fn drop(&mut self) {
+        if self.port.is_some() {
+            warn!("SerialClient dropped without explicit disconnect");
+        }
+    }
+}
