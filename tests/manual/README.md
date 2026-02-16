@@ -220,7 +220,7 @@ Skipped: 0
 - **Full Test Plan**: `docs/testing/MANUAL-TESTING-PLAN.md` - Detailed test descriptions
 - **TODO Tasks**: `TODO.md` - Original task requirements
 - **Error Handling**: `docs/sessions/2025-11-25-error-handling-plan.md` - Implementation details
-- **Multi-Config**: `CLAUDE.md` (Multi-Config Merge System section) - Multi-config documentation
+- **Multi-Config**: `AGENTS.md` (Multi-Config Merge System section) - Multi-config documentation
 
 ## Contributing Test Results
 

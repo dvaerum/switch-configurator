@@ -251,10 +251,10 @@ chmod 640 config.yaml
 - Check logs: `journalctl -u switch-configurator -f` (NixOS)
 - Enable debug logging: `--log-level debug`
 - Review vendor documentation for command syntax
-- See [CLAUDE.md](../CLAUDE.md) for development details
+- See [AGENTS.md](../AGENTS.md) for development details
 
 ## Related Files
 
 - [config.example.yaml](config.example.yaml) - Basic configuration example
 - [config.example.vlan-ip.yaml](config.example.vlan-ip.yaml) - VLAN IP configuration examples
-- [CLAUDE.md](../CLAUDE.md) - Development and architecture documentation
+- [AGENTS.md](../AGENTS.md) - Development and architecture documentation

@@ -27,7 +27,7 @@ Multi-vendor network switch configurator with state-aware, idempotent configurat
 - **[Architecture](development/architecture.md)** - System design and architecture
 - **[State-Aware Implementation](development/state-aware-implementation.md)** - State parsing and diff computation
 - **[Multi-Config System](development/multi-config-merge-design.md)** - Modular configuration merging
-- **[CLAUDE.md](../CLAUDE.md)** - Development guidance for AI assistants (comprehensive architecture reference)
+- **[AGENTS.md](../AGENTS.md)** - Development guidance for AI assistants (comprehensive architecture reference)
 
 ### 🧪 Testing
 - **[Cisco Testing Documentation](testing/cisco/README.md)** - Hardware and unit test results

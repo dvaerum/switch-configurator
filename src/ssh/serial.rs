@@ -93,6 +93,60 @@ impl SerialClient {
         Ok(())
     }
 
+    /// Connect with retry logic
+    ///
+    /// # Arguments
+    /// * `max_retries` - Maximum number of connection attempts (including first attempt)
+    /// * `retry_delay_secs` - Delay in seconds between retry attempts
+    ///
+    /// # Returns
+    /// * `Ok(())` - If connection succeeds
+    /// * `Err(...)` - If all retry attempts fail
+    pub async fn connect_with_retry(&mut self, max_retries: u32, retry_delay_secs: u64) -> Result<()> {
+        let mut last_error = None;
+
+        for attempt in 1..=max_retries {
+            debug!(
+                "Serial connection attempt {}/{} to {}",
+                attempt, max_retries, self.device
+            );
+
+            match self.connect().await {
+                Ok(()) => {
+                    if attempt > 1 {
+                        info!(
+                            "Serial connection succeeded on attempt {}/{} to {}",
+                            attempt, max_retries, self.device
+                        );
+                    }
+                    return Ok(());
+                }
+                Err(e) => {
+                    last_error = Some(e);
+                    if attempt < max_retries {
+                        warn!(
+                            "Serial connection attempt {}/{} failed to {}: {}, retrying in {}s",
+                            attempt,
+                            max_retries,
+                            self.device,
+                            last_error.as_ref().unwrap(),
+                            retry_delay_secs
+                        );
+                        tokio::time::sleep(Duration::from_secs(retry_delay_secs)).await;
+                    }
+                }
+            }
+        }
+
+        // All retries exhausted
+        Err(anyhow::anyhow!(
+            "Serial connection failed after {} attempts to {}: {}",
+            max_retries,
+            self.device,
+            last_error.unwrap()
+        ))
+    }
+
     /// List available serial devices on the system
     fn list_available_serial_devices(&self) -> Vec<String> {
         let mut devices = Vec::new();
@@ -743,6 +797,7 @@ mod tests {
     use std::fs::File;
     use std::io::Write;
     use tempfile::TempDir;
+    use tokio;
 
     // ============================================================================
     // Prompt Detection Tests (Critical for Recent Changes)
@@ -1042,6 +1097,50 @@ mod tests {
             .with_dry_run(true);
 
         assert_eq!(client.dry_run, true);
+    }
+
+    // Tests for connect_with_retry behavior
+
+    #[tokio::test]
+    async fn test_serial_connect_with_retry_nonexistent_device() {
+        // Test that serial connect_with_retry correctly fails after max retries
+        // when connecting to a non-existent device
+        let mut client = SerialClient::new("/dev/ttyNOTEXIST".to_string(), 9600);
+
+        // Should fail after retries
+        let result = client.connect_with_retry(1, 1).await;
+        assert!(result.is_err());
+        let error_msg = result.unwrap_err().to_string();
+        assert!(error_msg.contains("/dev/ttyNOTEXIST"));
+    }
+
+    #[tokio::test]
+    async fn test_serial_connect_with_retry_multiple_attempts() {
+        // Test that serial connect_with_retry attempts multiple times
+        let mut client = SerialClient::new("/dev/ttyNOTEXIST".to_string(), 9600);
+
+        let start = std::time::Instant::now();
+        let result = client.connect_with_retry(3, 1).await;
+        let _elapsed = start.elapsed();
+
+        // Should have made 3 attempts
+        assert!(result.is_err());
+        let error_msg = result.unwrap_err().to_string();
+        assert!(error_msg.contains("/dev/ttyNOTEXIST"));
+        assert!(error_msg.contains("3 attempts"));
+    }
+
+    #[tokio::test]
+    async fn test_serial_connect_with_retry_zero_retries() {
+        // Test behavior with max_retries = 0 (should still attempt once due to .max(1))
+        let mut client = SerialClient::new("/dev/ttyNOTEXIST".to_string(), 9600);
+
+        // With max_retries = 0, it should still attempt once (enforced by .max(1))
+        let result = client.connect_with_retry(0, 1).await;
+        assert!(result.is_err());
+        let error_msg = result.unwrap_err().to_string();
+        // Should have made 1 attempt
+        assert!(error_msg.contains("1 attempts"));
     }
 }
 

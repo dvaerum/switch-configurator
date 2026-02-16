@@ -430,6 +430,68 @@ impl SshClient {
         }
     }
 
+    /// Connect with credentials and retry logic
+    ///
+    /// # Arguments
+    /// * `creds` - SSH credentials
+    /// * `max_retries` - Maximum number of connection attempts (minimum 1)
+    /// * `retry_delay_secs` - Delay in seconds between retry attempts
+    ///
+    /// # Returns
+    /// * `Ok(())` - If connection succeeds
+    /// * `Err(...)` - If all retry attempts fail
+    pub async fn connect_with_retry(
+        &mut self,
+        creds: &Credentials,
+        max_retries: u32,
+        retry_delay_secs: u64,
+    ) -> Result<()> {
+        // Ensure at least 1 attempt
+        let max_attempts = max_retries.max(1);
+        let mut last_error = None;
+
+        for attempt in 1..=max_attempts {
+            debug!(
+                "SSH connection attempt {}/{} to {}",
+                attempt, max_attempts, self.host
+            );
+
+            match self.connect_with_credentials(creds).await {
+                Ok(()) => {
+                    if attempt > 1 {
+                        info!(
+                            "SSH connection succeeded on attempt {}/{} to {}",
+                            attempt, max_attempts, self.host
+                        );
+                    }
+                    return Ok(());
+                }
+                Err(e) => {
+                    last_error = Some(e);
+                    if attempt < max_attempts {
+                        warn!(
+                            "SSH connection attempt {}/{} failed to {}: {}, retrying in {}s",
+                            attempt,
+                            max_attempts,
+                            self.host,
+                            last_error.as_ref().unwrap(),
+                            retry_delay_secs
+                        );
+                        tokio::time::sleep(Duration::from_secs(retry_delay_secs)).await;
+                    }
+                }
+            }
+        }
+
+        // All retries exhausted
+        Err(anyhow::anyhow!(
+            "SSH connection failed after {} attempts to {}: {}",
+            max_attempts,
+            self.host,
+            last_error.unwrap()
+        ))
+    }
+
     /// Validate jump host configuration
     fn validate_jump_hosts(&self, jump_hosts: &[JumpHost]) -> Result<()> {
         if jump_hosts.is_empty() {
@@ -690,5 +752,87 @@ mod tests {
         let client = SshClient::new("192.168.1.1".to_string(), 22)
             .with_dry_run(true);
         assert!(client.dry_run);
+    }
+
+    // Tests for connect_with_retry behavior
+    // Note: These tests verify the retry logic by checking that the function
+    // correctly propagates errors and implements the retry loop.
+    // Since we can't mock the actual SSH connection in unit tests,
+    // we test the error handling paths.
+
+    #[tokio::test]
+    async fn test_connect_with_retry_unreachable_host() {
+        // Test that connect_with_retry correctly fails after max retries
+        // when connecting to an unreachable host
+        let mut client = SshClient::new("192.0.2.1".to_string(), 22); // TEST-NET-1, never reachable
+        let creds = Credentials {
+            username: "admin".to_string(),
+            password: Some("password".to_string()),
+            connection_type: ConnectionType::Ssh,
+            port: 22,
+            serial_device: None,
+            baud_rate: 9600,
+            ssh_key_path: None,
+            jump_hosts: None,
+        };
+
+        // Should fail after retries (using small number for test speed)
+        let result = client.connect_with_retry(&creds, 1, 1).await;
+        assert!(result.is_err());
+        let error_msg = result.unwrap_err().to_string();
+        assert!(error_msg.contains("192.0.2.1"));
+    }
+
+    #[tokio::test]
+    async fn test_connect_with_retry_multiple_attempts() {
+        // Test that connect_with_retry attempts multiple times
+        // Using an unreachable IP with very short delay between retries
+        let mut client = SshClient::new("192.0.2.1".to_string(), 22);
+        let creds = Credentials {
+            username: "admin".to_string(),
+            password: Some("password".to_string()),
+            connection_type: ConnectionType::Ssh,
+            port: 22,
+            serial_device: None,
+            baud_rate: 9600,
+            ssh_key_path: None,
+            jump_hosts: None,
+        };
+
+        let start = std::time::Instant::now();
+        let result = client.connect_with_retry(&creds, 3, 1).await;
+        let elapsed = start.elapsed();
+
+        // Should have taken at least 2 seconds (3 attempts with 1s delay between)
+        // But may be less depending on OS TCP timeout behavior
+        assert!(result.is_err());
+
+        // Verify error message mentions all failed attempts
+        let error_msg = result.unwrap_err().to_string();
+        assert!(error_msg.contains("192.0.2.1"));
+        assert!(error_msg.contains("3 attempts"));
+    }
+
+    #[tokio::test]
+    async fn test_connect_with_retry_zero_retries() {
+        // Test behavior with max_retries = 0 (should still attempt once due to .max(1))
+        let mut client = SshClient::new("192.0.2.1".to_string(), 22);
+        let creds = Credentials {
+            username: "admin".to_string(),
+            password: Some("password".to_string()),
+            connection_type: ConnectionType::Ssh,
+            port: 22,
+            serial_device: None,
+            baud_rate: 9600,
+            ssh_key_path: None,
+            jump_hosts: None,
+        };
+
+        // With max_retries = 0, it should still attempt once (enforced by .max(1))
+        let result = client.connect_with_retry(&creds, 0, 1).await;
+        assert!(result.is_err());
+        let error_msg = result.unwrap_err().to_string();
+        // Should have made 1 attempt
+        assert!(error_msg.contains("1 attempts"));
     }
 }

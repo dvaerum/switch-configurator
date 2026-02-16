@@ -1246,6 +1246,10 @@ impl ArubaSwitch {
 #[async_trait]
 impl SwitchVendor for ArubaSwitch {
     async fn connect(&mut self) -> Result<(), VendorError> {
+        // Get retry settings
+        let max_retries = self.config.settings.max_retries;
+        let retry_delay_secs = 5; // 5 seconds between retries
+
         let client = match self.config.credentials().connection_type {
             ConnectionType::Ssh => {
                 let mut ssh_client = SshClient::new(
@@ -1255,9 +1259,9 @@ impl SwitchVendor for ArubaSwitch {
                 .with_debug_mode(self.runtime_config.debug)
                 .with_dry_run(self.runtime_config.dry_run);
 
-                // Use connect_with_credentials to handle jump hosts automatically
+                // Use connect_with_retry for retry logic
                 ssh_client
-                    .connect_with_credentials(self.config.credentials())
+                    .connect_with_retry(self.config.credentials(), max_retries, retry_delay_secs)
                     .await
                     .map_err(|e| VendorError::SshError(e.to_string()))?;
 
@@ -1288,8 +1292,9 @@ impl SwitchVendor for ArubaSwitch {
 
                 // Helper function to ensure cleanup on error
                 let setup_result = async {
+                    // Use connect_with_retry for retry logic
                     serial_client
-                        .connect()
+                        .connect_with_retry(max_retries, retry_delay_secs)
                         .await
                         .map_err(|e| VendorError::SshError(e.to_string()))?;
 

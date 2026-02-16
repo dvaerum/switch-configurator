@@ -90,14 +90,14 @@ switch-configurator --config-file main.yaml --config-folder /etc/switch-configs/
 ### Reference
 - **[CLI Reference](docs/reference/cli.md)** - Command-line options
 - **[Configuration Schema](examples/README.md)** - Complete YAML reference
-- **[CLAUDE.md](CLAUDE.md)** - Comprehensive architecture and development guide
+- **[AGENTS.md](AGENTS.md)** - Comprehensive architecture and development guide
 
 ### Deployment
 - **[NixOS Deployment](docs/deployment/nixos.md)** - Deploy as systemd service
 
 ### Development
 - **[Architecture](docs/development/architecture.md)** - System design
-- **[CLAUDE.md](CLAUDE.md)** - Development guidance and adding vendors
+- **[AGENTS.md](AGENTS.md)** - Development guidance and adding vendors
 
 ## Examples
 
@@ -217,7 +217,7 @@ src/
 
 ### Adding New Vendors
 
-See [CLAUDE.md](CLAUDE.md) section "Adding a New Vendor" for detailed instructions.
+See [AGENTS.md](AGENTS.md) section "Adding a New Vendor" for detailed instructions.
 
 ### Testing
 
@@ -250,7 +250,7 @@ See [Cisco Testing Documentation](docs/testing/cisco/README.md) for detailed tes
 
 ## Contributing
 
-Contributions are welcome! See [CLAUDE.md](CLAUDE.md) and [Architecture](docs/development/architecture.md) for development guidance.
+Contributions are welcome! See [AGENTS.md](AGENTS.md) and [Architecture](docs/development/architecture.md) for development guidance.
 
 ## License
 

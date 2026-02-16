@@ -144,6 +144,9 @@ fn should_reload_config(event: &Event) -> bool {
 async fn apply_all_configurations(config: &AppConfig, status: &StatusTracker) -> Result<()> {
     info!("Applying configuration to {} switches", config.switches.len());
 
+    let mut success_count = 0;
+    let mut failure_count = 0;
+
     for switch_config in &config.switches {
         let switch_id = &switch_config.id;
 
@@ -159,14 +162,35 @@ async fn apply_all_configurations(config: &AppConfig, status: &StatusTracker) ->
         }
 
         // Apply configuration to this switch (handles pending reloads internally)
-        apply_switch_with_pending(switch_config, status).await;
+        match apply_switch_with_pending(switch_config, status).await {
+            Ok(()) => success_count += 1,
+            Err(_) => failure_count += 1,
+        }
+    }
+
+    // Log summary (consistent with main startup flow)
+    info!("");
+    info!("========================================");
+    info!("Configuration Summary");
+    info!("========================================");
+    info!("Successful: {}", success_count);
+    info!("Failed: {}", failure_count);
+    info!("========================================");
+
+    if failure_count > 0 {
+        info!("✗ Configuration reload completed with errors");
+    } else {
+        info!("✓ Configuration reload completed successfully");
     }
 
     Ok(())
 }
 
 /// Apply configuration to a switch, then check for and process any pending reload
-async fn apply_switch_with_pending(switch_config: &crate::models::SwitchConfig, status: &StatusTracker) {
+async fn apply_switch_with_pending(
+    switch_config: &crate::models::SwitchConfig,
+    status: &StatusTracker,
+) -> Result<()> {
     let switch_id = &switch_config.id;
 
     // Mark switch as being configured
@@ -203,6 +227,9 @@ async fn apply_switch_with_pending(switch_config: &crate::models::SwitchConfig, 
 
     // Always clear the configuring status when done
     status.clear_currently_configuring(switch_id).await;
+
+    // Return result
+    result.map_err(|e| anyhow::anyhow!("{}", e))
 }
 
 /// Apply configuration to a single switch
