@@ -209,7 +209,12 @@ impl SshClient {
         Ok(())
     }
 
-    /// Wait for switch prompt (adapted from SerialClient logic)
+    /// Wait for switch prompt (adapted from SerialClient logic).
+    ///
+    /// Uses a confirmation wait to avoid false-positive prompt detection.
+    /// After detecting what looks like a prompt, waits briefly to confirm
+    /// no more data is coming (which would indicate the match was inside
+    /// command output, not the actual prompt).
     async fn wait_for_prompt(&mut self, timeout_secs: u64) -> Result<String> {
         let channel = self
             .shell_channel
@@ -220,15 +225,42 @@ impl SshClient {
         let timeout = Duration::from_secs(timeout_secs);
         let start = tokio::time::Instant::now();
         let mut last_data_time = tokio::time::Instant::now();
+        let mut prompt_detected_at: Option<tokio::time::Instant> = None;
+
+        // Pre-compile regexes outside the loop
+        let ansi_regex = regex::Regex::new(r"\x1b\[[0-9;?]*[A-Za-z]").unwrap();
+        // Prompt: hostname with at least 2 chars, optional (context), then # or >
+        let prompt_regex = regex::Regex::new(r"^[\w-]{2,}\s*(\([^\)]+\))?\s*[>#]\s*$").unwrap();
+        let interactive_regex = regex::Regex::new(
+            r"(Username|username|Password|password|Enable password):\s*$"
+        ).unwrap();
+        let press_key_regex = regex::Regex::new(r"Press any key to continue\s*$").unwrap();
+        let more_regex = regex::Regex::new(r"--\s*MORE\s*--").unwrap();
+
+        // SSH is faster than serial, so a shorter confirmation delay is fine
+        let prompt_confirm_delay = Duration::from_millis(200);
+        let idle_settle_time = Duration::from_millis(300);
 
         loop {
             if start.elapsed() > timeout {
                 let text = String::from_utf8_lossy(&output);
-                let clean = regex::Regex::new(r"\x1b\[[0-9;?]*[A-Za-z]")
-                    .unwrap()
-                    .replace_all(&text, "");
-                warn!("Timeout waiting for prompt. Last received (clean): {:?}", &clean[clean.len().saturating_sub(200)..]);
+                let clean = ansi_regex.replace_all(&text, "");
+                warn!(
+                    "Timeout waiting for prompt after {}s. Output length: {} bytes. Last received (clean): {:?}",
+                    timeout_secs,
+                    output.len(),
+                    &clean[clean.len().saturating_sub(200)..]
+                );
                 anyhow::bail!("Timeout waiting for prompt");
+            }
+
+            // Check if a previously detected prompt has been confirmed
+            if let Some(detected_at) = prompt_detected_at {
+                if last_data_time <= detected_at && detected_at.elapsed() >= prompt_confirm_delay {
+                    let text = String::from_utf8_lossy(&output);
+                    trace!("Prompt confirmed after {}ms settle time", prompt_confirm_delay.as_millis());
+                    return Ok(text.to_string());
+                }
             }
 
             tokio::select! {
@@ -238,36 +270,77 @@ impl SshClient {
                             output.extend_from_slice(&data);
                             last_data_time = tokio::time::Instant::now();
 
-                            // Check if we have a prompt
+                            // New data arrived - any previous prompt detection was a false positive
+                            if prompt_detected_at.is_some() {
+                                trace!("New data arrived after prompt detection - was a false positive, continuing to read");
+                                prompt_detected_at = None;
+                            }
+
                             let text = String::from_utf8_lossy(&output);
-                            trace!("Received data (raw): {:?}", &text[text.len().saturating_sub(100)..]);
+                            trace!("Received {} bytes (total: {}), last 100 chars: {:?}", data.len(), output.len(), &text[text.len().saturating_sub(100)..]);
 
-                            // Remove ANSI escape sequences for checking
-                            let clean = regex::Regex::new(r"\x1b\[[0-9;?]*[A-Za-z]")
-                                .unwrap()
-                                .replace_all(&text, "");
+                            let clean = ansi_regex.replace_all(&text, "");
 
-                            trace!("Received data (clean, last 100 chars): {:?}", &clean[clean.len().saturating_sub(100)..]);
-
-                            // Look for switch prompt pattern at end of output
-                            let prompt_regex = regex::Regex::new(r"[\w-]+(\([^\)]+\))?[>#]\s*$").unwrap();
-                            let interactive_regex = regex::Regex::new(r"(Username|username|Password|password|Enable password):\s*$").unwrap();
-                            let press_key_regex = regex::Regex::new(r"Press any key to continue\s*$").unwrap();
-                            let more_regex = regex::Regex::new(r"--\s*MORE\s*--").unwrap();
-
+                            // Handle special prompts that need immediate action
                             if press_key_regex.is_match(&clean) {
                                 debug!("Detected 'Press any key to continue' prompt, sending ENTER");
                                 channel.data(&b"\r"[..]).await?;
                                 output.clear();
                                 last_data_time = tokio::time::Instant::now();
-                            } else if more_regex.is_match(&clean) {
+                                prompt_detected_at = None;
+                                continue;
+                            }
+
+                            if more_regex.is_match(&clean) {
                                 debug!("Detected '-- MORE --' paging prompt, sending SPACE");
                                 channel.data(&b" "[..]).await?;
-                                output.clear();
                                 last_data_time = tokio::time::Instant::now();
-                            } else if prompt_regex.is_match(&clean) || interactive_regex.is_match(&clean) {
-                                trace!("Prompt detected!");
+                                prompt_detected_at = None;
+                                continue;
+                            }
+
+                            // Check for interactive prompts (return immediately)
+                            if interactive_regex.is_match(&clean) {
+                                trace!("Interactive prompt detected (Username/Password)!");
                                 return Ok(text.to_string());
+                            }
+
+                            // Check last non-empty line for a command prompt
+                            let last_nonempty_line = clean.lines()
+                                .rev()
+                                .find(|line| !line.trim().is_empty())
+                                .unwrap_or("")
+                                .trim();
+
+                            let has_prompt = prompt_regex.is_match(last_nonempty_line);
+
+                            // Also check last 3 lines for Cisco log message case
+                            let has_prompt_in_recent = if !has_prompt {
+                                clean.lines().rev().take(3).any(|line| {
+                                    prompt_regex.is_match(line.trim())
+                                })
+                            } else {
+                                false
+                            };
+
+                            // Also check end of last line for prompt (handles command
+                            // echo + prompt on same line, e.g. "no pageSwitch# ")
+                            let has_prompt_at_end = if !has_prompt && !has_prompt_in_recent {
+                                let end_prompt_regex = regex::Regex::new(
+                                    r"[\w-]{2,}\s*(\([^\)]+\))?\s*[>#]\s*$"
+                                ).unwrap();
+                                end_prompt_regex.is_match(last_nonempty_line)
+                            } else {
+                                false
+                            };
+
+                            if has_prompt || has_prompt_in_recent || has_prompt_at_end {
+                                trace!(
+                                    "Potential prompt detected: {:?} (starting {}ms confirmation wait)",
+                                    last_nonempty_line,
+                                    prompt_confirm_delay.as_millis()
+                                );
+                                prompt_detected_at = Some(tokio::time::Instant::now());
                             }
                         }
                         Some(russh::ChannelMsg::Eof) | None => {
@@ -276,18 +349,39 @@ impl SshClient {
                         _ => {}
                     }
                 }
-                _ = tokio::time::sleep(Duration::from_millis(300)) => {
-                    // If no data for 300ms and we have output, check for prompt
-                    if last_data_time.elapsed() > Duration::from_millis(300) && !output.is_empty() {
+                _ = tokio::time::sleep(Duration::from_millis(100)) => {
+                    // Check for confirmation timeout
+                    if let Some(detected_at) = prompt_detected_at {
+                        if last_data_time <= detected_at && detected_at.elapsed() >= prompt_confirm_delay {
+                            let text = String::from_utf8_lossy(&output);
+                            trace!("Prompt confirmed via idle check after {}ms", prompt_confirm_delay.as_millis());
+                            return Ok(text.to_string());
+                        }
+                    }
+
+                    // Idle-settle path
+                    if prompt_detected_at.is_none()
+                        && last_data_time.elapsed() > idle_settle_time
+                        && !output.is_empty()
+                    {
                         let text = String::from_utf8_lossy(&output);
-                        let clean = regex::Regex::new(r"\x1b\[[0-9;?]*[A-Za-z]")
-                            .unwrap()
-                            .replace_all(&text, "");
+                        let clean = ansi_regex.replace_all(&text, "");
 
-                        let prompt_regex = regex::Regex::new(r"[\w-]+(\([^\)]+\))?[>#]\s*$").unwrap();
-                        let interactive_regex = regex::Regex::new(r"(Username|username|Password|password|Enable password):\s*$").unwrap();
+                        let last_nonempty_line = clean.lines()
+                            .rev()
+                            .find(|line| !line.trim().is_empty())
+                            .unwrap_or("")
+                            .trim();
 
-                        if prompt_regex.is_match(&clean) || interactive_regex.is_match(&clean) {
+                        let end_prompt_regex = regex::Regex::new(
+                            r"[\w-]{2,}\s*(\([^\)]+\))?\s*[>#]\s*$"
+                        ).unwrap();
+                        if prompt_regex.is_match(last_nonempty_line)
+                            || interactive_regex.is_match(&clean)
+                            || end_prompt_regex.is_match(last_nonempty_line)
+                            || clean.lines().rev().take(3).any(|l| prompt_regex.is_match(l.trim()))
+                        {
+                            trace!("Prompt detected in idle-settle path: {:?}", last_nonempty_line);
                             return Ok(text.to_string());
                         }
                     }

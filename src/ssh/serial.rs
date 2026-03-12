@@ -104,6 +104,7 @@ impl SerialClient {
     /// * `Err(...)` - If all retry attempts fail
     pub async fn connect_with_retry(&mut self, max_retries: u32, retry_delay_secs: u64) -> Result<()> {
         let mut last_error = None;
+        let max_retries = max_retries.max(1);
 
         for attempt in 1..=max_retries {
             debug!(
@@ -188,13 +189,34 @@ impl SerialClient {
         devices
     }
 
-    /// Clear the input buffer
+    /// Clear the input buffer by draining all pending data
+    ///
+    /// Reads in a loop until no more data arrives within the timeout period.
+    /// This prevents leftover data from a previous command from contaminating
+    /// the next command's output.
     async fn clear_buffer(&mut self) -> Result<()> {
         if let Some(port) = &mut self.port {
-            let mut temp_buf = [0u8; 1024];
-            tokio::select! {
-                _ = port.read(&mut temp_buf) => {},
-                _ = tokio::time::sleep(Duration::from_millis(100)) => {},
+            let mut temp_buf = [0u8; 4096];
+            let mut total_cleared = 0usize;
+            loop {
+                tokio::select! {
+                    result = port.read(&mut temp_buf) => {
+                        match result {
+                            Ok(n) if n > 0 => {
+                                total_cleared += n;
+                                // Keep reading - there might be more data
+                                continue;
+                            }
+                            _ => break,
+                        }
+                    }
+                    _ = tokio::time::sleep(Duration::from_millis(100)) => {
+                        break;
+                    }
+                }
+            }
+            if total_cleared > 0 {
+                debug!("Cleared {} bytes from serial buffer", total_cleared);
             }
         }
         Ok(())
@@ -451,23 +473,73 @@ impl SerialClient {
         }
     }
 
-    /// Wait for command prompt to appear
+    /// Wait for command prompt to appear in the serial output.
+    ///
+    /// This method reads data from the serial port until it detects a switch
+    /// command prompt (e.g., `hostname#` or `hostname>`). It handles:
+    /// - ANSI escape sequence stripping
+    /// - "Press any key to continue" prompts (auto-dismisses)
+    /// - "-- MORE --" paging prompts (auto-continues)
+    /// - Interactive prompts (Username/Password)
+    /// - Cisco IOS log messages that appear after the prompt
+    ///
+    /// To avoid false-positive prompt detection (which can cause truncated output),
+    /// this method uses a **confirmation wait**: after detecting what looks like a
+    /// prompt, it waits briefly to see if more data arrives. If it does, the match
+    /// was a false positive (e.g., a line in the running config that looks like a
+    /// prompt) and we continue reading.
     async fn wait_for_prompt(&mut self, timeout_secs: u64) -> Result<String> {
         if let Some(port) = &mut self.port {
             let mut output = Vec::new();
-            let mut buf = [0u8; 1024];
+            let mut buf = [0u8; 4096];
             let timeout = Duration::from_secs(timeout_secs);
             let start = tokio::time::Instant::now();
             let mut last_data_time = tokio::time::Instant::now();
+            // Track when we first detected a potential prompt match.
+            // We use this for a "confirmation wait" to avoid false positives.
+            let mut prompt_detected_at: Option<tokio::time::Instant> = None;
+
+            // Pre-compile regexes outside the loop for efficiency
+            let ansi_regex = regex::Regex::new(r"\x1b\[[0-9;?]*[A-Za-z]").unwrap();
+            // Prompt: hostname with at least 2 chars, optional (context), then # or >
+            // Must be the entire line (anchored with ^ and $)
+            let prompt_regex = regex::Regex::new(r"^[\w-]{2,}\s*(\([^\)]+\))?\s*[>#]\s*$").unwrap();
+            let interactive_regex = regex::Regex::new(
+                r"(Username|username|Password|password|Enable password):\s*$"
+            ).unwrap();
+            let press_key_regex = regex::Regex::new(r"Press any key to continue\s*$").unwrap();
+            let more_regex = regex::Regex::new(r"--\s*MORE\s*--").unwrap();
+
+            // How long to wait after a prompt match to confirm no more data is coming.
+            // Serial connections can have gaps between data bursts, so we need to be
+            // patient. 500ms is enough for serial at 9600+ baud.
+            let prompt_confirm_delay = Duration::from_millis(500);
+            // How long after the last data before we consider the output "settled"
+            // and check for a prompt in the idle-timeout path.
+            let idle_settle_time = Duration::from_millis(500);
 
             loop {
                 if start.elapsed() > timeout {
                     let text = String::from_utf8_lossy(&output);
-                    let clean = regex::Regex::new(r"\x1b\[[0-9;?]*[A-Za-z]")
-                        .unwrap()
-                        .replace_all(&text, "");
-                    warn!("Timeout waiting for prompt. Last received (clean): {:?}", &clean[clean.len().saturating_sub(200)..]);
+                    let clean = ansi_regex.replace_all(&text, "");
+                    warn!(
+                        "Timeout waiting for prompt after {}s. Output length: {} bytes. Last received (clean): {:?}",
+                        timeout_secs,
+                        output.len(),
+                        &clean[clean.len().saturating_sub(200)..]
+                    );
                     anyhow::bail!("Timeout waiting for prompt");
+                }
+
+                // If we previously detected a prompt, check if the confirmation delay has passed
+                // without any new data arriving.
+                if let Some(detected_at) = prompt_detected_at {
+                    if last_data_time <= detected_at && detected_at.elapsed() >= prompt_confirm_delay {
+                        // No new data arrived since we detected the prompt - it's confirmed
+                        let text = String::from_utf8_lossy(&output);
+                        trace!("Prompt confirmed after {}ms settle time", prompt_confirm_delay.as_millis());
+                        return Ok(text.to_string());
+                    }
                 }
 
                 tokio::select! {
@@ -477,88 +549,89 @@ impl SerialClient {
                                 output.extend_from_slice(&buf[..n]);
                                 last_data_time = tokio::time::Instant::now();
 
-                                // Check if we have a prompt
+                                // New data arrived - any previous prompt detection was a false positive
+                                if prompt_detected_at.is_some() {
+                                    trace!("New data arrived after prompt detection - was a false positive, continuing to read");
+                                    prompt_detected_at = None;
+                                }
+
                                 let text = String::from_utf8_lossy(&output);
-                                trace!("Received data (raw): {:?}", &text[text.len().saturating_sub(100)..]);
+                                trace!("Received {} bytes (total: {}), last 100 chars: {:?}", n, output.len(), &text[text.len().saturating_sub(100)..]);
 
                                 // Remove ANSI escape sequences for checking
-                                let clean = regex::Regex::new(r"\x1b\[[0-9;?]*[A-Za-z]")
-                                    .unwrap()
-                                    .replace_all(&text, "");
+                                let clean = ansi_regex.replace_all(&text, "");
 
-                                trace!("Received data (clean, last 100 chars): {:?}", &clean[clean.len().saturating_sub(100)..]);
-
-                                // Look for prompt pattern at end of output OR on the last line
-                                // This handles cases where log messages appear after the prompt (Cisco IOS)
-                                // Requires at least one word char before # or >
-                                // Matches: switch#, switch>, switch(config)#, switch(vlan-42)#, etc.
-                                // Also matches FortiSwitch format: S108FPTV21002683 (console) #
-                                // Pattern allows spaces: hostname, space, (context), space, # or >
-                                // Does NOT match standalone # (which appears in comments)
-
-                                // Check the last line for a prompt (handles Cisco log messages after prompt)
-                                let last_line = clean.lines().last().unwrap_or("");
-                                let last_line_trimmed = last_line.trim();
-
-                                // Prompt pattern without $ anchor for line-by-line checking
-                                let prompt_pattern = r"^[\w-]+\s*(\([^\)]+\))?\s*[>#]\s*$";
-                                let prompt_regex = regex::Regex::new(prompt_pattern).unwrap();
-
-                                // Also check for interactive prompts like Username:, Password:, etc.
-                                let interactive_regex = regex::Regex::new(r"(Username|username|Password|password|Enable password):\s*$").unwrap();
-
-                                // Check for Aruba "Press any key to continue" prompt
-                                let press_key_regex = regex::Regex::new(r"Press any key to continue\s*$").unwrap();
-
-                                // Check for "-- MORE --" paging prompt
-                                let more_regex = regex::Regex::new(r"--\s*MORE\s*--").unwrap();
-
-                                // Check if the last line (or any recent line) has a prompt
-                                // This allows detection even when Cisco sends log messages after the prompt
-                                let has_prompt_on_line = prompt_regex.is_match(last_line_trimmed) || {
-                                    // Also check the previous few lines in case log messages pushed it up
-                                    clean.lines().rev().take(3).any(|line| {
-                                        let trimmed = line.trim();
-                                        prompt_regex.is_match(trimmed)
-                                    })
-                                };
-
-                                // ADDITIONAL CHECK: Handle cases where command echo and prompt are on same line
-                                // Example: "no pageHP-2530-8G-PoEP# " (no newline between command and prompt)
-                                // Look for prompt pattern at the END of the output, even if not at start of line
-                                let end_prompt_pattern = r"[\w-]+\s*(\([^\)]+\))?\s*[>#]\s*$";
-                                let end_prompt_regex = regex::Regex::new(end_prompt_pattern).unwrap();
-                                let has_prompt_at_end = end_prompt_regex.is_match(clean.trim());
-
+                                // Handle special prompts that need immediate action
                                 if press_key_regex.is_match(&clean) {
                                     debug!("Detected 'Press any key to continue' prompt, sending ENTER");
-                                    // Send ENTER to dismiss the prompt
                                     AsyncWriteExt::write_all(port, b"\r").await?;
                                     AsyncWriteExt::flush(port).await?;
-                                    // Clear accumulated output and restart waiting
                                     output.clear();
                                     last_data_time = tokio::time::Instant::now();
-                                    trace!("Waiting for actual prompt after dismissing continuation screen...");
-                                } else if more_regex.is_match(&clean) {
+                                    prompt_detected_at = None;
+                                    continue;
+                                }
+
+                                if more_regex.is_match(&clean) {
                                     debug!("Detected '-- MORE --' paging prompt, sending SPACE to continue");
-                                    // Send SPACE to get next page (SPACE is standard for MORE prompts)
                                     AsyncWriteExt::write_all(port, b" ").await?;
                                     AsyncWriteExt::flush(port).await?;
-                                    // Keep accumulated output (it's part of the command response)
                                     last_data_time = tokio::time::Instant::now();
-                                    trace!("Continuing to read paged output...");
-                                } else if has_prompt_on_line || has_prompt_at_end {
-                                    if has_prompt_at_end {
-                                        trace!("Prompt detected at end of output! Pattern matched.");
-                                    } else {
-                                        trace!("Prompt detected on line! Pattern matched.");
-                                    }
-                                    return Ok(text.to_string());
-                                } else if interactive_regex.is_match(&clean) {
+                                    prompt_detected_at = None;
+                                    continue;
+                                }
+
+                                // Check for interactive prompts (these should return immediately)
+                                if interactive_regex.is_match(&clean) {
                                     trace!("Interactive prompt detected (Username/Password)!");
                                     return Ok(text.to_string());
+                                }
+
+                                // Check for command prompt on the last non-empty line.
+                                // We only check the LAST non-empty line to avoid matching
+                                // prompt-like patterns within config output (e.g., hostname
+                                // references in SNMP or banner text).
+                                let last_nonempty_line = clean.lines()
+                                    .rev()
+                                    .find(|line| !line.trim().is_empty())
+                                    .unwrap_or("")
+                                    .trim();
+
+                                let has_prompt = prompt_regex.is_match(last_nonempty_line);
+
+                                // Also handle Cisco: check last 3 lines in case log messages
+                                // appeared after the prompt. But only use strict line matching.
+                                let has_prompt_in_recent = if !has_prompt {
+                                    clean.lines().rev().take(3).any(|line| {
+                                        prompt_regex.is_match(line.trim())
+                                    })
                                 } else {
-                                    trace!("No prompt match yet. Waiting for more data...");
+                                    false
+                                };
+
+                                // Also check for prompt at end of last line even if not at
+                                // start. This handles command echo + prompt on the same line
+                                // without a newline, e.g. "no pageIT-04269# ".
+                                // Safe because the confirmation wait will reject false positives.
+                                let has_prompt_at_end = if !has_prompt && !has_prompt_in_recent {
+                                    let end_prompt_regex = regex::Regex::new(
+                                        r"[\w-]{2,}\s*(\([^\)]+\))?\s*[>#]\s*$"
+                                    ).unwrap();
+                                    end_prompt_regex.is_match(last_nonempty_line)
+                                } else {
+                                    false
+                                };
+
+                                if has_prompt || has_prompt_in_recent || has_prompt_at_end {
+                                    // Don't return immediately! Start the confirmation timer.
+                                    // This prevents false positives when a line in the config
+                                    // output happens to match the prompt pattern.
+                                    trace!(
+                                        "Potential prompt detected: {:?} (starting {}ms confirmation wait)",
+                                        last_nonempty_line,
+                                        prompt_confirm_delay.as_millis()
+                                    );
+                                    prompt_detected_at = Some(tokio::time::Instant::now());
                                 }
                             }
                             Ok(_) => {
@@ -570,59 +643,61 @@ impl SerialClient {
                             Err(e) => return Err(e.into()),
                         }
                     }
-                    _ = tokio::time::sleep(Duration::from_millis(300)) => {
-                        // If no data for 300ms and we have output, check for prompt
-                        if last_data_time.elapsed() > Duration::from_millis(300) && !output.is_empty() {
+                    _ = tokio::time::sleep(Duration::from_millis(100)) => {
+                        // Periodic check for confirmation timeout and idle-settle prompts
+                        if let Some(detected_at) = prompt_detected_at {
+                            if last_data_time <= detected_at && detected_at.elapsed() >= prompt_confirm_delay {
+                                let text = String::from_utf8_lossy(&output);
+                                trace!("Prompt confirmed via idle check after {}ms", prompt_confirm_delay.as_millis());
+                                return Ok(text.to_string());
+                            }
+                        }
+
+                        // Idle-settle path: if no data for idle_settle_time and we have output,
+                        // do a final prompt check. This handles cases where the prompt was
+                        // split across reads or arrived without triggering the main path.
+                        if prompt_detected_at.is_none()
+                            && last_data_time.elapsed() > idle_settle_time
+                            && !output.is_empty()
+                        {
                             let text = String::from_utf8_lossy(&output);
-                            let clean = regex::Regex::new(r"\x1b\[[0-9;?]*[A-Za-z]")
-                                .unwrap()
-                                .replace_all(&text, "");
+                            let clean = ansi_regex.replace_all(&text, "");
 
-                            // Check for Aruba "Press any key to continue" prompt
-                            let press_key_regex = regex::Regex::new(r"Press any key to continue\s*$").unwrap();
-
-                            // Check for "-- MORE --" paging prompt
-                            let more_regex = regex::Regex::new(r"--\s*MORE\s*--").unwrap();
-
+                            // Handle special prompts in idle path
                             if press_key_regex.is_match(&clean) {
-                                debug!("Detected 'Press any key to continue' prompt (timeout path), sending ENTER");
-                                // Send ENTER to dismiss the prompt
+                                debug!("Detected 'Press any key to continue' prompt (idle path), sending ENTER");
                                 AsyncWriteExt::write_all(port, b"\r").await?;
                                 AsyncWriteExt::flush(port).await?;
-                                // Clear accumulated output and restart waiting
                                 output.clear();
                                 last_data_time = tokio::time::Instant::now();
-                                trace!("Waiting for actual prompt after dismissing continuation screen...");
-                                continue;
-                            } else if more_regex.is_match(&clean) {
-                                debug!("Detected '-- MORE --' paging prompt (timeout path), sending SPACE to continue");
-                                // Send SPACE to get next page
-                                AsyncWriteExt::write_all(port, b" ").await?;
-                                AsyncWriteExt::flush(port).await?;
-                                // Keep accumulated output (it's part of the command response)
-                                last_data_time = tokio::time::Instant::now();
-                                trace!("Continuing to read paged output...");
                                 continue;
                             }
 
-                            // Check the last line for a prompt (handles Cisco log messages after prompt)
-                            let last_line = clean.lines().last().unwrap_or("");
-                            let last_line_trimmed = last_line.trim();
+                            if more_regex.is_match(&clean) {
+                                debug!("Detected '-- MORE --' paging prompt (idle path), sending SPACE");
+                                AsyncWriteExt::write_all(port, b" ").await?;
+                                AsyncWriteExt::flush(port).await?;
+                                last_data_time = tokio::time::Instant::now();
+                                continue;
+                            }
 
-                            // Prompt pattern for line-by-line checking
-                            let prompt_pattern = r"^[\w-]+\s*(\([^\)]+\))?\s*[>#]\s*$";
-                            let prompt_regex = regex::Regex::new(prompt_pattern).unwrap();
-                            let interactive_regex = regex::Regex::new(r"(Username|username|Password|password|Enable password):\s*$").unwrap();
+                            let last_nonempty_line = clean.lines()
+                                .rev()
+                                .find(|line| !line.trim().is_empty())
+                                .unwrap_or("")
+                                .trim();
 
-                            // Check if the last line (or any recent line) has a prompt
-                            let has_prompt_on_line = prompt_regex.is_match(last_line_trimmed) || {
-                                clean.lines().rev().take(3).any(|line| {
-                                    let trimmed = line.trim();
-                                    prompt_regex.is_match(trimmed)
-                                })
-                            };
+                            // Check for prompt: strict line match, recent lines, or end-of-line
+                            let end_prompt_regex = regex::Regex::new(
+                                r"[\w-]{2,}\s*(\([^\)]+\))?\s*[>#]\s*$"
+                            ).unwrap();
+                            let has_prompt = prompt_regex.is_match(last_nonempty_line)
+                                || interactive_regex.is_match(&clean)
+                                || end_prompt_regex.is_match(last_nonempty_line)
+                                || clean.lines().rev().take(3).any(|l| prompt_regex.is_match(l.trim()));
 
-                            if has_prompt_on_line || interactive_regex.is_match(&clean) {
+                            if has_prompt {
+                                trace!("Prompt detected in idle-settle path: {:?}", last_nonempty_line);
                                 return Ok(text.to_string());
                             }
                         }
@@ -691,8 +766,15 @@ impl SerialClient {
             AsyncWriteExt::write_all(port, cmd.as_bytes()).await?;
             AsyncWriteExt::flush(port).await?;
 
-            // Wait for prompt - use longer timeout for "show" commands that return lots of data
-            let timeout = if command.starts_with("show") { 30 } else { 10 };
+            // Wait for prompt - use longer timeout for "show" commands that return lots of data.
+            // "show running-config" can be very large on serial connections (10KB+ at 9600 baud).
+            let timeout = if command.starts_with("show running") {
+                60
+            } else if command.starts_with("show") {
+                30
+            } else {
+                10
+            };
             let output = self.wait_for_prompt(timeout).await?;
 
             // Check for errors in output
@@ -707,8 +789,8 @@ impl SerialClient {
             }
 
             if !output.is_empty() {
-                debug!("Command output: {} bytes", output.len());
-                debug!("Output (first 200 chars): {}", &output.chars().take(200).collect::<String>());
+                debug!("Command output: {} bytes, {} lines", output.len(), output.lines().count());
+                trace!("Output (first 200 chars): {}", &output.chars().take(200).collect::<String>());
             }
 
             Ok(output)
@@ -843,9 +925,10 @@ mod tests {
     #[test]
     fn test_switch_prompt_regex() {
         // Test the regex pattern used to detect switch command prompts
-        // Pattern now uses ^ and $ to match individual lines (not entire accumulated output)
-        // In actual code, lines are trimmed before matching
-        let prompt_regex = regex::Regex::new(r"^[\w-]+\s*(\([^\)]+\))?\s*[>#]\s*$").unwrap();
+        // Pattern requires at least 2 word chars to avoid false positives from single chars.
+        // Uses ^ and $ to match individual lines (not entire accumulated output).
+        // In actual code, lines are trimmed before matching.
+        let prompt_regex = regex::Regex::new(r"^[\w-]{2,}\s*(\([^\)]+\))?\s*[>#]\s*$").unwrap();
 
         // Valid prompts that should match (on a single line, after trimming)
         assert!(prompt_regex.is_match("switch#"));
@@ -860,6 +943,7 @@ mod tests {
         assert!(prompt_regex.is_match("test_switch#"));
         assert!(prompt_regex.is_match("switch123#"));
         assert!(prompt_regex.is_match("switch# ")); // Trailing space
+        assert!(prompt_regex.is_match("IT-04269#")); // Real production hostname
 
         // Leading/trailing whitespace: In actual code, lines are trimmed first
         assert!(prompt_regex.is_match("  switch#  ".trim()));
@@ -869,6 +953,10 @@ mod tests {
         assert!(!prompt_regex.is_match(">"));
         assert!(!prompt_regex.is_match("just text #"));
         assert!(!prompt_regex.is_match("# comment"));
+
+        // Should NOT match single-char hostnames (too likely to be false positives)
+        assert!(!prompt_regex.is_match("s#"));
+        assert!(!prompt_regex.is_match("r>"));
 
         // Should not match if there's text after the prompt (on same line)
         assert!(!prompt_regex.is_match("switch# show running"));
@@ -934,6 +1022,92 @@ mod tests {
             let clean = ansi_regex.replace_all(input, "");
             assert_eq!(clean, expected, "Failed to clean: {:?}", input);
         }
+    }
+
+    // ============================================================================
+    // False Positive Prompt Detection Tests
+    // These test scenarios that previously caused truncated command output.
+    // ============================================================================
+
+    #[test]
+    fn test_prompt_regex_does_not_match_config_lines() {
+        // The prompt regex should NOT match lines that appear in running-config output
+        // but look similar to prompts. This was the root cause of the serial output
+        // truncation bug: lines within running-config were matching the prompt pattern.
+        let prompt_regex = regex::Regex::new(r"^[\w-]{2,}\s*(\([^\)]+\))?\s*[>#]\s*$").unwrap();
+
+        // These are lines from real Aruba running-config that should NOT match
+        assert!(!prompt_regex.is_match("hostname \"IT-04269\""));
+        assert!(!prompt_regex.is_match("   name \"management\""));
+        assert!(!prompt_regex.is_match("   untagged 1-24"));
+        assert!(!prompt_regex.is_match("   tagged 1-24"));
+        assert!(!prompt_regex.is_match("   ip address 192.168.1.1 255.255.255.0"));
+        assert!(!prompt_regex.is_match("snmp-server host 10.0.0.1 community \"public\""));
+        assert!(!prompt_regex.is_match("   no power-over-ethernet"));
+        assert!(!prompt_regex.is_match("interface 1"));
+        assert!(!prompt_regex.is_match("vlan 42"));
+        assert!(!prompt_regex.is_match("   exit"));
+        assert!(!prompt_regex.is_match("; J9855A Configuration Editor"));
+        assert!(!prompt_regex.is_match("Running configuration:"));
+        assert!(!prompt_regex.is_match("mirror 1 port 22"));
+
+        // SNMP community strings that might contain # or >
+        assert!(!prompt_regex.is_match("snmp-server community \"ro_community#1\" operator"));
+
+        // Comments with # should not match
+        assert!(!prompt_regex.is_match("# This is a comment"));
+        assert!(!prompt_regex.is_match("; comment with # symbol"));
+    }
+
+    #[test]
+    fn test_prompt_regex_matches_real_switch_prompts() {
+        // Ensure the regex still correctly matches real switch prompts
+        let prompt_regex = regex::Regex::new(r"^[\w-]{2,}\s*(\([^\)]+\))?\s*[>#]\s*$").unwrap();
+
+        // Real Aruba switch prompts
+        assert!(prompt_regex.is_match("IT-04269#"));
+        assert!(prompt_regex.is_match("IT-04269# "));
+        assert!(prompt_regex.is_match("HP-2530-8G-PoEP#"));
+        assert!(prompt_regex.is_match("HP-2530-8G-PoEP(config)#"));
+        assert!(prompt_regex.is_match("HP-2530-8G-PoEP(vlan-42)#"));
+
+        // Real Cisco switch prompts
+        assert!(prompt_regex.is_match("Switch#"));
+        assert!(prompt_regex.is_match("Switch>"));
+        assert!(prompt_regex.is_match("Switch(config)#"));
+        assert!(prompt_regex.is_match("Switch(config-if)#"));
+        assert!(prompt_regex.is_match("Catalyst9300#"));
+
+        // FortiSwitch prompts
+        assert!(prompt_regex.is_match("S108FPTV21002683#"));
+    }
+
+    #[test]
+    fn test_last_nonempty_line_extraction() {
+        // Test the last-non-empty-line logic used for prompt detection.
+        // This avoids matching prompts that appear mid-output.
+
+        // Simulate running-config output with prompt at the end
+        let output = "Running configuration:\n\nhostname \"IT-04269\"\nvlan 42\n   name \"test\"\n   exit\nIT-04269# \n";
+        let last_nonempty = output.lines()
+            .rev()
+            .find(|line| !line.trim().is_empty())
+            .unwrap_or("")
+            .trim();
+        assert_eq!(last_nonempty, "IT-04269#");
+
+        // Simulate output where the "prompt" is mid-output (should NOT be the last line)
+        let output_mid = "show running-config\n\nIT-04269# show running\nhostname \"IT-04269\"\nvlan 42\n   name \"test\"\n   exit\n";
+        let last_nonempty_mid = output_mid.lines()
+            .rev()
+            .find(|line| !line.trim().is_empty())
+            .unwrap_or("")
+            .trim();
+        // The last non-empty line is "   exit", not "IT-04269# show running"
+        assert_eq!(last_nonempty_mid, "exit");
+
+        let prompt_regex = regex::Regex::new(r"^[\w-]{2,}\s*(\([^\)]+\))?\s*[>#]\s*$").unwrap();
+        assert!(!prompt_regex.is_match(last_nonempty_mid), "Should NOT match 'exit' as a prompt");
     }
 
     // ============================================================================
