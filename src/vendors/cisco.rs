@@ -667,6 +667,17 @@ impl SwitchVendor for CiscoSwitch {
 
         debug!("Parsed Cisco state: Management VLAN: {:?}", management_vlan);
 
+        // Verify hardware model against running config
+        // Cisco IOS running config may contain "! model WS-C9300-24P" or similar
+        let hardware_id_pattern = regex::Regex::new(
+            r"^!\s*model\s+(\S+)"
+        ).unwrap();
+        let warnings = super::traits::verify_hardware_model(
+            &config,
+            &self.config.model(),
+            &hardware_id_pattern,
+        );
+
         // TODO: Implement full state parsing (VLANs, ports, mirrors, SNMP)
         // For now, we only parse management_vlan for idempotency
         warn!(
@@ -680,7 +691,7 @@ impl SwitchVendor for CiscoSwitch {
             port_mirrors: vec![],
             snmp: None,
             management_vlan,
-            ..Default::default()
+            warnings,
         })
     }
 
@@ -840,6 +851,13 @@ impl SwitchVendor for CiscoSwitch {
             commands_executed: commands,
             timestamp: chrono::Utc::now(),
         })
+    }
+
+    fn get_warnings(&self) -> Vec<String> {
+        self.current_state
+            .as_ref()
+            .map(|s| s.warnings.clone())
+            .unwrap_or_default()
     }
 
     async fn apply_configuration(&mut self) -> Result<Vec<ConfigResult>, VendorError> {

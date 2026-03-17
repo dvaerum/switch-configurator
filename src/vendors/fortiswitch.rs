@@ -10,6 +10,7 @@ pub struct FortiswitchSwitch {
     runtime_config: RuntimeConfig,
     client: Option<ConnectionClient>,
     enforce_port_config: bool,
+    current_state: Option<SwitchState>,
 }
 
 impl FortiswitchSwitch {
@@ -19,6 +20,7 @@ impl FortiswitchSwitch {
             runtime_config,
             client: None,
             enforce_port_config,
+            current_state: None,
         }
     }
 
@@ -762,6 +764,18 @@ impl SwitchVendor for FortiswitchSwitch {
             }
         }
 
+        // Verify hardware model against config
+        // FortiSwitch `get system status` contains "Platform Full Name: FortiSwitch-124F-FPOE"
+        // but that's not in the running config. For now, no extraction pattern matches.
+        let hardware_id_pattern = regex::Regex::new(
+            r"Platform Full Name:\s*(\S+)"
+        ).unwrap();
+        let warnings = super::traits::verify_hardware_model(
+            &config,
+            &self.config.model(),
+            &hardware_id_pattern,
+        );
+
         // TODO: Implement full state parsing (VLANs, ports, mirrors, SNMP)
         // For now, we only parse management_vlan for idempotency
         warn!(
@@ -775,7 +789,7 @@ impl SwitchVendor for FortiswitchSwitch {
             port_mirrors: vec![],
             snmp: None,
             management_vlan,
-            ..Default::default()
+            warnings,
         })
     }
 
@@ -927,10 +941,20 @@ impl SwitchVendor for FortiswitchSwitch {
         })
     }
 
+    fn get_warnings(&self) -> Vec<String> {
+        self.current_state
+            .as_ref()
+            .map(|s| s.warnings.clone())
+            .unwrap_or_default()
+    }
+
     async fn apply_configuration(&mut self) -> Result<Vec<ConfigResult>, VendorError> {
         // Parse current state
         debug!("Parsing current state from {}", self.config.hostname());
         let current = self.parse_current_state().await?;
+
+        // Store current state for warnings retrieval
+        self.current_state = Some(current.clone());
 
         // Compute diff
         debug!("Computing configuration differences");

@@ -505,38 +505,11 @@ impl ArubaSwitch {
         })
     }
 
-    /// Extract the hardware product number from the running config header and verify it
-    /// matches the configured switch model. Adds a warning to `state.warnings` on mismatch.
-    ///
-    /// The Aruba running config contains a header line like:
-    /// `; J9779A Configuration Editor; Created on release #YB.16.10.0009`
-    fn verify_product_number(&self, lines: &[&str], state: &mut SwitchState) {
-        // Look for the product number in comment lines (e.g., "; J9779A Configuration Editor;")
-        let product_regex = regex::Regex::new(r"^;\s*([A-Z]\d{4,5}[A-Z]?)\s+Configuration Editor").unwrap();
-
-        for line in lines {
-            let trimmed = line.trim();
-            if let Some(caps) = product_regex.captures(trimmed) {
-                let detected_product = caps.get(1).unwrap().as_str();
-                let model = self.config.model();
-                let known_products = model.product_numbers();
-
-                if known_products.is_empty() {
-                    debug!("Detected hardware product number: {} (no known product numbers for {:?} to verify against)", detected_product, model);
-                } else if known_products.contains(&detected_product) {
-                    debug!("Hardware product number {} matches configured model {:?}", detected_product, model);
-                } else {
-                    let warning = format!(
-                        "Hardware product number mismatch: switch reports {} but configured model {:?} expects one of {:?}",
-                        detected_product, model, known_products
-                    );
-                    warn!("{}", warning);
-                    state.warnings.push(warning);
-                }
-                return;
-            }
-        }
-        debug!("No product number found in running config header");
+    /// Regex pattern for extracting the hardware product number from the Aruba running config.
+    /// Matches lines like: `; J9779A Configuration Editor; Created on release #YB.16.10.0009`
+    /// Product numbers are like J9773A, J9855A, JL253A, JL355A (1-2 letters + 3-5 digits + optional letter)
+    fn hardware_id_pattern() -> regex::Regex {
+        regex::Regex::new(r";\s*([A-Z]{1,2}\d{3,5}[A-Z]?)\s+Configuration Editor").unwrap()
     }
 
     /// Parse interface block for name, mirror/monitor status, PoE, MAC notify, and enabled status
@@ -1451,8 +1424,12 @@ impl SwitchVendor for ArubaSwitch {
         let clean_config = ansi_regex.replace_all(&config, "");
         let lines: Vec<&str> = clean_config.lines().collect();
 
-        // Extract product number from header line and verify against configured model
-        self.verify_product_number(&lines, &mut state);
+        // Extract hardware identifier and verify against configured model
+        state.warnings = super::traits::verify_hardware_model(
+            &clean_config,
+            &self.config.model(),
+            &Self::hardware_id_pattern(),
+        );
 
         // First pass: collect interface names, VLAN configurations, and port mirrors
         let mut interface_names = std::collections::HashMap::new();
@@ -1987,8 +1964,12 @@ impl ArubaSwitch {
         let clean_config = ansi_regex.replace_all(config, "");
         let lines: Vec<&str> = clean_config.lines().collect();
 
-        // Extract product number from header line and verify against configured model
-        self.verify_product_number(&lines, &mut state);
+        // Extract hardware identifier and verify against configured model
+        state.warnings = super::traits::verify_hardware_model(
+            &clean_config,
+            &self.config.model(),
+            &Self::hardware_id_pattern(),
+        );
 
         // First pass: collect interface names, VLAN configurations, and port mirrors
         let mut interface_names = std::collections::HashMap::new();
