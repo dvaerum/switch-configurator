@@ -7,11 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.20] - 2026-03-17
+
 ### Added
 - **SSH/Serial Connection Retry Logic**: Added automatic retry capability for connection failures. Switches will now retry connecting up to `max_retries` times (default: 3) with a 5-second delay between attempts. This addresses issues where temporary network issues cause configuration to fail. The retry logic applies to both SSH and Serial connections.
 - **Configuration Summary Logging**: Added consistent summary logging to the file watcher flow. When configuration is applied (either on startup or via file watcher), the logs now include a summary showing success/failure counts, matching the format used in one-off mode.
 
 ### Fixed
+- **Aruba PoE Parser (Critical)**: Fixed `poe-allocate-by class` incorrectly overriding `no power-over-ethernet` in the running config parser. On Aruba switches, `poe-allocate-by` is an allocation method present on all PoE-capable ports regardless of whether PoE is enabled. The parser now ignores it when determining PoE state, preventing an infinite reconfiguration loop where PoE was disabled and re-enabled every cycle.
+- **Aruba 2530 Mirror Command**: Fixed `monitor all both mirror 1` being sent inside interface context on Aruba 2530/2540 models, which returned `Invalid input: all`. These models use legacy `monitor` (no parameters) syntax. The command generator now checks `uses_legacy_mirror_syntax()` to select the correct syntax per model.
 - **Serial Output Truncation (Critical)**: Fixed a bug where `show running-config` via serial connection returned only a few lines instead of the full configuration. Root cause was three-fold:
   1. **False-positive prompt detection**: The prompt regex could match lines within config output that resembled switch prompts (e.g., hostname references). Added confirmation wait: after detecting a potential prompt, the client now waits 500ms to verify no more data arrives before accepting the match.
   2. **Incomplete buffer clearing**: `clear_buffer()` only read a single 1024-byte chunk, which could leave stale data from a previous command in the serial buffer. Now drains all pending data in a loop.

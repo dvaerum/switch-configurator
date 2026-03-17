@@ -225,12 +225,20 @@ impl ArubaSwitch {
             // Add monitor commands if this port is a mirror source
             if let Some(mirror_configs) = mirror_sources.get(&interface) {
                 for (session_id, direction) in mirror_configs {
-                    let direction_cmd = match direction {
-                        MirrorDirection::Both => format!("monitor all both mirror {}", session_id),
-                        MirrorDirection::Rx => format!("monitor all in mirror {}", session_id),
-                        MirrorDirection::Tx => format!("monitor all out mirror {}", session_id),
-                    };
-                    commands.push(direction_cmd);
+                    // Aruba 2530/2540 series use legacy "monitor" (no parameters) inside interface context
+                    // Aruba 2930F and newer use "monitor all <direction> mirror <session-id>"
+                    if self.config.model().uses_legacy_mirror_syntax() {
+                        commands.push("monitor".to_string());
+                        // Legacy syntax only supports one mirror session, so break after first
+                        break;
+                    } else {
+                        let direction_cmd = match direction {
+                            MirrorDirection::Both => format!("monitor all both mirror {}", session_id),
+                            MirrorDirection::Rx => format!("monitor all in mirror {}", session_id),
+                            MirrorDirection::Tx => format!("monitor all out mirror {}", session_id),
+                        };
+                        commands.push(direction_cmd);
+                    }
                 }
             }
 
@@ -550,13 +558,17 @@ impl ArubaSwitch {
             }
             // Parse PoE status
             // "no power-over-ethernet" means PoE is disabled
-            // "poe-allocate-by class" or "power-over-ethernet" means PoE is enabled
+            // "power-over-ethernet" (explicit enable) means PoE is enabled
+            // "poe-allocate-by class" is just an allocation method setting that exists
+            // regardless of PoE being enabled or disabled — it does NOT indicate PoE is on
             else if inner_line == "no power-over-ethernet" {
                 poe_enabled = false;
             }
-            else if inner_line.starts_with("poe-allocate-by") || inner_line.starts_with("power-over-ethernet") {
+            else if inner_line.starts_with("power-over-ethernet") {
                 poe_enabled = true;
             }
+            // poe-allocate-by is intentionally ignored — it's present on PoE-capable ports
+            // even when PoE is disabled, and does not affect the PoE enabled/disabled state
             // Parse MAC notify status
             // "mac-notify" or "mac-notify traps" means MAC notify is enabled
             else if inner_line.starts_with("mac-notify") {
@@ -4639,5 +4651,162 @@ vlan 10
                   "Port 1 with 'no power-over-ethernet' should have poe_enabled=false");
         assert_eq!(port2.poe_enabled, true,
                   "Port 2 without PoE command should default to poe_enabled=true");
+    }
+
+    #[test]
+    fn test_poe_switch_parser_no_poe_with_allocate_by_class() {
+        // Verify that "poe-allocate-by class" does NOT override "no power-over-ethernet"
+        // This matches real Aruba 2530 running config where poe-allocate-by is always present
+        // on PoE-capable ports regardless of whether PoE is enabled or disabled.
+        let switch = create_test_switch();  // Uses Aruba2930F (PoE model)
+
+        // Real-world config from Aruba 2530-24G PoE+
+        let config = r#"
+interface 1
+   name "RTX3483 - Zone 1"
+   poe-allocate-by class
+   speed-duplex 100-full
+   exit
+interface 5
+   name "cisco-mgmt"
+   no power-over-ethernet
+   poe-allocate-by class
+   exit
+interface 7
+   name "cisco-ap"
+   poe-allocate-by class
+   exit
+interface 15
+   monitor
+   name "APC v2 - Zone 1"
+   no power-over-ethernet
+   poe-allocate-by class
+   mac-notify traps learned
+   mac-notify traps removed
+   exit
+vlan 1000
+   name "philips-ap-z1"
+   untagged 1
+   exit
+vlan 2088
+   name "cisco-mgmt"
+   untagged 5
+   exit
+vlan 2090
+   name "cisco-aps"
+   untagged 7
+   exit
+vlan 1020
+   name "philips-apc-z1"
+   untagged 15
+   exit
+"#;
+
+        let state = switch.parse_running_config(config);
+
+        let port1 = state.ports.iter().find(|p| p.port_id == "1").unwrap();
+        let port5 = state.ports.iter().find(|p| p.port_id == "5").unwrap();
+        let port7 = state.ports.iter().find(|p| p.port_id == "7").unwrap();
+        let port15 = state.ports.iter().find(|p| p.port_id == "15").unwrap();
+
+        // Port 1: has poe-allocate-by but no "no power-over-ethernet" → PoE enabled (default)
+        assert_eq!(port1.poe_enabled, true,
+                  "Port 1 with poe-allocate-by but no 'no power-over-ethernet' should have poe_enabled=true");
+
+        // Port 5: has "no power-over-ethernet" followed by "poe-allocate-by class" → PoE DISABLED
+        assert_eq!(port5.poe_enabled, false,
+                  "Port 5 with 'no power-over-ethernet' should have poe_enabled=false even with 'poe-allocate-by class'");
+
+        // Port 7: has poe-allocate-by but no "no power-over-ethernet" → PoE enabled (default)
+        assert_eq!(port7.poe_enabled, true,
+                  "Port 7 with poe-allocate-by but no 'no power-over-ethernet' should have poe_enabled=true");
+
+        // Port 15: has "no power-over-ethernet" + "poe-allocate-by class" + monitor → PoE DISABLED
+        assert_eq!(port15.poe_enabled, false,
+                  "Port 15 with 'no power-over-ethernet' should have poe_enabled=false even with 'poe-allocate-by class'");
+    }
+
+    #[test]
+    fn test_legacy_mirror_monitor_command_for_2530() {
+        // Aruba 2530 uses legacy "monitor" (no parameters) in interface context
+        // Aruba 2930F uses "monitor all both mirror <session>"
+        let config_2530 = SwitchConfig {
+            id: "test-2530".to_string(),
+            hostname: Some("test-2530".to_string()),
+            model: Some(SwitchModel::Aruba2530_24G_POE),
+            management_ip: Some("192.168.1.1".to_string()),
+            credentials: Some(Credentials {
+                username: "admin".to_string(),
+                password: Some("password".to_string()),
+                ssh_key_path: None,
+                port: 22,
+                connection_type: ConnectionType::Ssh,
+                serial_device: None,
+                baud_rate: 9600,
+                jump_hosts: None,
+            }),
+            vlans: vec![],
+            ports: vec![],
+            port_mirrors: vec![],
+            snmp: None,
+            validation: None,
+            vendor_specific: std::collections::HashMap::new(),
+            management_vlan: None,
+            settings: crate::config::Settings::default(),
+        };
+        let runtime_config = RuntimeConfig::default();
+        let switch_2530 = ArubaSwitch::new(config_2530, runtime_config, false);
+
+        let mirrors = vec![
+            PortMirror {
+                session_id: "1".to_string(),
+                source_ports: vec!["15".to_string(), "16".to_string()],
+                destination_port: "22".to_string(),
+                direction: MirrorDirection::Both,
+            },
+        ];
+
+        let ports = vec![
+            Port {
+                port_id: "15".to_string(),
+                mode: PortMode::Access,
+                vlan: 1020,
+                allowed_vlans: vec![],
+                description: Some("Source 1".to_string()),
+                enabled: true,
+                poe_enabled: false,
+                mac_notify: false,
+                speed_duplex: SpeedDuplex::Auto,
+            },
+            Port {
+                port_id: "16".to_string(),
+                mode: PortMode::Access,
+                vlan: 1020,
+                allowed_vlans: vec![],
+                description: Some("Source 2".to_string()),
+                enabled: true,
+                poe_enabled: false,
+                mac_notify: false,
+                speed_duplex: SpeedDuplex::Auto,
+            },
+        ];
+
+        let cmds = switch_2530.generate_port_commands(&ports, &mirrors);
+
+        // 2530 should use plain "monitor" (no parameters)
+        assert!(cmds.contains(&"monitor".to_string()),
+                "Aruba 2530 should use 'monitor' command, got: {:?}", cmds);
+        assert!(!cmds.iter().any(|c| c.starts_with("monitor all")),
+                "Aruba 2530 should NOT use 'monitor all both mirror' syntax");
+
+        // 2930F should use "monitor all both mirror <session>"
+        let switch_2930 = create_test_switch();  // Uses Aruba2930F
+        let cmds_2930 = switch_2930.generate_port_commands(&ports, &mirrors);
+
+        assert!(cmds_2930.contains(&"monitor all both mirror 1".to_string()),
+                "Aruba 2930F should use 'monitor all both mirror 1' command");
+        assert!(!cmds_2930.contains(&"monitor".to_string()) ||
+                cmds_2930.iter().filter(|c| *c == "monitor").count() == 0,
+                "Aruba 2930F should NOT use plain 'monitor' command");
     }
 }
