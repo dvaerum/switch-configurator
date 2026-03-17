@@ -4919,8 +4919,8 @@ vlan 1020
         assert!(SwitchModel::Aruba2540_48G_4SFP.product_numbers().contains(&"JL355A"));
         assert!(!SwitchModel::Aruba2930F.product_numbers().is_empty());
 
-        // Non-Aruba models may have empty product number lists
-        assert!(SwitchModel::Fortiswitch124F_FPOE.product_numbers().is_empty());
-        assert!(SwitchModel::CiscoCatalyst9300_24P_UPOE.product_numbers().is_empty());
+        // All vendors now have product numbers for model detection
+        assert!(!SwitchModel::Fortiswitch124F_FPOE.product_numbers().is_empty());
+        assert!(!SwitchModel::CiscoCatalyst9300_24P_UPOE.product_numbers().is_empty());
     }
 }

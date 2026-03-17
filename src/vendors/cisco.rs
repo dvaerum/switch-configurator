@@ -668,9 +668,10 @@ impl SwitchVendor for CiscoSwitch {
         debug!("Parsed Cisco state: Management VLAN: {:?}", management_vlan);
 
         // Verify hardware model against running config
-        // Cisco IOS running config may contain "! model WS-C9300-24P" or similar
+        // Cisco IOS-XE running config contains "switch <n> provision <model>"
+        // e.g., "switch 1 provision c9300-24u"
         let hardware_id_pattern = regex::Regex::new(
-            r"^!\s*model\s+(\S+)"
+            r"(?m)^switch\s+\d+\s+provision\s+(\S+)"
         ).unwrap();
         let warnings = super::traits::verify_hardware_model(
             &config,

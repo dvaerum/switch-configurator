@@ -764,17 +764,9 @@ impl SwitchVendor for FortiswitchSwitch {
             }
         }
 
-        // Verify hardware model against config
-        // FortiSwitch `get system status` contains "Platform Full Name: FortiSwitch-124F-FPOE"
-        // but that's not in the running config. For now, no extraction pattern matches.
-        let hardware_id_pattern = regex::Regex::new(
-            r"Platform Full Name:\s*(\S+)"
-        ).unwrap();
-        let warnings = super::traits::verify_hardware_model(
-            &config,
-            &self.config.model(),
-            &hardware_id_pattern,
-        );
+        // Verify hardware model by running "get system status"
+        // This returns lines like "Version: FortiSwitch-108F-POE v7.2.8,build0660,..."
+        let warnings = self.detect_hardware_model().await;
 
         // TODO: Implement full state parsing (VLANs, ports, mirrors, SNMP)
         // For now, we only parse management_vlan for idempotency
@@ -1134,6 +1126,35 @@ impl SwitchVendor for FortiswitchSwitch {
 
 // Additional helper methods for FortiswitchSwitch
 impl FortiswitchSwitch {
+    /// Detect hardware model by running "get system status" and comparing
+    /// the version string against known product identifiers.
+    async fn detect_hardware_model(&mut self) -> Vec<String> {
+        let client = match self.client.as_mut() {
+            Some(c) => c,
+            None => return Vec::new(),
+        };
+
+        match client.execute_command("get system status").await {
+            Ok(output) => {
+                // The output contains a line like:
+                // "Version: FortiSwitch-108F-POE v7.2.8,build0660,241119 (GA.MR8)"
+                // Extract the model from this line
+                let pattern = regex::Regex::new(
+                    r"Version:\s*(FortiSwitch-\S+)\s+v"
+                ).unwrap();
+                super::traits::verify_hardware_model(
+                    &output,
+                    &self.config.model(),
+                    &pattern,
+                )
+            }
+            Err(e) => {
+                debug!("Could not get system status for model detection: {}", e);
+                Vec::new()
+            }
+        }
+    }
+
     /// Reset ports to default state (disabled, VLAN 1, access mode, no description)
     async fn reset_ports(&mut self, port_ids: &[String]) -> Result<ConfigResult, VendorError> {
         let mut commands = vec!["config switch interface".to_string()];

@@ -833,4 +833,60 @@ interface 1
         assert!(json.contains("warnings"), "Non-empty warnings should be serialized");
         assert!(json.contains("J9779A"), "Warning content should be in JSON");
     }
+
+    #[tokio::test]
+    async fn test_mock_vendor_cisco_model_mismatch_warning() {
+        let mut mock_vendor = MockVendor::new();
+
+        mock_vendor.expect_connect().times(1).returning(|| Ok(()));
+        mock_vendor.expect_apply_configuration().times(1).returning(|| Ok(vec![]));
+        mock_vendor.expect_get_warnings().times(1).returning(|| vec![
+            "Hardware model mismatch: switch reports c9200-48p but configured model CiscoCatalyst9300_24P_UPOE expects one of [\"c9300-24u\", \"C9300-24U\", \"C9300-24P\"]".to_string()
+        ]);
+        mock_vendor.expect_disconnect().times(1).returning(|| Ok(()));
+
+        assert!(mock_vendor.connect().await.is_ok());
+        let _ = mock_vendor.apply_configuration().await;
+        let warnings = mock_vendor.get_warnings();
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("c9200-48p"));
+        assert!(warnings[0].contains("CiscoCatalyst9300_24P_UPOE"));
+        assert!(mock_vendor.disconnect().await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_mock_vendor_fortiswitch_model_mismatch_warning() {
+        let mut mock_vendor = MockVendor::new();
+
+        mock_vendor.expect_connect().times(1).returning(|| Ok(()));
+        mock_vendor.expect_apply_configuration().times(1).returning(|| Ok(vec![]));
+        mock_vendor.expect_get_warnings().times(1).returning(|| vec![
+            "Hardware model mismatch: switch reports FortiSwitch-108F-POE but configured model Fortiswitch124F_FPOE expects one of [\"FortiSwitch-124F-FPOE\", \"S124F\"]".to_string()
+        ]);
+        mock_vendor.expect_disconnect().times(1).returning(|| Ok(()));
+
+        assert!(mock_vendor.connect().await.is_ok());
+        let _ = mock_vendor.apply_configuration().await;
+        let warnings = mock_vendor.get_warnings();
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("FortiSwitch-108F-POE"));
+        assert!(warnings[0].contains("Fortiswitch124F_FPOE"));
+        assert!(mock_vendor.disconnect().await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_mock_vendor_no_model_mismatch() {
+        let mut mock_vendor = MockVendor::new();
+
+        mock_vendor.expect_connect().times(1).returning(|| Ok(()));
+        mock_vendor.expect_apply_configuration().times(1).returning(|| Ok(vec![]));
+        mock_vendor.expect_get_warnings().times(1).returning(Vec::new);
+        mock_vendor.expect_disconnect().times(1).returning(|| Ok(()));
+
+        assert!(mock_vendor.connect().await.is_ok());
+        let _ = mock_vendor.apply_configuration().await;
+        let warnings = mock_vendor.get_warnings();
+        assert!(warnings.is_empty(), "No mismatch should produce no warnings");
+        assert!(mock_vendor.disconnect().await.is_ok());
+    }
 }

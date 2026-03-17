@@ -194,4 +194,92 @@ mod tests {
         let warnings = verify_hardware_model(config, &SwitchModel::Aruba2530_24G_POE, &pattern);
         assert_eq!(warnings.len(), 1, "2930F product on 2530 model should warn");
     }
+
+    // ============================================================================
+    // Cisco Model Detection Tests
+    // ============================================================================
+
+    fn cisco_pattern() -> regex::Regex {
+        regex::Regex::new(r"(?m)^switch\s+\d+\s+provision\s+(\S+)").unwrap()
+    }
+
+    #[test]
+    fn test_cisco_model_detection_match() {
+        let config = "!\nversion 16.9\nhostname IT-04263\nswitch 1 provision c9300-24u\nip ssh version 2\n";
+        let warnings = verify_hardware_model(config, &SwitchModel::CiscoCatalyst9300_24P_UPOE, &cisco_pattern());
+        assert!(warnings.is_empty(), "c9300-24u should match CiscoCatalyst9300_24P_UPOE, got: {:?}", warnings);
+    }
+
+    #[test]
+    fn test_cisco_model_detection_mismatch() {
+        let config = "!\nversion 16.9\nhostname test\nswitch 1 provision c9200-48p\n";
+        let warnings = verify_hardware_model(config, &SwitchModel::CiscoCatalyst9300_24P_UPOE, &cisco_pattern());
+        assert_eq!(warnings.len(), 1, "c9200-48p should not match C9300");
+        assert!(warnings[0].contains("c9200-48p"));
+        assert!(warnings[0].contains("mismatch"));
+    }
+
+    #[test]
+    fn test_cisco_model_detection_no_provision_line() {
+        let config = "!\nversion 16.9\nhostname test\nip ssh version 2\n";
+        let warnings = verify_hardware_model(config, &SwitchModel::CiscoCatalyst9300_24P_UPOE, &cisco_pattern());
+        assert!(warnings.is_empty(), "No provision line should produce no warnings");
+    }
+
+    #[test]
+    fn test_cisco_model_detection_stacked() {
+        // Stacked switches have multiple provision lines — we match the first one
+        let config = "switch 1 provision c9300-24u\nswitch 2 provision c9300-24u\n";
+        let warnings = verify_hardware_model(config, &SwitchModel::CiscoCatalyst9300_24P_UPOE, &cisco_pattern());
+        assert!(warnings.is_empty(), "Stacked c9300-24u should match");
+    }
+
+    // ============================================================================
+    // FortiSwitch Model Detection Tests
+    // ============================================================================
+
+    fn forti_pattern() -> regex::Regex {
+        regex::Regex::new(r"Version:\s*(FortiSwitch-\S+)\s+v").unwrap()
+    }
+
+    #[test]
+    fn test_forti_model_detection_match_124f() {
+        let output = "Version: FortiSwitch-124F-FPOE v7.2.8,build0660,241119 (GA.MR8)\nSerial-Number: S124FFTF24000746\n";
+        let warnings = verify_hardware_model(output, &SwitchModel::Fortiswitch124F_FPOE, &forti_pattern());
+        assert!(warnings.is_empty(), "FortiSwitch-124F-FPOE should match Fortiswitch124F_FPOE, got: {:?}", warnings);
+    }
+
+    #[test]
+    fn test_forti_model_detection_mismatch_108f_on_124f() {
+        // 108F hardware configured as 124F model — should warn
+        let output = "Version: FortiSwitch-108F-POE v7.2.8,build0660,241119 (GA.MR8)\nSerial-Number: S108FPTV21002683\n";
+        let warnings = verify_hardware_model(output, &SwitchModel::Fortiswitch124F_FPOE, &forti_pattern());
+        assert_eq!(warnings.len(), 1, "108F hardware on 124F config should warn");
+        assert!(warnings[0].contains("FortiSwitch-108F-POE"));
+        assert!(warnings[0].contains("mismatch"));
+    }
+
+    #[test]
+    fn test_forti_model_detection_no_version_line() {
+        let output = "Serial-Number: S108FPTV21002683\nHostname: test\n";
+        let warnings = verify_hardware_model(output, &SwitchModel::Fortiswitch124F_FPOE, &forti_pattern());
+        assert!(warnings.is_empty(), "No version line should produce no warnings");
+    }
+
+    // ============================================================================
+    // Cross-vendor Product Numbers Tests
+    // ============================================================================
+
+    #[test]
+    fn test_all_models_have_product_numbers() {
+        // All models that we support model detection for should have product numbers
+        assert!(!SwitchModel::Aruba2530_24G_POE.product_numbers().is_empty(), "Aruba 2530-24G");
+        assert!(!SwitchModel::Aruba2530_8G_POE.product_numbers().is_empty(), "Aruba 2530-8G");
+        assert!(!SwitchModel::Aruba2530_48G_2SFP.product_numbers().is_empty(), "Aruba 2530-48G");
+        assert!(!SwitchModel::Aruba2540_24G.product_numbers().is_empty(), "Aruba 2540-24G");
+        assert!(!SwitchModel::Aruba2540_48G_4SFP.product_numbers().is_empty(), "Aruba 2540-48G");
+        assert!(!SwitchModel::Aruba2930F.product_numbers().is_empty(), "Aruba 2930F");
+        assert!(!SwitchModel::CiscoCatalyst9300_24P_UPOE.product_numbers().is_empty(), "Cisco C9300");
+        assert!(!SwitchModel::Fortiswitch124F_FPOE.product_numbers().is_empty(), "FortiSwitch 124F");
+    }
 }

@@ -332,8 +332,8 @@ impl SwitchModel {
             Self::Aruba2540_24G => &["JL354A"],                // 2540-24G
             Self::Aruba2540_48G_4SFP => &["JL355A"],           // 2540-48G-4SFP+
             Self::Aruba2930F => &["JL253A", "JL254A", "JL255A", "JL256A", "JL258A", "JL261A", "JL262A", "JL263A", "JL264A"],
-            Self::Fortiswitch124F_FPOE => &[],  // FortiSwitch uses different identification
-            Self::CiscoCatalyst9300_24P_UPOE => &[],  // Cisco uses different identification
+            Self::Fortiswitch124F_FPOE => &["FortiSwitch-124F-FPOE", "S124F"],
+            Self::CiscoCatalyst9300_24P_UPOE => &["c9300-24u", "C9300-24U", "C9300-24P"],
         }
     }
 
