@@ -227,10 +227,9 @@ impl SerialClient {
     pub async fn login(&mut self, username: &str, password: &str) -> Result<()> {
         info!("Logging in as user: {}", username);
 
-        if self.dry_run {
-            info!("   🔍 [DRY-RUN] Would login (skipped)");
-            return Ok(());
-        }
+        // NOTE: Login is always performed, even in dry-run mode.
+        // Serial connections require authentication before any commands work,
+        // including read-only "show" commands needed for state parsing.
 
         // Send a carriage return to see what state we're in
         self.send_raw("\r").await?;
@@ -417,6 +416,7 @@ impl SerialClient {
             let mut accumulated = String::new();
             let mut buf = [0u8; 1024];
             let start = tokio::time::Instant::now();
+            let mut last_data_time = tokio::time::Instant::now();
 
             loop {
                 if start.elapsed() > timeout {
@@ -430,6 +430,7 @@ impl SerialClient {
                                 let data = String::from_utf8_lossy(&buf[..n]);
                                 trace!("Serial RX (check_state): {} bytes: {:?}", n, data);
                                 accumulated.push_str(&data);
+                                last_data_time = tokio::time::Instant::now();
                             }
                             Ok(_) => {
                                 tokio::time::sleep(Duration::from_millis(10)).await;
@@ -441,7 +442,17 @@ impl SerialClient {
                         }
                     }
                     _ = tokio::time::sleep(Duration::from_millis(100)) => {
-                        if !accumulated.is_empty() {
+                        // Only return early if we have data that looks like a prompt
+                        // (login:, Username:, Password:, #, >) or enough idle time has
+                        // passed. This prevents returning too early when the switch sends
+                        // \r\n first, then the actual prompt after a delay.
+                        if !accumulated.is_empty() && last_data_time.elapsed() > Duration::from_millis(500) {
+                            break;
+                        }
+                        // Also break early if we already have a recognizable prompt
+                        if accumulated.contains("login:") || accumulated.contains("Username:")
+                            || accumulated.contains("Password:") || accumulated.contains('#')
+                            || accumulated.contains('>') {
                             break;
                         }
                     }
@@ -748,10 +759,13 @@ impl SerialClient {
         }
 
         // Dry-run mode: skip execution (except for read-only commands and session settings)
-        let is_readonly = command.trim().starts_with("show ");
+        let is_readonly = command.trim().starts_with("show ")
+            || command.trim().starts_with("get ");  // FortiSwitch read commands
         let is_session_setting = command.trim() == "no page"
             || command.trim() == "terminal length 0"
-            || command.trim() == "terminal pager 0";
+            || command.trim() == "terminal pager 0"
+            || command.trim() == "enable"
+            || command.trim() == "end";  // FortiSwitch: exit config mode
 
         if self.dry_run && !is_readonly && !is_session_setting {
             info!("   🔍 [DRY-RUN] Would execute (skipped)");
