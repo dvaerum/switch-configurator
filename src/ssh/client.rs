@@ -868,6 +868,7 @@ mod tests {
             baud_rate: 9600,
             ssh_key_path: None,
             jump_hosts: None,
+                enable_secret: None,
         };
 
         // Should fail after retries (using small number for test speed)
@@ -891,6 +892,7 @@ mod tests {
             baud_rate: 9600,
             ssh_key_path: None,
             jump_hosts: None,
+                enable_secret: None,
         };
 
         let start = std::time::Instant::now();
@@ -920,6 +922,7 @@ mod tests {
             baud_rate: 9600,
             ssh_key_path: None,
             jump_hosts: None,
+                enable_secret: None,
         };
 
         // With max_retries = 0, it should still attempt once (enforced by .max(1))

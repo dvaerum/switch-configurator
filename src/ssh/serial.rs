@@ -378,7 +378,7 @@ impl SerialClient {
                 debug!("Successfully entered privileged exec mode (#)");
             } else if final_prompt_trimmed.ends_with('>') {
                 warn!("Still in user mode after enable command. Enable password may be required.");
-                warn!("Add 'enable_password' to switch credentials if commands fail.");
+                warn!("Add 'enable_secret' to switch credentials if commands fail.");
             } else {
                 debug!("Privilege level unclear, but continuing anyway");
             }

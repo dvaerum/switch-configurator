@@ -1542,6 +1542,7 @@ baud_rate: 9600
                 serial_device: None,
                 baud_rate: 9600,
                 jump_hosts: None,
+                enable_secret: None,
             }),
             vlans: vec![
                 Vlan {
@@ -1612,6 +1613,7 @@ baud_rate: 9600
                 serial_device: None,
                 baud_rate: 9600,
                 jump_hosts: None,
+                enable_secret: None,
             }),
             vlans: vec![
                 Vlan {
@@ -1668,6 +1670,7 @@ baud_rate: 9600
                 serial_device: None,
                 baud_rate: 9600,
                 jump_hosts: None,
+                enable_secret: None,
             }),
             vlans: vec![
                 Vlan {
@@ -1732,6 +1735,7 @@ baud_rate: 9600
                 serial_device: None,
                 baud_rate: 9600,
                 jump_hosts: None,
+                enable_secret: None,
             }),
             vlans: vec![
                 Vlan {
@@ -1792,6 +1796,7 @@ baud_rate: 9600
                 serial_device: None,
                 baud_rate: 9600,
                 jump_hosts: None,
+                enable_secret: None,
             }),
             vlans: vec![
                 Vlan {
@@ -1863,6 +1868,7 @@ baud_rate: 9600
                 serial_device: None,
                 baud_rate: 9600,
                 jump_hosts: None,
+                enable_secret: None,
             }),
             vlans: vec![
                 Vlan {
@@ -2096,6 +2102,7 @@ settings:
                 serial_device: None,
                 baud_rate: 9600,
                 jump_hosts: None,
+                enable_secret: None,
             }),
             vlans: vec![Vlan {
                 id: 2097,
@@ -2142,6 +2149,7 @@ settings:
                 serial_device: None,
                 baud_rate: 9600,
                 jump_hosts: None,
+                enable_secret: None,
             }),
             vlans: vec![Vlan {
                 id: 100,
@@ -2184,6 +2192,7 @@ settings:
                 serial_device: None,
                 baud_rate: 9600,
                 jump_hosts: None,
+                enable_secret: None,
             }),
             vlans: vec![Vlan {
                 id: 100,
@@ -2226,6 +2235,7 @@ settings:
                 serial_device: None,
                 baud_rate: 9600,
                 jump_hosts: None,
+                enable_secret: None,
             }),
             vlans: vec![Vlan {
                 id: 100,
@@ -2293,6 +2303,7 @@ settings:
                 serial_device: None,
                 baud_rate: 9600,
                 jump_hosts: None,
+                enable_secret: None,
             }),
             vlans: vec![Vlan {
                 id: 100,
@@ -2342,6 +2353,7 @@ settings:
                 serial_device: None,
                 baud_rate: 9600,
                 jump_hosts: None,
+                enable_secret: None,
             }),
             vlans: vec![
                 Vlan {
@@ -2417,6 +2429,7 @@ settings:
                 serial_device: None,
                 baud_rate: 9600,
                 jump_hosts: None,
+                enable_secret: None,
             }),
             vlans: vec![Vlan {
                 id: 100,
@@ -2466,6 +2479,7 @@ settings:
                 serial_device: None,
                 baud_rate: 9600,
                 jump_hosts: None,
+                enable_secret: None,
             }),
             vlans: vec![Vlan {
                 id: 2097,

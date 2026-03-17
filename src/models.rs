@@ -1012,6 +1012,11 @@ pub struct Credentials {
     #[serde(default = "default_baud_rate")]
     pub baud_rate: u32,
 
+    /// Enable secret for entering privileged exec mode (e.g., Aruba `enable`, Cisco `enable`).
+    /// If not set, the login password is used as fallback.
+    #[serde(default, skip_serializing)]
+    pub enable_secret: Option<String>,
+
     /// Chain of jump hosts (bastion servers) to proxy through
     /// Connections are chained: local -> jump_hosts[0] -> jump_hosts[1] -> ... -> target
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -29,6 +29,7 @@ async fn create_test_config_store_async() -> ConfigStore {
             serial_device: None,
             baud_rate: 9600,
             jump_hosts: None,
+                enable_secret: None,
         }),
         vlans: vec![
             Vlan {
@@ -73,6 +74,7 @@ async fn create_test_config_store_async() -> ConfigStore {
             serial_device: None,
             baud_rate: 9600,
             jump_hosts: None,
+                enable_secret: None,
         }),
         vlans: vec![
             Vlan {
@@ -120,6 +122,7 @@ fn create_test_config_store() -> ConfigStore {
             serial_device: None,
             baud_rate: 9600,
             jump_hosts: None,
+                enable_secret: None,
         }),
         vlans: vec![
             Vlan {
@@ -165,6 +168,7 @@ fn create_test_config_store() -> ConfigStore {
             serial_device: None,
             baud_rate: 9600,
             jump_hosts: None,
+                enable_secret: None,
         }),
         vlans: vec![
             Vlan {

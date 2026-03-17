@@ -1216,6 +1216,7 @@ mod tests {
                 serial_device: Some("/dev/serial_cisco_c9300-24u-a".to_string()),
                 baud_rate: 9600,
                 jump_hosts: None,
+                enable_secret: None,
             }),
             vlans: vec![],
             ports: vec![],

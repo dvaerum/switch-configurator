@@ -1278,6 +1278,7 @@ mod tests {
                 serial_device: Some("/dev/ttyUSB0".to_string()),
                 baud_rate: 115200,
                 jump_hosts: None,
+                enable_secret: None,
             }),
             vlans: vec![],
             ports: vec![],

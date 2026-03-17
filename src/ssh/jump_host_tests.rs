@@ -246,6 +246,7 @@ password: secret
             connection_type: ConnectionType::Ssh,
             serial_device: None,
             baud_rate: 9600,
+            enable_secret: None,
             jump_hosts: Some(vec![JumpHost {
                 host: "bastion.com".to_string(),
                 username: None,
@@ -263,6 +264,7 @@ password: secret
             connection_type: ConnectionType::Ssh,
             serial_device: None,
             baud_rate: 9600,
+            enable_secret: None,
             jump_hosts: Some(vec![JumpHost {
                 host: "bastion.com".to_string(),
                 username: None,

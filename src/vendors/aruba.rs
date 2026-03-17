@@ -1334,6 +1334,10 @@ impl SwitchVendor for ArubaSwitch {
                     // "Invalid input: enable". We handle this gracefully.
                     // Enable auth_mode so credential responses aren't skipped in dry-run.
                     serial_client.set_auth_mode(true);
+                    // Determine the enable password: use enable_secret if set, otherwise fall back to login password
+                    let enable_secret = self.config.credentials().enable_secret.clone()
+                        .or_else(|| self.config.credentials().password.clone());
+
                     match serial_client.execute_command("enable").await {
                         Ok(enable_output) => {
                             // Check if enable prompted for credentials
@@ -1346,20 +1350,20 @@ impl SwitchVendor for ArubaSwitch {
                                     .await
                                     .map_err(|e| VendorError::SshError(e.to_string()))?;
 
-                                // Send password
-                                if let Some(password) = &self.config.credentials().password {
+                                // Send enable password (or fall back to login password)
+                                if let Some(secret) = &enable_secret {
                                     serial_client
-                                        .execute_command(password)
+                                        .execute_command(secret)
                                         .await
                                         .map_err(|e| VendorError::SshError(e.to_string()))?;
                                 }
                             } else if enable_output.contains("Password:") || enable_output.contains("password:") {
                                 debug!("Enable mode requires password");
 
-                                // Send password
-                                if let Some(password) = &self.config.credentials().password {
+                                // Send enable password (or fall back to login password)
+                                if let Some(secret) = &enable_secret {
                                     serial_client
-                                        .execute_command(password)
+                                        .execute_command(secret)
                                         .await
                                         .map_err(|e| VendorError::SshError(e.to_string()))?;
                                 }
@@ -2200,6 +2204,7 @@ mod tests {
                 serial_device: None,
                 baud_rate: 9600,
                 jump_hosts: None,
+                enable_secret: None,
             }),
             vlans: vec![],
             ports: vec![],
@@ -2610,6 +2615,7 @@ mod tests {
                 serial_device: None,
                 baud_rate: 9600,
                 jump_hosts: None,
+                enable_secret: None,
             }),
             vlans: vec![],
             ports: vec![],
@@ -2656,6 +2662,7 @@ management_vlan: None,
                 serial_device: None,
                 baud_rate: 9600,
                 jump_hosts: None,
+                enable_secret: None,
             }),
             vlans: vec![],
             ports: vec![],
@@ -4463,6 +4470,7 @@ interface 5
                 serial_device: None,
                 baud_rate: 9600,
                 jump_hosts: None,
+                enable_secret: None,
             }),
             vlans: vec![],
             ports: vec![],
@@ -4794,6 +4802,7 @@ vlan 1020
                 serial_device: None,
                 baud_rate: 9600,
                 jump_hosts: None,
+                enable_secret: None,
             }),
             vlans: vec![],
             ports: vec![],

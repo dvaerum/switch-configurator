@@ -611,6 +611,7 @@ mod tests {
                 serial_device: None,
                 baud_rate: 9600,
                 jump_hosts: None,
+                enable_secret: None,
             }),
             vlans: vec![],
             ports: vec![],
