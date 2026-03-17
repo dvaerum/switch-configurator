@@ -27,6 +27,7 @@ mock! {
         fn validate_configuration(&self) -> Result<(), VendorError>;
         async fn run_validation_tests(&mut self, validation_config: &ValidationConfig) -> Result<ValidationResult, VendorError>;
         async fn rollback_configuration(&mut self, method: RollbackMethod) -> Result<(), VendorError>;
+        fn get_warnings(&self) -> Vec<String>;
     }
 }
 
@@ -670,5 +671,164 @@ interface 1
         assert_eq!(results.len(), 1);
         assert!(results[0].success);
         assert!(results[0].commands_executed.contains(&"speed-duplex 100-full".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_mock_vendor_get_warnings_empty() {
+        let mut mock_vendor = MockVendor::new();
+
+        mock_vendor
+            .expect_get_warnings()
+            .times(1)
+            .returning(|| Vec::new());
+
+        let warnings = mock_vendor.get_warnings();
+        assert!(warnings.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_mock_vendor_get_warnings_with_model_mismatch() {
+        let mut mock_vendor = MockVendor::new();
+
+        mock_vendor
+            .expect_get_warnings()
+            .times(1)
+            .returning(|| vec![
+                "Hardware product number mismatch: switch reports J9779A but configured model Aruba2530_24G_POE expects one of [\"J9773A\"]".to_string()
+            ]);
+
+        let warnings = mock_vendor.get_warnings();
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("mismatch"));
+        assert!(warnings[0].contains("J9779A"));
+    }
+
+    #[tokio::test]
+    async fn test_mock_vendor_full_workflow_with_warnings() {
+        // Test the full workflow: connect -> apply -> get_warnings -> save -> disconnect
+        let mut mock_vendor = MockVendor::new();
+
+        mock_vendor.expect_connect().times(1).returning(|| Ok(()));
+
+        mock_vendor
+            .expect_apply_configuration()
+            .times(1)
+            .returning(|| Ok(vec![ConfigResult {
+                switch: "test-switch".to_string(),
+                success: true,
+                message: "Configured 2 ports".to_string(),
+                commands_executed: vec!["configure terminal".to_string()],
+                timestamp: chrono::Utc::now(),
+            }]));
+
+        mock_vendor
+            .expect_get_warnings()
+            .times(1)
+            .returning(|| vec![
+                "Hardware product number mismatch: switch reports JXXXXXA but configured model expects [\"JYYYYYA\"]".to_string()
+            ]);
+
+        mock_vendor.expect_save_configuration().times(1).returning(|| Ok(()));
+        mock_vendor.expect_disconnect().times(1).returning(|| Ok(()));
+
+        // Simulate the workflow
+        assert!(mock_vendor.connect().await.is_ok());
+
+        let results = mock_vendor.apply_configuration().await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].success);
+
+        let warnings = mock_vendor.get_warnings();
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("mismatch"));
+
+        assert!(mock_vendor.save_configuration().await.is_ok());
+        assert!(mock_vendor.disconnect().await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_status_tracker_record_warnings() {
+        // Test that warnings are recorded in the StatusTracker and retrievable
+        let tracker = crate::status::StatusTracker::new();
+
+        // Initialize with a test switch
+        let switches = vec![crate::models::SwitchConfig {
+            id: "test-sw".to_string(),
+            hostname: Some("test-switch".to_string()),
+            model: Some(SwitchModel::Aruba2930F),
+            management_ip: Some("192.168.1.1".to_string()),
+            credentials: Some(crate::models::Credentials {
+                username: "admin".to_string(),
+                password: Some("pass".to_string()),
+                ssh_key_path: None,
+                port: 22,
+                connection_type: crate::models::ConnectionType::Ssh,
+                serial_device: None,
+                baud_rate: 9600,
+                jump_hosts: None,
+            }),
+            vlans: vec![],
+            ports: vec![],
+            port_mirrors: vec![],
+            snmp: None,
+            validation: None,
+            vendor_specific: std::collections::HashMap::new(),
+            management_vlan: None,
+            settings: crate::config::Settings::default(),
+        }];
+
+        tracker.initialize_switches(&switches).await;
+
+        // Record a warning
+        let warnings = vec!["Hardware product number mismatch: J9779A vs J9773A".to_string()];
+        tracker.record_warnings("test-switch", warnings.clone()).await;
+
+        // Verify via get_status
+        let status = tracker.get_status(4000).await;
+        let sw = status.switches.iter().find(|s| s.hostname == "test-switch").unwrap();
+        assert_eq!(sw.warnings.len(), 1);
+        assert!(sw.warnings[0].contains("J9779A"));
+
+        // Record new warnings (should replace, not append)
+        tracker.record_warnings("test-switch", vec!["New warning".to_string()]).await;
+        let status2 = tracker.get_status(4000).await;
+        let sw2 = status2.switches.iter().find(|s| s.hostname == "test-switch").unwrap();
+        assert_eq!(sw2.warnings.len(), 1);
+        assert!(sw2.warnings[0].contains("New warning"));
+
+        // Clear warnings
+        tracker.record_warnings("test-switch", vec![]).await;
+        let status3 = tracker.get_status(4000).await;
+        let sw3 = status3.switches.iter().find(|s| s.hostname == "test-switch").unwrap();
+        assert!(sw3.warnings.is_empty());
+    }
+
+    #[test]
+    fn test_switch_state_warnings_serialization() {
+        // Test that warnings are serialized correctly (and skipped when empty)
+        let state_no_warnings = SwitchState {
+            vlans: vec![],
+            ports: vec![],
+            port_mirrors: vec![],
+            snmp: None,
+            management_vlan: None,
+            warnings: vec![],
+        };
+
+        let json = serde_json::to_string(&state_no_warnings).unwrap();
+        assert!(!json.contains("warnings"), "Empty warnings should be skipped in serialization");
+
+        let state_with_warnings = SwitchState {
+            vlans: vec![],
+            ports: vec![],
+            port_mirrors: vec![],
+            snmp: None,
+            management_vlan: None,
+            warnings: vec!["Model mismatch: J9779A".to_string()],
+        };
+
+        let json = serde_json::to_string(&state_with_warnings).unwrap();
+        assert!(json.contains("warnings"), "Non-empty warnings should be serialized");
+        assert!(json.contains("J9779A"), "Warning content should be in JSON");
     }
 }
