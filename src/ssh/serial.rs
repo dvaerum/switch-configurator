@@ -203,6 +203,7 @@ impl SerialClient {
                     result = port.read(&mut temp_buf) => {
                         match result {
                             Ok(n) if n > 0 => {
+                                trace!("Serial clear_buffer: discarding {} bytes: {:?}", n, String::from_utf8_lossy(&temp_buf[..n]));
                                 total_cleared += n;
                                 // Keep reading - there might be more data
                                 continue;
@@ -427,6 +428,7 @@ impl SerialClient {
                         match result {
                             Ok(n) if n > 0 => {
                                 let data = String::from_utf8_lossy(&buf[..n]);
+                                trace!("Serial RX (check_state): {} bytes: {:?}", n, data);
                                 accumulated.push_str(&data);
                             }
                             Ok(_) => {
@@ -446,6 +448,7 @@ impl SerialClient {
                 }
             }
 
+            trace!("Serial check_state result: {:?}", accumulated);
             Ok(accumulated)
         } else {
             anyhow::bail!("Not connected")
@@ -464,6 +467,7 @@ impl SerialClient {
                 data.to_string()
             };
 
+            trace!("Serial TX (raw): {:?}", data_with_cr);
             AsyncWriteExt::write_all(port, data_with_cr.as_bytes()).await?;
             AsyncWriteExt::flush(port).await?;
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -546,6 +550,13 @@ impl SerialClient {
                     result = port.read(&mut buf) => {
                         match result {
                             Ok(n) if n > 0 => {
+                                // Log raw bytes at trace level for serial debugging
+                                trace!(
+                                    "Serial RX: {} bytes: {:?}",
+                                    n,
+                                    String::from_utf8_lossy(&buf[..n])
+                                );
+
                                 output.extend_from_slice(&buf[..n]);
                                 last_data_time = tokio::time::Instant::now();
 
@@ -556,7 +567,7 @@ impl SerialClient {
                                 }
 
                                 let text = String::from_utf8_lossy(&output);
-                                trace!("Received {} bytes (total: {}), last 100 chars: {:?}", n, output.len(), &text[text.len().saturating_sub(100)..]);
+                                trace!("Accumulated: {} bytes (total: {}), last 100 chars: {:?}", n, output.len(), &text[text.len().saturating_sub(100)..]);
 
                                 // Remove ANSI escape sequences for checking
                                 let clean = ansi_regex.replace_all(&text, "");
@@ -763,6 +774,7 @@ impl SerialClient {
         if let Some(port) = &mut self.port {
             // Send the command with \r (not \r\n)
             let cmd = format!("{}\r", command);
+            trace!("Serial TX: {:?}", cmd);
             AsyncWriteExt::write_all(port, cmd.as_bytes()).await?;
             AsyncWriteExt::flush(port).await?;
 
