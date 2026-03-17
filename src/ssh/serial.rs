@@ -14,6 +14,8 @@ pub struct SerialClient {
     baud_rate: u32,
     debug_mode: bool,
     dry_run: bool,
+    /// When true, all commands execute regardless of dry_run (used during login/enable auth)
+    auth_mode: bool,
 }
 
 impl SerialClient {
@@ -24,6 +26,7 @@ impl SerialClient {
             baud_rate,
             debug_mode: false,
             dry_run: false,
+            auth_mode: false,
         }
     }
 
@@ -37,6 +40,13 @@ impl SerialClient {
     pub fn with_dry_run(mut self, enabled: bool) -> Self {
         self.dry_run = enabled;
         self
+    }
+
+    /// Enable auth mode: all commands execute regardless of dry-run.
+    /// Used during login and enable authentication where credentials must
+    /// be sent as interactive responses to prompts.
+    pub fn set_auth_mode(&mut self, enabled: bool) {
+        self.auth_mode = enabled;
     }
 
     /// Connect to the serial device
@@ -758,7 +768,8 @@ impl SerialClient {
             }
         }
 
-        // Dry-run mode: skip execution (except for read-only commands and session settings)
+        // Dry-run mode: skip execution (except for read-only commands, session settings,
+        // and anything during auth_mode which handles login/enable credentials)
         let is_readonly = command.trim().starts_with("show ")
             || command.trim().starts_with("get ");  // FortiSwitch read commands
         let is_session_setting = command.trim() == "no page"
@@ -767,7 +778,7 @@ impl SerialClient {
             || command.trim() == "enable"
             || command.trim() == "end";  // FortiSwitch: exit config mode
 
-        if self.dry_run && !is_readonly && !is_session_setting {
+        if self.dry_run && !self.auth_mode && !is_readonly && !is_session_setting {
             info!("   🔍 [DRY-RUN] Would execute (skipped)");
             return Ok(String::new());
         }

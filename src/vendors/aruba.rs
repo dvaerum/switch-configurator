@@ -1332,6 +1332,8 @@ impl SwitchVendor for ArubaSwitch {
                     // Enter privileged mode (enable)
                     // Note: If already in privileged mode, the enable command may fail with
                     // "Invalid input: enable". We handle this gracefully.
+                    // Enable auth_mode so credential responses aren't skipped in dry-run.
+                    serial_client.set_auth_mode(true);
                     match serial_client.execute_command("enable").await {
                         Ok(enable_output) => {
                             // Check if enable prompted for credentials
@@ -1343,6 +1345,16 @@ impl SwitchVendor for ArubaSwitch {
                                     .execute_command(&self.config.credentials().username)
                                     .await
                                     .map_err(|e| VendorError::SshError(e.to_string()))?;
+
+                                // Send password
+                                if let Some(password) = &self.config.credentials().password {
+                                    serial_client
+                                        .execute_command(password)
+                                        .await
+                                        .map_err(|e| VendorError::SshError(e.to_string()))?;
+                                }
+                            } else if enable_output.contains("Password:") || enable_output.contains("password:") {
+                                debug!("Enable mode requires password");
 
                                 // Send password
                                 if let Some(password) = &self.config.credentials().password {
@@ -1369,6 +1381,7 @@ impl SwitchVendor for ArubaSwitch {
                                 }
                                 Err(config_err) => {
                                     // Cannot enter configure mode - propagate the error
+                                    serial_client.set_auth_mode(false);
                                     return Err(VendorError::SshError(format!(
                                         "Failed to enter privileged mode. Enable error: {}. Configure test error: {}",
                                         e, config_err
@@ -1377,6 +1390,7 @@ impl SwitchVendor for ArubaSwitch {
                             }
                         }
                     }
+                    serial_client.set_auth_mode(false);
 
                     // Disable pagination to prevent "Press any key to continue" prompts
                     serial_client
