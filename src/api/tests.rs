@@ -89,6 +89,7 @@ async fn create_test_config_store_async() -> ConfigStore {
         settings: Settings::default(),
         vendor_specific: std::collections::HashMap::new(),
             management_vlan: None,
+
     };
 
     let app_config = AppConfig {
@@ -147,6 +148,7 @@ fn create_test_config_store() -> ConfigStore {
         settings: Settings::default(),
         vendor_specific: std::collections::HashMap::new(),
         management_vlan: None,
+
     };
 
     let switch2 = SwitchConfig {
@@ -179,6 +181,7 @@ fn create_test_config_store() -> ConfigStore {
         settings: Settings::default(),
         vendor_specific: std::collections::HashMap::new(),
         management_vlan: None,
+
     };
 
     let app_config = AppConfig {

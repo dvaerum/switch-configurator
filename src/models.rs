@@ -319,6 +319,24 @@ impl SwitchModel {
         }
     }
 
+    /// Get the known hardware product numbers for this switch model.
+    ///
+    /// These are extracted from the running config header line
+    /// (e.g., `; J9779A Configuration Editor;` on Aruba switches).
+    /// Used to verify the configured model matches the actual hardware.
+    pub fn product_numbers(&self) -> &[&str] {
+        match self {
+            Self::Aruba2530_24G_POE => &["J9773A", "J9779A"],  // 2530-24G-PoE+ and 2530-24-PoE+
+            Self::Aruba2530_8G_POE => &["J9774A", "J9780A"],   // 2530-8G-PoE+ and 2530-8-PoE+
+            Self::Aruba2530_48G_2SFP => &["J9855A"],           // 2530-48G-2SFP+
+            Self::Aruba2540_24G => &["JL354A"],                // 2540-24G
+            Self::Aruba2540_48G_4SFP => &["JL355A"],           // 2540-48G-4SFP+
+            Self::Aruba2930F => &["JL253A", "JL254A", "JL255A", "JL256A", "JL258A", "JL261A", "JL262A", "JL263A", "JL264A"],
+            Self::Fortiswitch124F_FPOE => &[],  // FortiSwitch uses different identification
+            Self::CiscoCatalyst9300_24P_UPOE => &[],  // Cisco uses different identification
+        }
+    }
+
     /// Check if switch uses legacy mirror-port syntax
     /// Aruba 2530/2540 series use "mirror-port <dest>"
     /// Aruba 2930F and newer use "mirror <session> port <dest>"
@@ -1026,6 +1044,9 @@ pub struct SwitchState {
     pub port_mirrors: Vec<PortMirror>,
     pub snmp: Option<SnmpConfig>,
     pub management_vlan: Option<u16>,
+    /// Warnings detected during state parsing (e.g., model mismatch)
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 /// Granular SNMP state difference for efficient configuration

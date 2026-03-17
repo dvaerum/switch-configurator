@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.21] - 2026-03-17
+
+### Added
+- **Hardware Model Verification**: The Aruba parser now extracts the hardware product number from the running config header (e.g., `; J9779A Configuration Editor;`) and compares it against known product numbers for the configured model. A warning is emitted on mismatch and surfaced via the `/api/status` and `/switches/{id}/config` REST API endpoints.
+- **`product_numbers()` method on `SwitchModel`**: Returns known hardware product numbers for each model, used for model verification.
+- **`warnings` field on `SwitchState`**: Collects warnings during state parsing (e.g., model mismatch).
+- **`warnings` field on `SwitchStatus`**: Persists warnings in the status tracker, visible in the `/api/status` response.
+
 ## [0.3.20] - 2026-03-17
 
 ### Added

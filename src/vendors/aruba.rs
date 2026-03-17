@@ -505,6 +505,40 @@ impl ArubaSwitch {
         })
     }
 
+    /// Extract the hardware product number from the running config header and verify it
+    /// matches the configured switch model. Adds a warning to `state.warnings` on mismatch.
+    ///
+    /// The Aruba running config contains a header line like:
+    /// `; J9779A Configuration Editor; Created on release #YB.16.10.0009`
+    fn verify_product_number(&self, lines: &[&str], state: &mut SwitchState) {
+        // Look for the product number in comment lines (e.g., "; J9779A Configuration Editor;")
+        let product_regex = regex::Regex::new(r"^;\s*([A-Z]\d{4,5}[A-Z]?)\s+Configuration Editor").unwrap();
+
+        for line in lines {
+            let trimmed = line.trim();
+            if let Some(caps) = product_regex.captures(trimmed) {
+                let detected_product = caps.get(1).unwrap().as_str();
+                let model = self.config.model();
+                let known_products = model.product_numbers();
+
+                if known_products.is_empty() {
+                    debug!("Detected hardware product number: {} (no known product numbers for {:?} to verify against)", detected_product, model);
+                } else if known_products.contains(&detected_product) {
+                    debug!("Hardware product number {} matches configured model {:?}", detected_product, model);
+                } else {
+                    let warning = format!(
+                        "Hardware product number mismatch: switch reports {} but configured model {:?} expects one of {:?}",
+                        detected_product, model, known_products
+                    );
+                    warn!("{}", warning);
+                    state.warnings.push(warning);
+                }
+                return;
+            }
+        }
+        debug!("No product number found in running config header");
+    }
+
     /// Parse interface block for name, mirror/monitor status, PoE, MAC notify, and enabled status
     /// In Aruba config, interfaces contain names and port-specific settings - VLAN assignments are in VLAN blocks
     fn parse_interface_name(&self, lines: &[&str], index: &mut usize) -> Option<(String, Option<String>, bool, bool, bool, bool, bool, crate::models::SpeedDuplex)> {
@@ -1417,6 +1451,9 @@ impl SwitchVendor for ArubaSwitch {
         let clean_config = ansi_regex.replace_all(&config, "");
         let lines: Vec<&str> = clean_config.lines().collect();
 
+        // Extract product number from header line and verify against configured model
+        self.verify_product_number(&lines, &mut state);
+
         // First pass: collect interface names, VLAN configurations, and port mirrors
         let mut interface_names = std::collections::HashMap::new();
         let mut port_vlan_map: std::collections::HashMap<String, PortVlanInfo> = std::collections::HashMap::new();
@@ -1746,6 +1783,13 @@ impl SwitchVendor for ArubaSwitch {
         })
     }
 
+    fn get_warnings(&self) -> Vec<String> {
+        self.current_state
+            .as_ref()
+            .map(|s| s.warnings.clone())
+            .unwrap_or_default()
+    }
+
     async fn apply_configuration(&mut self) -> Result<Vec<ConfigResult>, VendorError> {
         // Parse current state
         debug!("Parsing current state from {}", self.config.hostname());
@@ -1942,6 +1986,9 @@ impl ArubaSwitch {
         let ansi_regex = regex::Regex::new(r"\x1b\[[0-9;?]*[A-Za-z]").unwrap();
         let clean_config = ansi_regex.replace_all(config, "");
         let lines: Vec<&str> = clean_config.lines().collect();
+
+        // Extract product number from header line and verify against configured model
+        self.verify_product_number(&lines, &mut state);
 
         // First pass: collect interface names, VLAN configurations, and port mirrors
         let mut interface_names = std::collections::HashMap::new();
@@ -3830,6 +3877,7 @@ vlan 1
             port_mirrors: vec![],
             snmp: None,
             management_vlan: None,
+            warnings: vec![],
         };
         switch.current_state = Some(current_state);
 
@@ -3894,6 +3942,7 @@ vlan 1
             port_mirrors: vec![],
             snmp: None,
             management_vlan: None,
+            warnings: vec![],
         };
         switch.current_state = Some(current_state);
 
@@ -3959,6 +4008,7 @@ vlan 1
             port_mirrors: vec![],
             snmp: None,
             management_vlan: None,
+            warnings: vec![],
         };
         switch.current_state = Some(current_state);
 
@@ -4020,6 +4070,7 @@ vlan 1
             port_mirrors: vec![],
             snmp: None,
             management_vlan: None,
+            warnings: vec![],
         };
         switch.current_state = Some(current_state);
 
@@ -4177,6 +4228,7 @@ vlan 1
             port_mirrors: vec![],
             snmp: None,
             management_vlan: Some(10),
+            warnings: vec![],
         };
 
         // Desired config: management VLAN 99
@@ -4202,6 +4254,7 @@ vlan 1
             port_mirrors: vec![],
             snmp: None,
             management_vlan: None,
+            warnings: vec![],
         };
 
         // Desired config: add management VLAN 50
@@ -4227,6 +4280,7 @@ vlan 1
             port_mirrors: vec![],
             snmp: None,
             management_vlan: Some(20),
+            warnings: vec![],
         };
 
         // Desired config: remove management VLAN
@@ -4252,6 +4306,7 @@ vlan 1
             port_mirrors: vec![],
             snmp: None,
             management_vlan: Some(30),
+            warnings: vec![],
         };
 
         // Desired config: same management VLAN 30
@@ -4808,5 +4863,60 @@ vlan 1020
         assert!(!cmds_2930.contains(&"monitor".to_string()) ||
                 cmds_2930.iter().filter(|c| *c == "monitor").count() == 0,
                 "Aruba 2930F should NOT use plain 'monitor' command");
+    }
+
+    #[test]
+    fn test_model_verification_matching_product() {
+        // Test that a matching product number produces no warnings
+        let switch = create_test_switch();  // Aruba2930F
+
+        let config = "; JL253A Configuration Editor; Created on release #WC.16.11.0018\nhostname \"test\"\n";
+        let state = switch.parse_running_config(config);
+
+        assert!(state.warnings.is_empty(),
+                "Matching product number should produce no warnings, got: {:?}", state.warnings);
+    }
+
+    #[test]
+    fn test_model_verification_mismatched_product() {
+        // Test that a mismatched product number produces a warning
+        let switch = create_test_switch();  // Aruba2930F, expects JL253A etc.
+
+        let config = "; J9779A Configuration Editor; Created on release #YB.16.10.0009\nhostname \"test\"\n";
+        let state = switch.parse_running_config(config);
+
+        assert_eq!(state.warnings.len(), 1,
+                  "Mismatched product number should produce one warning, got: {:?}", state.warnings);
+        assert!(state.warnings[0].contains("J9779A"),
+                "Warning should mention detected product number");
+        assert!(state.warnings[0].contains("mismatch"),
+                "Warning should mention mismatch");
+    }
+
+    #[test]
+    fn test_model_verification_no_header() {
+        // Test that missing header line produces no warnings (just debug log)
+        let switch = create_test_switch();
+
+        let config = "hostname \"test\"\nvlan 1\n   name \"default\"\n   exit\n";
+        let state = switch.parse_running_config(config);
+
+        assert!(state.warnings.is_empty(),
+                "Missing header should not produce warnings, got: {:?}", state.warnings);
+    }
+
+    #[test]
+    fn test_product_numbers_mapping() {
+        // Verify the product number lists are populated for Aruba models
+        assert!(SwitchModel::Aruba2530_24G_POE.product_numbers().contains(&"J9773A"));
+        assert!(SwitchModel::Aruba2530_24G_POE.product_numbers().contains(&"J9779A"));
+        assert!(SwitchModel::Aruba2530_8G_POE.product_numbers().contains(&"J9774A"));
+        assert!(SwitchModel::Aruba2530_48G_2SFP.product_numbers().contains(&"J9855A"));
+        assert!(SwitchModel::Aruba2540_48G_4SFP.product_numbers().contains(&"JL355A"));
+        assert!(!SwitchModel::Aruba2930F.product_numbers().is_empty());
+
+        // Non-Aruba models may have empty product number lists
+        assert!(SwitchModel::Fortiswitch124F_FPOE.product_numbers().is_empty());
+        assert!(SwitchModel::CiscoCatalyst9300_24P_UPOE.product_numbers().is_empty());
     }
 }

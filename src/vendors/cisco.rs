@@ -680,6 +680,7 @@ impl SwitchVendor for CiscoSwitch {
             port_mirrors: vec![],
             snmp: None,
             management_vlan,
+            ..Default::default()
         })
     }
 
@@ -1964,6 +1965,7 @@ mod tests {
             port_mirrors: vec![],
             snmp: None,
             management_vlan: None,
+            warnings: vec![],
         };
 
         // Desired config: add management VLAN 88
@@ -1998,6 +2000,7 @@ mod tests {
             port_mirrors: vec![],
             snmp: None,
             management_vlan: Some(10),
+            warnings: vec![],
         };
 
         // Desired config: change to management VLAN 99
@@ -2029,6 +2032,7 @@ mod tests {
             port_mirrors: vec![],
             snmp: None,
             management_vlan: Some(50),
+            warnings: vec![],
         };
 
         // Desired config: remove management VLAN
@@ -2054,6 +2058,7 @@ mod tests {
             port_mirrors: vec![],
             snmp: None,
             management_vlan: Some(20),
+            warnings: vec![],
         };
 
         // Desired config: same management VLAN 20

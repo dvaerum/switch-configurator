@@ -117,6 +117,7 @@ mod tests {
             port_mirrors: vec![],
             snmp: None,
             management_vlan: None,
+            warnings: vec![],
         };
 
         let expected_state_clone = expected_state.clone();
@@ -440,6 +441,7 @@ interface 1
                 port_mirrors: vec![],
                 snmp: None,
             management_vlan: None,
+            warnings: vec![],
             }));
 
         mock_vendor
@@ -593,6 +595,7 @@ interface 1
             port_mirrors: vec![],
             snmp: None,
             management_vlan: None,
+            warnings: vec![],
         };
 
         let expected_state_clone = expected_state.clone();

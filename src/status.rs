@@ -51,6 +51,9 @@ pub struct SwitchStatus {
     pub apply_count: u64,
     pub success_count: u64,
     pub failure_count: u64,
+    /// Warnings from the most recent configuration cycle (e.g., model mismatch)
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 /// Record of an error that occurred
@@ -205,6 +208,7 @@ impl StatusTracker {
                     apply_count: 0,
                     success_count: 0,
                     failure_count: 0,
+                    warnings: Vec::new(),
                 },
             );
         }
@@ -229,6 +233,14 @@ impl StatusTracker {
             status.last_result = Some(format!("failed: {}", error));
             status.apply_count += 1;
             status.failure_count += 1;
+        }
+    }
+
+    /// Record warnings from a configuration cycle (replaces previous warnings)
+    pub async fn record_warnings(&self, hostname: &str, warnings: Vec<String>) {
+        let mut inner = self.inner.write().await;
+        if let Some(status) = inner.switch_status.get_mut(hostname) {
+            status.warnings = warnings;
         }
     }
 

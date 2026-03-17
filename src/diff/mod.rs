@@ -638,6 +638,7 @@ mod tests {
             port_mirrors: vec![],
             snmp: None,
             management_vlan: None,
+            warnings: vec![],
         };
 
         let mut desired = create_test_switch_config();
@@ -669,6 +670,7 @@ mod tests {
             port_mirrors: vec![],
             snmp: None,
             management_vlan: None,
+            warnings: vec![],
         };
 
         let mut desired = create_test_switch_config();
@@ -716,6 +718,7 @@ mod tests {
             port_mirrors: vec![],
             snmp: None,
             management_vlan: None,
+            warnings: vec![],
         };
 
         let mut desired = create_test_switch_config();
@@ -751,6 +754,7 @@ mod tests {
             port_mirrors: vec![],
             snmp: None,
             management_vlan: None,
+            warnings: vec![],
         };
 
         let mut desired = create_test_switch_config();
@@ -791,6 +795,7 @@ mod tests {
             port_mirrors: vec![],
             snmp: None,
             management_vlan: None,
+            warnings: vec![],
         };
 
         let mut desired = create_test_switch_config();
@@ -846,6 +851,7 @@ mod tests {
             port_mirrors: vec![],
             snmp: None,
             management_vlan: None,
+            warnings: vec![],
         };
 
         let mut desired = create_test_switch_config();
@@ -894,6 +900,7 @@ mod tests {
             port_mirrors: vec![],
             snmp: None,
             management_vlan: None,
+            warnings: vec![],
         };
 
         let mut desired = create_test_switch_config();
@@ -924,6 +931,7 @@ mod tests {
             port_mirrors: vec![],
             snmp: None,
             management_vlan: None,
+            warnings: vec![],
         };
 
         let mut desired = create_test_switch_config();
@@ -950,6 +958,7 @@ mod tests {
             port_mirrors: vec![],
             snmp: None,
             management_vlan: None,
+            warnings: vec![],
         };
 
         let mut desired = create_test_switch_config();
@@ -1092,6 +1101,7 @@ mod tests {
                 enabled_traps: vec![TrapType::MacNotify],
             }),
             management_vlan: None,
+            warnings: vec![],
         };
 
         let mut desired = create_test_switch_config();
@@ -1146,6 +1156,7 @@ mod tests {
             port_mirrors: vec![],
             snmp: None,
             management_vlan: None,
+            warnings: vec![],
         };
 
         let mut desired = create_test_switch_config();
@@ -1191,6 +1202,7 @@ mod tests {
             port_mirrors: vec![],
             snmp: None,
             management_vlan: None,
+            warnings: vec![],
         };
 
         let mut desired = create_test_switch_config();
@@ -1246,6 +1258,7 @@ mod tests {
             port_mirrors: vec![],
             snmp: None,
             management_vlan: None,
+            warnings: vec![],
         };
 
         let mut desired = create_test_switch_config();
@@ -1303,6 +1316,7 @@ mod tests {
             port_mirrors: vec![],
             snmp: None,
             management_vlan: None,
+            warnings: vec![],
         };
 
         let mut desired = create_test_switch_config();
@@ -1415,6 +1429,7 @@ mod tests {
             port_mirrors: vec![],
             snmp: None,
             management_vlan: None,
+            warnings: vec![],
         };
 
         let vlans_to_remove = vec![];
@@ -1454,6 +1469,7 @@ mod tests {
             port_mirrors: vec![],
             snmp: None,
             management_vlan: None,
+            warnings: vec![],
         };
 
         let vlans_to_remove = vec![10];
@@ -1507,6 +1523,7 @@ mod tests {
             port_mirrors: vec![],
             snmp: None,
             management_vlan: None,
+            warnings: vec![],
         };
 
         let vlans_to_remove = vec![10];
@@ -1538,6 +1555,7 @@ mod tests {
             port_mirrors: vec![],
             snmp: None,
             management_vlan: None,
+            warnings: vec![],
         };
 
         let vlans_to_remove = vec![20];
@@ -1578,6 +1596,7 @@ mod tests {
             port_mirrors: vec![],
             snmp: None,
             management_vlan: None,
+            warnings: vec![],
         };
 
         let vlans_to_remove = vec![10, 20];
@@ -1629,6 +1648,7 @@ mod tests {
             port_mirrors: vec![],
             snmp: None,
             management_vlan: None,
+            warnings: vec![],
         };
 
         let vlans_to_remove = vec![10];
@@ -1682,6 +1702,7 @@ mod tests {
             port_mirrors: vec![],
             snmp: None,
             management_vlan: None,
+            warnings: vec![],
         };
 
         let vlans_to_remove = vec![30]; // VLAN not used by any port
@@ -1732,6 +1753,7 @@ mod tests {
             port_mirrors: vec![],
             snmp: None,
             management_vlan: None,
+            warnings: vec![],
         };
 
         let vlans_to_remove = vec![10, 20];
@@ -1762,6 +1784,7 @@ mod tests {
             port_mirrors: vec![],
             snmp: None,
             management_vlan: None,
+            warnings: vec![],
         };
 
         let vlans_to_remove = vec![30];
@@ -1806,6 +1829,7 @@ mod tests {
             port_mirrors: vec![],
             snmp: None,
             management_vlan: None,
+            warnings: vec![],
         };
 
         // Config has poe_enabled: true (user mistake or default)
@@ -1853,6 +1877,7 @@ mod tests {
             port_mirrors: vec![],
             snmp: None,
             management_vlan: None,
+            warnings: vec![],
         };
 
         let mut desired = create_test_switch_config();
@@ -1935,6 +1960,7 @@ mod tests {
             port_mirrors: vec![],
             snmp: None,
             management_vlan: None,
+            warnings: vec![],
         };
 
         let mut desired = create_test_switch_config();
@@ -1982,6 +2008,7 @@ mod tests {
             port_mirrors: vec![],
             snmp: None,
             management_vlan: None,
+            warnings: vec![],
         };
 
         let mut desired = create_test_switch_config();
@@ -2019,6 +2046,7 @@ mod tests {
             port_mirrors: vec![],
             snmp: None,
             management_vlan: None,
+            warnings: vec![],
         };
 
         let mut desired = create_test_switch_config();
@@ -2080,6 +2108,7 @@ mod tests {
             port_mirrors: vec![],
             snmp: None,
             management_vlan: None,
+            warnings: vec![],
         };
 
         let mut desired = create_test_switch_config();

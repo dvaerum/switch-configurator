@@ -303,6 +303,15 @@ async fn apply_config_impl(
 
     info!("Successfully applied configuration to {} ({})", id, switch_config.hostname.as_ref().unwrap_or(&id));
 
+    // Record warnings from state parsing (e.g., model mismatch)
+    let warnings = vendor.get_warnings();
+    if !warnings.is_empty() {
+        for w in &warnings {
+            warn!("Switch {}: {}", id, w);
+        }
+    }
+    store.status.record_warnings(&id, warnings).await;
+
     // Record success
     store.status.record_apply_success(&id).await;
     store.status.clear_currently_configuring(&id).await;

@@ -200,11 +200,24 @@ async fn apply_switch_with_pending(
 
     let result = apply_single_switch(switch_config).await;
 
-    if let Err(e) = &result {
-        error!(
-            "Failed to configure switch '{}' ({}): {}",
-            switch_id, switch_config.hostname(), e
-        );
+    match &result {
+        Ok(warnings) => {
+            // Record warnings (e.g., model mismatch) in the status tracker
+            if !warnings.is_empty() {
+                for w in warnings {
+                    warn!("Switch {}: {}", switch_id, w);
+                }
+                status.record_warnings(switch_id, warnings.clone()).await;
+            }
+            status.record_apply_success(switch_id).await;
+        }
+        Err(e) => {
+            error!(
+                "Failed to configure switch '{}' ({}): {}",
+                switch_id, switch_config.hostname(), e
+            );
+            status.record_apply_failure(switch_id, &e.to_string()).await;
+        }
     }
 
     // Check if there's a pending reload queued while we were applying
@@ -217,23 +230,35 @@ async fn apply_switch_with_pending(
 
         let pending_result = apply_single_switch(switch_config).await;
 
-        if let Err(e) = pending_result {
-            error!(
-                "Failed to apply pending config for switch '{}' ({}): {}",
-                switch_id, switch_config.hostname(), e
-            );
+        match &pending_result {
+            Ok(warnings) => {
+                if !warnings.is_empty() {
+                    for w in warnings {
+                        warn!("Switch {}: {}", switch_id, w);
+                    }
+                    status.record_warnings(switch_id, warnings.clone()).await;
+                }
+                status.record_apply_success(switch_id).await;
+            }
+            Err(e) => {
+                error!(
+                    "Failed to apply pending config for switch '{}' ({}): {}",
+                    switch_id, switch_config.hostname(), e
+                );
+                status.record_apply_failure(switch_id, &e.to_string()).await;
+            }
         }
     }
 
     // Always clear the configuring status when done
     status.clear_currently_configuring(switch_id).await;
 
-    // Return result
-    result.map_err(|e| anyhow::anyhow!("{}", e))
+    // Return result (map Ok(Vec<String>) to Ok(()))
+    result.map(|_| ()).map_err(|e| anyhow::anyhow!("{}", e))
 }
 
-/// Apply configuration to a single switch
-async fn apply_single_switch(switch_config: &crate::models::SwitchConfig) -> Result<()> {
+/// Apply configuration to a single switch. Returns warnings on success.
+async fn apply_single_switch(switch_config: &crate::models::SwitchConfig) -> Result<Vec<String>> {
     let mut vendor = vendors::create_vendor_with_runtime(
         switch_config,
         &crate::config::RuntimeConfig::default(),
@@ -269,6 +294,9 @@ async fn apply_single_switch(switch_config: &crate::models::SwitchConfig) -> Res
         }
     }
 
+    // Collect warnings before disconnecting
+    let warnings = vendor.get_warnings();
+
     // Disconnect
     if let Err(e) = vendor.disconnect().await {
         warn!(
@@ -277,7 +305,7 @@ async fn apply_single_switch(switch_config: &crate::models::SwitchConfig) -> Res
         );
     }
 
-    Ok(())
+    Ok(warnings)
 }
 
 /// Extract affected switch ID from an error message

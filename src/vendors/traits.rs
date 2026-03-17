@@ -74,4 +74,10 @@ pub trait SwitchVendor: Send + Sync {
         &mut self,
         method: RollbackMethod,
     ) -> Result<(), VendorError>;
+
+    /// Get warnings accumulated during the last configuration cycle
+    /// (e.g., hardware model mismatch, deprecated features, etc.)
+    fn get_warnings(&self) -> Vec<String> {
+        Vec::new()
+    }
 }
