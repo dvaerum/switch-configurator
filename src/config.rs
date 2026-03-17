@@ -1525,6 +1525,125 @@ baud_rate: 9600
     }
 
     #[test]
+    fn test_enable_secret_deserialization_when_set() {
+        use crate::models::Credentials;
+
+        let yaml = r#"
+username: admin
+password: loginpass
+enable_secret: enablepass
+connection_type: serial
+serial_device: /dev/ttyUSB0
+"#;
+        let creds: Credentials = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(creds.enable_secret, Some("enablepass".to_string()));
+        assert_eq!(creds.password, Some("loginpass".to_string()));
+    }
+
+    #[test]
+    fn test_enable_secret_deserialization_when_absent() {
+        use crate::models::Credentials;
+
+        let yaml = r#"
+username: admin
+password: loginpass
+connection_type: serial
+serial_device: /dev/ttyUSB0
+"#;
+        let creds: Credentials = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(creds.enable_secret, None);
+        assert_eq!(creds.password, Some("loginpass".to_string()));
+    }
+
+    #[test]
+    fn test_enable_secret_fallback_logic() {
+        use crate::models::Credentials;
+
+        // When enable_secret is set, it should be used
+        let creds_with_secret = Credentials {
+            username: "admin".to_string(),
+            password: Some("loginpass".to_string()),
+            ssh_key_path: None,
+            port: 22,
+            connection_type: crate::models::ConnectionType::Ssh,
+            serial_device: None,
+            baud_rate: 9600,
+            enable_secret: Some("enablepass".to_string()),
+            jump_hosts: None,
+        };
+
+        let secret = creds_with_secret.enable_secret.clone()
+            .or_else(|| creds_with_secret.password.clone());
+        assert_eq!(secret, Some("enablepass".to_string()));
+
+        // When enable_secret is None, should fall back to password
+        let creds_without_secret = Credentials {
+            username: "admin".to_string(),
+            password: Some("loginpass".to_string()),
+            ssh_key_path: None,
+            port: 22,
+            connection_type: crate::models::ConnectionType::Ssh,
+            serial_device: None,
+            baud_rate: 9600,
+            enable_secret: None,
+            jump_hosts: None,
+        };
+
+        let secret = creds_without_secret.enable_secret.clone()
+            .or_else(|| creds_without_secret.password.clone());
+        assert_eq!(secret, Some("loginpass".to_string()));
+    }
+
+    #[test]
+    fn test_enable_secret_not_serialized() {
+        use crate::models::Credentials;
+
+        let creds = Credentials {
+            username: "admin".to_string(),
+            password: Some("loginpass".to_string()),
+            ssh_key_path: None,
+            port: 22,
+            connection_type: crate::models::ConnectionType::Ssh,
+            serial_device: None,
+            baud_rate: 9600,
+            enable_secret: Some("supersecret".to_string()),
+            jump_hosts: None,
+        };
+
+        let json = serde_json::to_string(&creds).unwrap();
+        assert!(!json.contains("supersecret"), "enable_secret should not appear in serialized output");
+        assert!(!json.contains("enable_secret"), "enable_secret field should be skip_serialized");
+        // password should also not appear (skip_serializing)
+        assert!(!json.contains("loginpass"), "password should not appear in serialized output");
+    }
+
+    #[test]
+    fn test_full_config_with_enable_secret() {
+        let yaml = r#"
+switches:
+  - id: test-switch
+    hostname: test-switch
+    model: Aruba2930F
+    management_ip: 192.168.1.1
+    credentials:
+      username: admin
+      password: admin
+      enable_secret: secretpass
+      connection_type: serial
+      serial_device: /dev/ttyUSB0
+      baud_rate: 115200
+    vlans: []
+    ports: []
+"#;
+        let config: crate::config::AppConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.switches.len(), 1);
+        let creds = config.switches[0].credentials.as_ref().unwrap();
+        assert_eq!(creds.enable_secret, Some("secretpass".to_string()));
+        assert_eq!(creds.password, Some("admin".to_string()));
+        assert_eq!(creds.username, "admin");
+    }
+
+    #[test]
     fn test_validate_vlan_references_valid_config() {
         use crate::models::{Port, PortMode, SwitchConfig, SwitchModel, Vlan, ConnectionType, Credentials};
 
