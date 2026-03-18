@@ -54,7 +54,7 @@ switches:
         name: wireless-aps
 
       - id: 700
-        name: "vlan used to access 8/10 port switch"
+        name: "vlan-8x10-port-switch"
 
     ports:
       - port_id: "44"

@@ -4,7 +4,7 @@
 switches:
   - id: test-aruba-2530-48g-2sfp
     hostname: test-aruba-2530-48g-2sfp
-    model: Aruba2530_48G  # CORRECTED: Was incorrectly "Aruba2530F"
+    model: Aruba2530_48G_2SFP  # CORRECTED: Was incorrectly "Aruba2530F"
     management_ip: "192.168.1.2"  # Not used for serial, but required field
 
     settings:

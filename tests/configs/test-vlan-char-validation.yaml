@@ -11,7 +11,7 @@ switches:
       password: admin
       connection_type: serial
       serial_device: /dev/serial_aruba-2530-8g-poe+
-      baud_rate: 115200
+      baud_rate: 9600
 
     vlans:
       # Test ` character (backtick)

@@ -14,7 +14,7 @@ switches:
 
     credentials:
       username: admin
-      password: "adminadmin"
+      password: "AdminAdmin"
       connection_type: serial
       serial_device: /dev/serial_fortiswitch_108f-poe
       baud_rate: 115200

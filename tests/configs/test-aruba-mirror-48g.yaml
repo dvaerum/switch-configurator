@@ -6,7 +6,7 @@ switches:
     credentials:
       connection_type: serial
       serial_device: /dev/serial_aruba-2530-48g-2sfp+
-      baud_rate: 9600
+      baud_rate: 115200
       username: admin
       password: admin
     vlans:
