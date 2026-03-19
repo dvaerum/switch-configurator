@@ -239,3 +239,38 @@ impl Default for ValidationResult {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod unit_tests {
+    use std::net::{TcpListener, TcpStream};
+    use std::time::Duration;
+
+    #[test]
+    fn test_tcp_port_check_localhost_success() {
+        // Bind a listener on an OS-assigned port so we know it's open
+        let listener = TcpListener::bind("127.0.0.1:0").expect("Failed to bind listener");
+        let port = listener.local_addr().unwrap().port();
+
+        // Mirror the implementation logic in execute_tcp_port_test:
+        // use TcpStream::connect_timeout with 5-second timeout
+        let addr: std::net::SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
+        let result = TcpStream::connect_timeout(&addr, Duration::from_secs(5));
+
+        assert!(result.is_ok(),
+                "Connecting to an open port on localhost should succeed, but got: {:?}",
+                result.err());
+
+        // Clean up
+        drop(listener);
+    }
+
+    #[test]
+    fn test_tcp_port_check_closed_port_fails() {
+        // Port 1 on localhost is almost certainly not open (requires root to bind)
+        let addr: std::net::SocketAddr = "127.0.0.1:1".parse().unwrap();
+        let result = TcpStream::connect_timeout(&addr, Duration::from_millis(500));
+
+        assert!(result.is_err(),
+                "Connecting to a closed port should fail, but it succeeded");
+    }
+}

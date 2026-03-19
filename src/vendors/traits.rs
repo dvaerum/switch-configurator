@@ -282,4 +282,87 @@ mod tests {
         assert!(!SwitchModel::CiscoCatalyst9300_24P_UPOE.product_numbers().is_empty(), "Cisco C9300");
         assert!(!SwitchModel::Fortiswitch124F_FPOE.product_numbers().is_empty(), "FortiSwitch 124F");
     }
+
+    // ============================================================================
+    // Gap 6: FortiSwitch realistic model detection integration
+    // ============================================================================
+
+    #[test]
+    fn test_forti_model_detection_realistic_get_system_status() {
+        let pattern = forti_pattern();
+
+        // Realistic multi-line `get system status` output from a FortiSwitch-124F-FPOE
+        let output_124f = "\
+Version: FortiSwitch-124F-FPOE v7.2.8,build0660,241119 (GA.MR8)
+Virus-DB: 1.00000(2018-04-09 18:07)
+Serial-Number: S124FFTF24000746
+Hostname: forti-124f
+Distribution: International
+Branch point: 0660
+Release Version Information: GA.MR8
+System time: Thu Mar 13 11:22:33 2025";
+
+        let warnings = verify_hardware_model(output_124f, &SwitchModel::Fortiswitch124F_FPOE, &pattern);
+        assert!(warnings.is_empty(),
+                "Realistic 124F-FPOE output should match Fortiswitch124F_FPOE, got: {:?}", warnings);
+
+        // Now test with 108F output — should MISMATCH against 124F model
+        let output_108f = "\
+Version: FortiSwitch-108F-POE v7.2.8,build0660,241119 (GA.MR8)
+Virus-DB: 1.00000(2018-04-09 18:07)
+Serial-Number: S108FPTV21002683
+Hostname: forti-108f
+Distribution: International
+Branch point: 0660
+Release Version Information: GA.MR8
+System time: Thu Mar 13 11:22:33 2025";
+
+        let warnings_108f = verify_hardware_model(output_108f, &SwitchModel::Fortiswitch124F_FPOE, &pattern);
+        assert_eq!(warnings_108f.len(), 1,
+                   "108F output should MISMATCH against 124F model");
+        assert!(warnings_108f[0].contains("FortiSwitch-108F-POE"),
+                "Warning should mention the detected model");
+        assert!(warnings_108f[0].contains("mismatch"),
+                "Warning should mention mismatch");
+    }
+
+    // ============================================================================
+    // Gap 7: Cisco realistic running-config model detection integration
+    // ============================================================================
+
+    #[test]
+    fn test_cisco_model_detection_realistic_running_config() {
+        let pattern = cisco_pattern();
+
+        // Realistic multi-line Cisco running config
+        let running_config = "\
+!
+version 16.9
+no service pad
+service timestamps debug datetime msec
+service timestamps log datetime msec
+no service password-encryption
+!
+hostname IT-04263
+!
+boot-start-marker
+boot-end-marker
+!
+no aaa new-model
+switch 1 provision c9300-24u
+!
+ip routing
+!
+license boot level network-advantage addon dna-advantage
+!
+interface GigabitEthernet1/0/1
+ description Uplink
+ switchport mode trunk
+!
+end";
+
+        let warnings = verify_hardware_model(running_config, &SwitchModel::CiscoCatalyst9300_24P_UPOE, &pattern);
+        assert!(warnings.is_empty(),
+                "Realistic c9300-24u running config should match CiscoCatalyst9300_24P_UPOE, got: {:?}", warnings);
+    }
 }

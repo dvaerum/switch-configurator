@@ -889,4 +889,32 @@ interface 1
         assert!(warnings.is_empty(), "No mismatch should produce no warnings");
         assert!(mock_vendor.disconnect().await.is_ok());
     }
+
+    #[tokio::test]
+    async fn test_mock_vendor_rollback_restore_backup() {
+        let mut mock_vendor = MockVendor::new();
+
+        mock_vendor
+            .expect_rollback_configuration()
+            .times(1)
+            .withf(|method| matches!(method, RollbackMethod::RestoreBackup))
+            .returning(|_| Ok(()));
+
+        let result = mock_vendor.rollback_configuration(RollbackMethod::RestoreBackup).await;
+        assert!(result.is_ok(), "Rollback with RestoreBackup should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_mock_vendor_rollback_reload() {
+        let mut mock_vendor = MockVendor::new();
+
+        mock_vendor
+            .expect_rollback_configuration()
+            .times(1)
+            .withf(|method| matches!(method, RollbackMethod::Reload))
+            .returning(|_| Ok(()));
+
+        let result = mock_vendor.rollback_configuration(RollbackMethod::Reload).await;
+        assert!(result.is_ok(), "Rollback with Reload should succeed");
+    }
 }

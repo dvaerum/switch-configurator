@@ -2130,4 +2130,171 @@ mod tests {
         assert_eq!(diff.vlans_to_update.len(), 1);
         assert_eq!(diff.vlans_to_update[0].name, "new-name");
     }
+
+    #[test]
+    fn test_compute_diff_snmp_community_access_update() {
+        // Current has community "public" with Operator access
+        let current = SwitchState {
+            vlans: vec![],
+            ports: vec![],
+            port_mirrors: vec![],
+            snmp: Some(SnmpConfig {
+                communities: vec![
+                    SnmpCommunity {
+                        name: "public".to_string(),
+                        access: SnmpAccess::Operator,
+                    },
+                ],
+                trap_receivers: vec![],
+                enabled_traps: vec![],
+            }),
+            management_vlan: None,
+            warnings: vec![],
+        };
+
+        // Desired has community "public" with Unrestricted access
+        let mut desired = create_test_switch_config();
+        desired.snmp = Some(SnmpConfig {
+            communities: vec![
+                SnmpCommunity {
+                    name: "public".to_string(),
+                    access: SnmpAccess::Unrestricted,
+                },
+            ],
+            trap_receivers: vec![],
+            enabled_traps: vec![],
+        });
+
+        let diff = compute_diff(&current, &desired, false);
+
+        assert!(diff.has_changes());
+        assert!(diff.snmp_config_changed);
+
+        let snmp_diff = diff.snmp_diff.as_ref().expect("snmp_diff should be present");
+        assert_eq!(snmp_diff.communities_to_update.len(), 1,
+                   "Should have 1 community to update");
+        assert_eq!(snmp_diff.communities_to_update[0].name, "public");
+        assert_eq!(snmp_diff.communities_to_update[0].access, SnmpAccess::Unrestricted);
+        assert!(snmp_diff.communities_to_add.is_empty(),
+                "Should have no communities to add");
+        assert!(snmp_diff.communities_to_remove.is_empty(),
+                "Should have no communities to remove");
+    }
+
+    #[test]
+    fn test_compute_diff_snmp_full_removal() {
+        // Current has SNMP with 2 communities, 1 receiver, 2 traps
+        let current = SwitchState {
+            vlans: vec![],
+            ports: vec![],
+            port_mirrors: vec![],
+            snmp: Some(SnmpConfig {
+                communities: vec![
+                    SnmpCommunity {
+                        name: "public".to_string(),
+                        access: SnmpAccess::Operator,
+                    },
+                    SnmpCommunity {
+                        name: "private".to_string(),
+                        access: SnmpAccess::Manager,
+                    },
+                ],
+                trap_receivers: vec![
+                    SnmpTrapReceiver {
+                        host: "192.168.1.100".to_string(),
+                        community: "public".to_string(),
+                        version: Some("2c".to_string()),
+                    },
+                ],
+                enabled_traps: vec![TrapType::MacNotify, TrapType::LinkChange],
+            }),
+            management_vlan: None,
+            warnings: vec![],
+        };
+
+        // Desired has no SNMP
+        let mut desired = create_test_switch_config();
+        desired.snmp = None;
+
+        let diff = compute_diff(&current, &desired, false);
+
+        assert!(diff.has_changes());
+        assert!(diff.snmp_config_changed);
+
+        let snmp_diff = diff.snmp_diff.as_ref().expect("snmp_diff should be present");
+
+        // All communities should be marked for removal
+        assert_eq!(snmp_diff.communities_to_remove.len(), 2,
+                   "Should remove 2 communities");
+        assert!(snmp_diff.communities_to_remove.contains(&"public".to_string()));
+        assert!(snmp_diff.communities_to_remove.contains(&"private".to_string()));
+
+        // Trap receiver should be marked for removal
+        assert_eq!(snmp_diff.trap_receivers_to_remove.len(), 1,
+                   "Should remove 1 trap receiver");
+        assert!(snmp_diff.trap_receivers_to_remove.contains(&"192.168.1.100".to_string()));
+
+        // All traps should be marked for disable
+        assert_eq!(snmp_diff.traps_to_disable.len(), 2,
+                   "Should disable 2 traps");
+        assert!(snmp_diff.traps_to_disable.contains(&TrapType::MacNotify));
+        assert!(snmp_diff.traps_to_disable.contains(&TrapType::LinkChange));
+
+        // Nothing should be added or enabled
+        assert!(snmp_diff.communities_to_add.is_empty());
+        assert!(snmp_diff.trap_receivers_to_add.is_empty());
+        assert!(snmp_diff.traps_to_enable.is_empty());
+    }
+
+    #[test]
+    fn test_compute_diff_snmp_trap_type_changes() {
+        // Current has mac-notify trap enabled
+        let current = SwitchState {
+            vlans: vec![],
+            ports: vec![],
+            port_mirrors: vec![],
+            snmp: Some(SnmpConfig {
+                communities: vec![
+                    SnmpCommunity {
+                        name: "public".to_string(),
+                        access: SnmpAccess::Operator,
+                    },
+                ],
+                trap_receivers: vec![],
+                enabled_traps: vec![TrapType::MacNotify],
+            }),
+            management_vlan: None,
+            warnings: vec![],
+        };
+
+        // Desired has link-change trap instead
+        let mut desired = create_test_switch_config();
+        desired.snmp = Some(SnmpConfig {
+            communities: vec![
+                SnmpCommunity {
+                    name: "public".to_string(),
+                    access: SnmpAccess::Operator,
+                },
+            ],
+            trap_receivers: vec![],
+            enabled_traps: vec![TrapType::LinkChange],
+        });
+
+        let diff = compute_diff(&current, &desired, false);
+
+        assert!(diff.has_changes());
+        assert!(diff.snmp_config_changed);
+
+        let snmp_diff = diff.snmp_diff.as_ref().expect("snmp_diff should be present");
+
+        // LinkChange should be enabled
+        assert_eq!(snmp_diff.traps_to_enable.len(), 1,
+                   "Should have 1 trap to enable");
+        assert!(snmp_diff.traps_to_enable.contains(&TrapType::LinkChange));
+
+        // MacNotify should be disabled
+        assert_eq!(snmp_diff.traps_to_disable.len(), 1,
+                   "Should have 1 trap to disable");
+        assert!(snmp_diff.traps_to_disable.contains(&TrapType::MacNotify));
+    }
 }

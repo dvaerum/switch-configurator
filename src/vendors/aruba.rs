@@ -5394,4 +5394,137 @@ interface 48
         assert_eq!(port11.unwrap().speed_duplex, SpeedDuplex::Auto,
                    "Port 11 without speed-duplex config should default to Auto");
     }
+
+    #[test]
+    fn test_generate_mirror_commands_legacy_syntax() {
+        // Aruba 2530 uses legacy "mirror-port <dest>" syntax
+        let config_2530 = SwitchConfig {
+            id: "test-2530".to_string(),
+            hostname: Some("test-2530".to_string()),
+            model: Some(SwitchModel::Aruba2530_24G_POE),
+            management_ip: Some("192.168.1.1".to_string()),
+            credentials: Some(Credentials {
+                username: "admin".to_string(),
+                password: Some("password".to_string()),
+                ssh_key_path: None,
+                port: 22,
+                connection_type: ConnectionType::Ssh,
+                serial_device: None,
+                baud_rate: 9600,
+                jump_hosts: None,
+                enable_secret: None,
+            }),
+            vlans: vec![],
+            ports: vec![],
+            port_mirrors: vec![],
+            snmp: None,
+            validation: None,
+            vendor_specific: std::collections::HashMap::new(),
+            management_vlan: None,
+            settings: crate::config::Settings::default(),
+        };
+        let switch_2530 = ArubaSwitch::new(config_2530, RuntimeConfig::default(), false);
+
+        let mirrors = vec![
+            PortMirror {
+                session_id: "1".to_string(),
+                source_ports: vec!["1".to_string(), "2".to_string()],
+                destination_port: "8".to_string(),
+                direction: MirrorDirection::Both,
+            },
+        ];
+
+        let commands = switch_2530.generate_mirror_commands(&mirrors);
+
+        // Legacy syntax: "mirror-port <dest>"
+        assert!(commands.contains(&"mirror-port 8".to_string()),
+                "Aruba 2530 should use legacy 'mirror-port 8' syntax, got: {:?}", commands);
+        // Must NOT contain modern syntax
+        assert!(!commands.iter().any(|c| c == "mirror 1 port 8"),
+                "Aruba 2530 should NOT use modern 'mirror 1 port 8' syntax");
+    }
+
+    #[test]
+    fn test_generate_mirror_commands_modern_syntax() {
+        // Aruba 2930F uses modern "mirror <session> port <dest>" syntax
+        let switch = create_test_switch(); // Aruba2930F
+
+        let mirrors = vec![
+            PortMirror {
+                session_id: "1".to_string(),
+                source_ports: vec!["1".to_string(), "2".to_string()],
+                destination_port: "8".to_string(),
+                direction: MirrorDirection::Both,
+            },
+        ];
+
+        let commands = switch.generate_mirror_commands(&mirrors);
+
+        // Modern syntax: "mirror <session> port <dest>"
+        assert!(commands.contains(&"mirror 1 port 8".to_string()),
+                "Aruba 2930F should use modern 'mirror 1 port 8' syntax, got: {:?}", commands);
+        // Must NOT contain legacy syntax
+        assert!(!commands.iter().any(|c| c == "mirror-port 8"),
+                "Aruba 2930F should NOT use legacy 'mirror-port 8' syntax");
+    }
+
+    // ========================================================================
+    // Gap 8: enable_secret Runtime Resolution Logic
+    // Tests the exact `.or_else()` pattern used in the connect method:
+    //   enable_secret.clone().or_else(|| password.clone())
+    // ========================================================================
+
+    #[test]
+    fn test_enable_secret_resolution_logic() {
+        // Case (a): enable_secret=Some("secret"), password=Some("pass")
+        // -> resolved should be "secret" (enable_secret takes priority)
+        let creds_a = Credentials {
+            username: "admin".to_string(),
+            password: Some("pass".to_string()),
+            ssh_key_path: None,
+            port: 22,
+            connection_type: ConnectionType::Ssh,
+            serial_device: None,
+            baud_rate: 9600,
+            jump_hosts: None,
+            enable_secret: Some("secret".to_string()),
+        };
+        let resolved_a = creds_a.enable_secret.clone().or_else(|| creds_a.password.clone());
+        assert_eq!(resolved_a, Some("secret".to_string()),
+                   "When enable_secret is set, it should take priority over password");
+
+        // Case (b): enable_secret=None, password=Some("pass")
+        // -> resolved should be "pass" (falls back to password)
+        let creds_b = Credentials {
+            username: "admin".to_string(),
+            password: Some("pass".to_string()),
+            ssh_key_path: None,
+            port: 22,
+            connection_type: ConnectionType::Ssh,
+            serial_device: None,
+            baud_rate: 9600,
+            jump_hosts: None,
+            enable_secret: None,
+        };
+        let resolved_b = creds_b.enable_secret.clone().or_else(|| creds_b.password.clone());
+        assert_eq!(resolved_b, Some("pass".to_string()),
+                   "When enable_secret is None, should fall back to password");
+
+        // Case (c): enable_secret=None, password=None
+        // -> resolved should be None
+        let creds_c = Credentials {
+            username: "admin".to_string(),
+            password: None,
+            ssh_key_path: None,
+            port: 22,
+            connection_type: ConnectionType::Ssh,
+            serial_device: None,
+            baud_rate: 9600,
+            jump_hosts: None,
+            enable_secret: None,
+        };
+        let resolved_c = creds_c.enable_secret.clone().or_else(|| creds_c.password.clone());
+        assert_eq!(resolved_c, None,
+                   "When both enable_secret and password are None, resolved should be None");
+    }
 }

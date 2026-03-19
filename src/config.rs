@@ -2621,4 +2621,82 @@ settings:
         assert!(err_msg.contains("number range pattern"));
         assert!(err_msg.contains("8-10"));
     }
+
+    #[test]
+    fn test_multi_switch_multi_vendor_loading() {
+        let yaml = r#"
+switches:
+  - id: aruba-sw-01
+    hostname: aruba-switch
+    model: Aruba2930F
+    vendor: Aruba
+    management_ip: 10.0.0.1
+    credentials:
+      username: admin
+      password: password
+      connection_type: ssh
+      port: 22
+    vlans:
+      - id: 10
+        name: mgmt
+      - id: 20
+        name: users
+    ports: []
+    port_mirrors: []
+  - id: cisco-sw-01
+    hostname: cisco-switch
+    model: CiscoCatalyst9300_24P_UPOE
+    vendor: Cisco
+    management_ip: 10.0.0.2
+    credentials:
+      username: admin
+      password: password
+      connection_type: ssh
+      port: 22
+    vlans:
+      - id: 100
+        name: servers
+    ports: []
+    port_mirrors: []
+  - id: forti-sw-01
+    hostname: forti-switch
+    model: Fortiswitch124F_FPOE
+    vendor: FortiSwitch
+    management_ip: 10.0.0.3
+    credentials:
+      username: admin
+      password: password
+      connection_type: ssh
+      port: 22
+    vlans:
+      - id: 200
+        name: iot
+      - id: 201
+        name: guest
+      - id: 202
+        name: cameras
+    ports: []
+    port_mirrors: []
+"#;
+
+        let config: AppConfig = serde_yaml::from_str(yaml).unwrap();
+
+        // Verify 3 switches loaded
+        assert_eq!(config.switches.len(), 3, "Should load 3 switches");
+
+        // Verify correct models
+        assert_eq!(config.switches[0].model, Some(crate::models::SwitchModel::Aruba2930F));
+        assert_eq!(config.switches[1].model, Some(crate::models::SwitchModel::CiscoCatalyst9300_24P_UPOE));
+        assert_eq!(config.switches[2].model, Some(crate::models::SwitchModel::Fortiswitch124F_FPOE));
+
+        // Verify correct hostnames
+        assert_eq!(config.switches[0].hostname, Some("aruba-switch".to_string()));
+        assert_eq!(config.switches[1].hostname, Some("cisco-switch".to_string()));
+        assert_eq!(config.switches[2].hostname, Some("forti-switch".to_string()));
+
+        // Verify correct VLAN counts
+        assert_eq!(config.switches[0].vlans.len(), 2, "Aruba switch should have 2 VLANs");
+        assert_eq!(config.switches[1].vlans.len(), 1, "Cisco switch should have 1 VLAN");
+        assert_eq!(config.switches[2].vlans.len(), 3, "FortiSwitch should have 3 VLANs");
+    }
 }
