@@ -241,7 +241,11 @@ impl SerialClient {
         // Serial connections require authentication before any commands work,
         // including read-only "show" commands needed for state parsing.
 
-        // Send a carriage return to see what state we're in
+        // Send Ctrl-C + Enter to break out of any stuck state (e.g., switch left
+        // in config mode from a previous session that timed out, or a "-- MORE --"
+        // prompt). Ctrl-C aborts the current command/mode on most switch CLIs.
+        self.send_raw("\x03").await?;
+        tokio::time::sleep(Duration::from_millis(200)).await;
         self.send_raw("\r").await?;
         tokio::time::sleep(Duration::from_millis(500)).await;
 
@@ -275,22 +279,40 @@ impl SerialClient {
             // Wait for command prompt after login
             tokio::time::sleep(Duration::from_secs(2)).await;
         } else if state_check.contains('#') || state_check.contains('>') {
-            // Already at a prompt
-            debug!("Already at command prompt, skipping login");
+            // Already at a prompt — but check if we're in config mode and need to exit
+            let ansi_stripped = regex::Regex::new(r"\x1b\[[0-9;?]*[A-Za-z]")
+                .unwrap()
+                .replace_all(&state_check, "");
+            if ansi_stripped.contains("(config") {
+                debug!("In config mode, sending 'end' to return to privileged exec mode");
+                self.send_raw("end\r").await?;
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                // Drain the response
+                let _ = self.check_current_state(Duration::from_secs(1)).await;
+            } else {
+                debug!("Already at command prompt, skipping login");
+            }
         } else {
-            // Unknown state - this can happen on Aruba switches when the previous user logged out
-            // Try pressing enter again (sometimes twice is needed for Aruba)
-            debug!("Unknown state, sending enter and waiting... (attempt 1)");
+            // Unknown state - this can happen on Aruba switches when the previous user logged out,
+            // or when the switch is stuck in config mode / "-- MORE --" / "Press any key" state.
+            // Send Ctrl-C to break out, then Enter.
+            debug!("Unknown state, sending Ctrl-C + enter... (attempt 1)");
+            self.send_raw("\x03").await?;
+            tokio::time::sleep(Duration::from_millis(200)).await;
             self.send_raw("\r").await?;
             tokio::time::sleep(Duration::from_millis(800)).await;
 
             state_check = self.check_current_state(Duration::from_secs(2)).await?;
             debug!("State check after first retry: {}", state_check);
 
-            // If still nothing, try one more time
+            // If still nothing, try one more time with space (for "-- MORE --") and enter
             if !state_check.contains("login:") && !state_check.contains("Username:")
                 && !state_check.contains('#') && !state_check.contains('>') {
-                debug!("Still unknown state, sending enter again... (attempt 2)");
+                debug!("Still unknown state, sending space + Ctrl-C + enter... (attempt 2)");
+                self.send_raw(" ").await?;
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                self.send_raw("\x03").await?;
+                tokio::time::sleep(Duration::from_millis(200)).await;
                 self.send_raw("\r").await?;
                 tokio::time::sleep(Duration::from_secs(1)).await;
 
