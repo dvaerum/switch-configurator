@@ -4923,4 +4923,475 @@ vlan 1020
         assert!(!SwitchModel::Fortiswitch124F_FPOE.product_numbers().is_empty());
         assert!(!SwitchModel::CiscoCatalyst9300_24P_UPOE.product_numbers().is_empty());
     }
+
+    // ========================================================================
+    // Speed Duplex Command Generation Tests
+    // Verify generate_port_commands produces correct speed-duplex for all variants
+    // ========================================================================
+
+    #[test]
+    fn test_speed_duplex_command_generation_all_variants() {
+        let switch = create_test_switch();
+
+        let variants = vec![
+            (SpeedDuplex::Auto, "speed-duplex auto"),
+            (SpeedDuplex::TenHalf, "speed-duplex 10-half"),
+            (SpeedDuplex::TenFull, "speed-duplex 10-full"),
+            (SpeedDuplex::HundredHalf, "speed-duplex 100-half"),
+            (SpeedDuplex::HundredFull, "speed-duplex 100-full"),
+            (SpeedDuplex::ThousandFull, "speed-duplex 1000-full"),
+        ];
+
+        for (speed, expected_cmd) in variants {
+            let ports = vec![
+                Port {
+                    port_id: "1".to_string(),
+                    mode: PortMode::Access,
+                    vlan: 10,
+                    allowed_vlans: vec![],
+                    description: None,
+                    enabled: true,
+                    poe_enabled: false,
+                    mac_notify: false,
+                    speed_duplex: speed,
+                },
+            ];
+
+            let commands = switch.generate_port_commands(&ports, &[]);
+
+            assert!(commands.contains(&expected_cmd.to_string()),
+                    "SpeedDuplex::{:?} should generate '{}' command, got commands: {:?}",
+                    speed, expected_cmd, commands);
+        }
+    }
+
+    // ========================================================================
+    // Speed Duplex Parsing Tests
+    // Verify parse_running_config correctly parses speed-duplex from interface blocks
+    // ========================================================================
+
+    #[test]
+    fn test_speed_duplex_parsing_from_running_config() {
+        let switch = create_test_switch();
+
+        let config = r#"
+hostname "test-switch"
+interface 1
+   speed-duplex 100-full
+   exit
+interface 2
+   speed-duplex auto
+   exit
+interface 3
+   speed-duplex 1000-full
+   exit
+vlan 1
+   name "DEFAULT_VLAN"
+   untagged 1-3
+   exit
+"#;
+
+        let state = switch.parse_running_config(config);
+
+        let port1 = state.ports.iter().find(|p| p.port_id == "1");
+        let port2 = state.ports.iter().find(|p| p.port_id == "2");
+        let port3 = state.ports.iter().find(|p| p.port_id == "3");
+
+        assert!(port1.is_some(), "Should parse port 1");
+        assert!(port2.is_some(), "Should parse port 2");
+        assert!(port3.is_some(), "Should parse port 3");
+
+        assert_eq!(port1.unwrap().speed_duplex, SpeedDuplex::HundredFull,
+                   "Port 1 should have speed_duplex=HundredFull (100-full)");
+        assert_eq!(port2.unwrap().speed_duplex, SpeedDuplex::Auto,
+                   "Port 2 should have speed_duplex=Auto");
+        assert_eq!(port3.unwrap().speed_duplex, SpeedDuplex::ThousandFull,
+                   "Port 3 should have speed_duplex=ThousandFull (1000-full)");
+    }
+
+    // ========================================================================
+    // Non-PoE Model Skips PoE Commands Test
+    // Verify Aruba2540_24G generates no PoE commands at all
+    // ========================================================================
+
+    #[test]
+    fn test_non_poe_model_aruba2540_24g_skips_all_poe_commands() {
+        let config = SwitchConfig {
+            id: "test-2540-24g".to_string(),
+            hostname: Some("non-poe-2540".to_string()),
+            model: Some(SwitchModel::Aruba2540_24G),
+            management_ip: Some("192.168.1.1".to_string()),
+            credentials: Some(Credentials {
+                username: "admin".to_string(),
+                password: Some("password".to_string()),
+                ssh_key_path: None,
+                port: 22,
+                connection_type: ConnectionType::Ssh,
+                serial_device: None,
+                baud_rate: 9600,
+                jump_hosts: None,
+                enable_secret: None,
+            }),
+            vlans: vec![],
+            ports: vec![],
+            port_mirrors: vec![],
+            snmp: None,
+            validation: None,
+            vendor_specific: std::collections::HashMap::new(),
+            management_vlan: None,
+            settings: crate::config::Settings::default(),
+        };
+
+        let switch = ArubaSwitch::new(config, RuntimeConfig::default(), false);
+
+        // Test multiple ports with various poe_enabled settings
+        let ports = vec![
+            Port {
+                port_id: "1".to_string(),
+                mode: PortMode::Access,
+                vlan: 10,
+                allowed_vlans: vec![],
+                description: Some("Port with poe true".to_string()),
+                enabled: true,
+                poe_enabled: true,
+                mac_notify: false,
+                speed_duplex: SpeedDuplex::Auto,
+            },
+            Port {
+                port_id: "2".to_string(),
+                mode: PortMode::Access,
+                vlan: 10,
+                allowed_vlans: vec![],
+                description: Some("Port with poe false".to_string()),
+                enabled: true,
+                poe_enabled: false,
+                mac_notify: false,
+                speed_duplex: SpeedDuplex::Auto,
+            },
+            Port {
+                port_id: "24".to_string(),
+                mode: PortMode::Trunk,
+                vlan: 1,
+                allowed_vlans: vec![1, 10, 20],
+                description: None,
+                enabled: true,
+                poe_enabled: true,
+                mac_notify: true,
+                speed_duplex: SpeedDuplex::HundredFull,
+            },
+        ];
+
+        let commands = switch.generate_port_commands(&ports, &[]);
+
+        // No PoE commands at all for Aruba2540_24G
+        for cmd in &commands {
+            assert!(!cmd.contains("power-over-ethernet"),
+                    "Aruba2540_24G should not generate any PoE command, found: '{}'", cmd);
+            assert!(!cmd.contains("poe-allocate"),
+                    "Aruba2540_24G should not generate any poe-allocate command, found: '{}'", cmd);
+            assert!(!cmd.contains("poe-priority"),
+                    "Aruba2540_24G should not generate any poe-priority command, found: '{}'", cmd);
+        }
+
+        // Should still generate other port commands correctly
+        assert!(commands.contains(&"interface 1".to_string()));
+        assert!(commands.contains(&"interface 2".to_string()));
+        assert!(commands.contains(&"interface 24".to_string()));
+        assert!(commands.contains(&"untagged vlan 10".to_string()));
+    }
+
+    // ========================================================================
+    // VLAN Boundary IDs Test
+    // Verify VLAN commands work with boundary IDs 1 and 4094
+    // ========================================================================
+
+    #[test]
+    fn test_vlan_boundary_ids() {
+        let switch = create_test_switch();
+
+        let vlans = vec![
+            Vlan {
+                id: 1,
+                name: "default".to_string(),
+                description: None,
+                ip_config: VlanIpConfig::None,
+            },
+            Vlan {
+                id: 4094,
+                name: "max-vlan".to_string(),
+                description: None,
+                ip_config: VlanIpConfig::Static {
+                    address: "10.255.255.1".to_string(),
+                    netmask: "255.255.255.0".to_string(),
+                },
+            },
+        ];
+
+        let commands = switch.generate_vlan_commands(&vlans);
+
+        assert!(commands.contains(&"vlan 1".to_string()),
+                "Should generate VLAN 1 (minimum boundary)");
+        assert!(commands.contains(&"name default".to_string()),
+                "Should set name for VLAN 1");
+        assert!(commands.contains(&"vlan 4094".to_string()),
+                "Should generate VLAN 4094 (maximum boundary)");
+        assert!(commands.contains(&"name max-vlan".to_string()),
+                "Should set name for VLAN 4094");
+        assert!(commands.contains(&"ip address 10.255.255.1 255.255.255.0".to_string()),
+                "Should set static IP for VLAN 4094");
+    }
+
+    // ========================================================================
+    // VLAN Name With Backtick Test
+    // Verify VLAN name containing a backtick character is handled
+    // ========================================================================
+
+    #[test]
+    fn test_vlan_name_with_backtick() {
+        let switch = create_test_switch();
+
+        let vlans = vec![
+            Vlan {
+                id: 100,
+                name: "test`vlan".to_string(),
+                description: None,
+                ip_config: VlanIpConfig::None,
+            },
+        ];
+
+        let commands = switch.generate_vlan_commands(&vlans);
+
+        assert!(commands.contains(&"vlan 100".to_string()),
+                "Should generate VLAN 100");
+        // Backtick doesn't contain a space, so it should not be quoted
+        assert!(commands.contains(&"name test`vlan".to_string()),
+                "Should set name with backtick character (no quoting since no spaces)");
+    }
+
+    // ========================================================================
+    // Full Running Config Parse Test
+    // Comprehensive test parsing a realistic Aruba 2530-48G running config
+    // ========================================================================
+
+    #[test]
+    fn test_full_running_config_parse() {
+        // Use an Aruba2530_48G_2SFP model to match the J9855A product number
+        let config_2530_48g = SwitchConfig {
+            id: "test-48g".to_string(),
+            hostname: Some("sw-48g-test".to_string()),
+            model: Some(SwitchModel::Aruba2530_48G_2SFP),
+            management_ip: Some("192.168.1.10".to_string()),
+            credentials: Some(Credentials {
+                username: "admin".to_string(),
+                password: Some("password".to_string()),
+                ssh_key_path: None,
+                port: 22,
+                connection_type: ConnectionType::Ssh,
+                serial_device: None,
+                baud_rate: 9600,
+                jump_hosts: None,
+                enable_secret: None,
+            }),
+            vlans: vec![],
+            ports: vec![],
+            port_mirrors: vec![],
+            snmp: None,
+            validation: None,
+            vendor_specific: std::collections::HashMap::new(),
+            management_vlan: None,
+            settings: crate::config::Settings::default(),
+        };
+
+        let switch = ArubaSwitch::new(config_2530_48g, RuntimeConfig::default(), false);
+
+        let running_config = r#"
+; J9855A Configuration Editor; Created on release #YA.16.11.0012
+; Ver #15:28.6f.f8.1d.9b.3f.bf.bb.ef.7c.59.fc.6b.fb.9f.fc.ff.ff.37.ef:2d
+
+hostname "sw-48g-test"
+snmp-server community "monitoring" operator
+snmp-server community "private-rw" manager
+snmp-server host 10.0.0.50 community "monitoring"
+snmp-server host 10.0.0.51 community "monitoring"
+mirror-port 48
+vlan 1
+   name "DEFAULT_VLAN"
+   untagged 1-10,47-48
+   ip address dhcp-bootp
+   exit
+vlan 100
+   name "servers"
+   untagged 11-20
+   tagged 47
+   ip address 10.100.0.1 255.255.255.0
+   exit
+vlan 200
+   name "workstations"
+   untagged 21-40
+   tagged 47
+   no ip address
+   exit
+vlan 999
+   name "quarantine"
+   untagged 41-46
+   no ip address
+   exit
+interface 1
+   name "Gateway"
+   speed-duplex 1000-full
+   exit
+interface 5
+   name "NAS Storage"
+   speed-duplex 100-full
+   exit
+interface 11
+   name "DB Server Primary"
+   exit
+interface 15
+   name "Web Server"
+   monitor
+   exit
+interface 16
+   name "App Server"
+   monitor
+   exit
+interface 21
+   name "Reception Desk"
+   mac-notify traps learned
+   mac-notify traps removed
+   exit
+interface 30
+   disable
+   exit
+interface 41
+   name "Quarantine Port"
+   disable
+   exit
+interface 47
+   name "Uplink to Core"
+   speed-duplex 1000-full
+   exit
+interface 48
+   disable
+   exit
+"#;
+
+        let state = switch.parse_running_config(running_config);
+
+        // ---- Verify VLANs ----
+        assert_eq!(state.vlans.len(), 4,
+                   "Should parse 4 VLANs (1, 100, 200, 999), got {}", state.vlans.len());
+
+        let vlan1 = state.vlans.iter().find(|v| v.id == 1);
+        let vlan100 = state.vlans.iter().find(|v| v.id == 100);
+        let vlan200 = state.vlans.iter().find(|v| v.id == 200);
+        let vlan999 = state.vlans.iter().find(|v| v.id == 999);
+
+        assert!(vlan1.is_some(), "Should find VLAN 1");
+        assert!(vlan100.is_some(), "Should find VLAN 100");
+        assert!(vlan200.is_some(), "Should find VLAN 200");
+        assert!(vlan999.is_some(), "Should find VLAN 999");
+
+        assert_eq!(vlan1.unwrap().name, "DEFAULT_VLAN");
+        assert_eq!(vlan100.unwrap().name, "servers");
+        assert_eq!(vlan200.unwrap().name, "workstations");
+        assert_eq!(vlan999.unwrap().name, "quarantine");
+
+        // ---- Verify ports exist ----
+        // Ports are created from both interface blocks and VLAN untagged/tagged assignments
+        // So we should have ports from 1-48
+        assert!(state.ports.len() >= 10,
+                "Should parse many ports, got {}", state.ports.len());
+
+        // ---- Verify specific port configurations ----
+        let port1 = state.ports.iter().find(|p| p.port_id == "1");
+        assert!(port1.is_some(), "Should find port 1");
+        let p1 = port1.unwrap();
+        assert_eq!(p1.description, Some("Gateway".to_string()));
+        assert_eq!(p1.speed_duplex, SpeedDuplex::ThousandFull,
+                   "Port 1 should have speed_duplex=ThousandFull (1000-full)");
+        assert_eq!(p1.vlan, 1, "Port 1 should be on VLAN 1");
+
+        let port5 = state.ports.iter().find(|p| p.port_id == "5");
+        assert!(port5.is_some(), "Should find port 5");
+        let p5 = port5.unwrap();
+        assert_eq!(p5.description, Some("NAS Storage".to_string()));
+        assert_eq!(p5.speed_duplex, SpeedDuplex::HundredFull,
+                   "Port 5 should have speed_duplex=HundredFull (100-full)");
+
+        let port11 = state.ports.iter().find(|p| p.port_id == "11");
+        assert!(port11.is_some(), "Should find port 11");
+        assert_eq!(port11.unwrap().description, Some("DB Server Primary".to_string()));
+        assert_eq!(port11.unwrap().vlan, 100, "Port 11 should be on VLAN 100");
+
+        // Port 21 should have mac_notify enabled
+        let port21 = state.ports.iter().find(|p| p.port_id == "21");
+        assert!(port21.is_some(), "Should find port 21");
+        assert_eq!(port21.unwrap().mac_notify, true,
+                   "Port 21 should have mac_notify=true");
+        assert_eq!(port21.unwrap().description, Some("Reception Desk".to_string()));
+
+        // Port 30 should be disabled
+        let port30 = state.ports.iter().find(|p| p.port_id == "30");
+        assert!(port30.is_some(), "Should find port 30");
+        assert_eq!(port30.unwrap().enabled, false,
+                   "Port 30 should be disabled");
+
+        // Port 41 should be disabled with a name
+        let port41 = state.ports.iter().find(|p| p.port_id == "41");
+        assert!(port41.is_some(), "Should find port 41");
+        assert_eq!(port41.unwrap().enabled, false,
+                   "Port 41 should be disabled");
+        assert_eq!(port41.unwrap().description, Some("Quarantine Port".to_string()));
+
+        // Port 47 is a trunk port (tagged on VLANs 100 and 200, untagged on VLAN 1)
+        let port47 = state.ports.iter().find(|p| p.port_id == "47");
+        assert!(port47.is_some(), "Should find port 47");
+        let p47 = port47.unwrap();
+        assert_eq!(p47.mode, PortMode::Trunk,
+                   "Port 47 should be trunk mode (has tagged VLANs)");
+        assert_eq!(p47.description, Some("Uplink to Core".to_string()));
+        assert_eq!(p47.speed_duplex, SpeedDuplex::ThousandFull);
+        assert!(p47.allowed_vlans.contains(&100),
+                "Port 47 allowed_vlans should contain VLAN 100");
+        assert!(p47.allowed_vlans.contains(&200),
+                "Port 47 allowed_vlans should contain VLAN 200");
+
+        // ---- Verify mirror configuration ----
+        assert_eq!(state.port_mirrors.len(), 1,
+                   "Should have 1 mirror session");
+        let mirror = &state.port_mirrors[0];
+        assert_eq!(mirror.destination_port, "48",
+                   "Mirror destination should be port 48");
+        assert_eq!(mirror.source_ports.len(), 2,
+                   "Should have 2 source ports (15 and 16)");
+        assert!(mirror.source_ports.contains(&"15".to_string()),
+                "Port 15 should be a mirror source");
+        assert!(mirror.source_ports.contains(&"16".to_string()),
+                "Port 16 should be a mirror source");
+
+        // ---- Verify PoE states ----
+        // Aruba2530_48G_2SFP is a non-PoE model. Ports with interface blocks should
+        // default to poe_enabled=false via parse_interface_name. Ports that only appear
+        // in VLAN blocks (no interface block) inherit PortVlanInfo::new() default (true).
+        // Check ports that have interface blocks explicitly.
+        let ports_with_interface_blocks = ["1", "5", "11", "15", "16", "21", "30", "41", "47", "48"];
+        for port_id in &ports_with_interface_blocks {
+            if let Some(port) = state.ports.iter().find(|p| p.port_id == *port_id) {
+                assert_eq!(port.poe_enabled, false,
+                           "Port {} on non-PoE model (Aruba2530_48G_2SFP) with interface block should have poe_enabled=false",
+                           port.port_id);
+            }
+        }
+
+        // ---- Verify model detection (J9855A matches Aruba2530_48G_2SFP) ----
+        assert!(state.warnings.is_empty(),
+                "J9855A should match Aruba2530_48G_2SFP with no warnings, got: {:?}",
+                state.warnings);
+
+        // ---- Verify speed_duplex defaults ----
+        // Port 11 has no speed-duplex in config -> should default to Auto
+        assert_eq!(port11.unwrap().speed_duplex, SpeedDuplex::Auto,
+                   "Port 11 without speed-duplex config should default to Auto");
+    }
 }

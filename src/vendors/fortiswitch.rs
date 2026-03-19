@@ -2463,4 +2463,126 @@ mod tests {
         let result = switch.parse_management_vlan(&running_config);
         assert_eq!(result, Some(77), "Should parse VLAN at end of config");
     }
+
+    // ========== VLAN Boundary ID Tests ==========
+
+    #[test]
+    fn test_generate_vlan_commands_boundary_id_1() {
+        let switch = create_test_switch();
+        let vlans = vec![Vlan {
+            id: 1,
+            name: "default".to_string(),
+            description: None,
+            ip_config: VlanIpConfig::None,
+        }];
+
+        let commands = switch.generate_vlan_commands(&vlans);
+
+        assert!(commands.contains(&"config switch vlan".to_string()));
+        assert!(commands.contains(&"edit 1".to_string()));
+        assert!(commands.contains(&"next".to_string()));
+        assert!(commands.contains(&"end".to_string()));
+        // No SVI should be created for VlanIpConfig::None
+        assert!(!commands.contains(&"edit vlan1".to_string()));
+    }
+
+    #[test]
+    fn test_generate_vlan_commands_boundary_id_4094() {
+        let switch = create_test_switch();
+        let vlans = vec![Vlan {
+            id: 4094,
+            name: "max-vlan".to_string(),
+            description: Some("Maximum VLAN ID".to_string()),
+            ip_config: VlanIpConfig::Static {
+                address: "10.40.94.1".to_string(),
+                netmask: "255.255.255.0".to_string(),
+            },
+        }];
+
+        let commands = switch.generate_vlan_commands(&vlans);
+
+        // Layer 2 VLAN creation
+        assert!(commands.contains(&"config switch vlan".to_string()));
+        assert!(commands.contains(&"edit 4094".to_string()));
+
+        // Layer 3 SVI creation
+        assert!(commands.contains(&"config system interface".to_string()));
+        assert!(commands.contains(&"edit vlan4094".to_string()));
+        assert!(commands.contains(&"set vlanid 4094".to_string()));
+        assert!(commands.contains(&"set description \"Maximum VLAN ID\"".to_string()));
+        assert!(commands.contains(&"set ip 10.40.94.1 255.255.255.0".to_string()));
+        assert!(commands.contains(&"set allowaccess ping".to_string()));
+    }
+
+    // ========== VLAN Name with Special Characters ==========
+
+    #[test]
+    fn test_generate_vlan_commands_name_with_backtick() {
+        let switch = create_test_switch();
+        let vlans = vec![Vlan {
+            id: 50,
+            name: "test`vlan".to_string(),
+            description: Some("VLAN with `backtick` in desc".to_string()),
+            ip_config: VlanIpConfig::Dhcp,
+        }];
+
+        let commands = switch.generate_vlan_commands(&vlans);
+
+        // Layer 2 VLAN creation (no name is set here for FortiSwitch)
+        assert!(commands.contains(&"config switch vlan".to_string()));
+        assert!(commands.contains(&"edit 50".to_string()));
+
+        // Layer 3 SVI - description should be passed through as-is
+        assert!(commands.contains(&"config system interface".to_string()));
+        assert!(commands.contains(&"edit vlan50".to_string()));
+        assert!(commands.contains(&"set description \"VLAN with `backtick` in desc\"".to_string()));
+        assert!(commands.contains(&"set mode dhcp".to_string()));
+    }
+
+    // ========== mac_notify Handling ==========
+
+    #[test]
+    fn test_generate_port_commands_mac_notify_not_supported() {
+        let switch = create_test_switch();
+        let ports = vec![Port {
+            port_id: "5".to_string(),
+            mode: PortMode::Access,
+            vlan: 10,
+            allowed_vlans: vec![],
+            description: Some("Test Port".to_string()),
+            enabled: true,
+            poe_enabled: false,
+            mac_notify: true,
+            speed_duplex: SpeedDuplex::Auto,
+        }];
+
+        let commands = switch.generate_port_commands(&ports);
+
+        // FortiSwitch does not support per-port mac_notify, so no
+        // mac-notification commands should appear anywhere in the output.
+        // Skip description commands since they are user-provided strings.
+        for cmd in &commands {
+            if cmd.starts_with("set description") {
+                continue;
+            }
+            assert!(
+                !cmd.to_lowercase().contains("mac-notif"),
+                "FortiSwitch should not generate mac-notification commands, but found: {}",
+                cmd
+            );
+            assert!(
+                !cmd.to_lowercase().contains("mac_notif"),
+                "FortiSwitch should not generate mac_notify commands, but found: {}",
+                cmd
+            );
+        }
+
+        // Verify it still generates normal port commands correctly
+        assert!(commands.contains(&"config switch interface".to_string()));
+        assert!(commands.contains(&"edit port5".to_string()));
+        assert!(commands.contains(&"set native-vlan 10".to_string()));
+        assert!(commands.contains(&"config switch physical-port".to_string()));
+        assert!(commands.contains(&"set status up".to_string()));
+        assert!(commands.contains(&"set speed auto".to_string()));
+    }
 }

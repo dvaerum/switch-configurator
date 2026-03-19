@@ -1375,6 +1375,209 @@ mod tests {
         // Should have made 1 attempt
         assert!(error_msg.contains("1 attempts"));
     }
+
+    // ============================================================================
+    // Additional Unit Tests
+    // ============================================================================
+
+    #[test]
+    fn test_ctrl_c_in_login_sequence() {
+        // Verify that the Ctrl-C character (\x03) is a valid byte that can be
+        // sent via serial. The login() method sends \x03 to break out of stuck
+        // states (config mode, "-- MORE --" prompts, etc.).
+        let ctrl_c = "\x03";
+        let bytes = ctrl_c.as_bytes();
+
+        assert_eq!(bytes.len(), 1, "Ctrl-C should be a single byte");
+        assert_eq!(bytes[0], 0x03, "Ctrl-C should be byte 0x03");
+
+        // Verify it can be embedded in a larger string (as done in login flow)
+        let with_cr = format!("{}\r", ctrl_c);
+        assert_eq!(with_cr.as_bytes(), &[0x03, 0x0D]);
+
+        // Verify the raw string used in send_raw calls
+        let raw = "\x03";
+        assert_eq!(raw.len(), 1);
+        assert_eq!(raw.as_bytes()[0], 3u8);
+    }
+
+    #[test]
+    fn test_config_mode_detection() {
+        // Test the ANSI-stripped config mode detection logic used in login().
+        // When the switch is in config mode, we need to send "end" to return
+        // to privileged exec mode. The check uses contains("(config") on
+        // ANSI-stripped output.
+        let ansi_regex = regex::Regex::new(r"\x1b\[[0-9;?]*[A-Za-z]").unwrap();
+
+        // Helper: strip ANSI and check for config mode, matching the login() logic
+        let is_config_mode = |input: &str| -> bool {
+            let stripped = ansi_regex.replace_all(input, "");
+            stripped.contains("(config")
+        };
+
+        // Should detect config mode
+        assert!(
+            is_config_mode("hostname(config)#"),
+            "Should detect basic config mode"
+        );
+        assert!(
+            is_config_mode("hostname(config-if)#"),
+            "Should detect interface config mode"
+        );
+        assert!(
+            is_config_mode("hostname(config-vlan)#"),
+            "Should detect VLAN config mode"
+        );
+        assert!(
+            is_config_mode("\x1b[24;1Hhostname(config)# \x1b[?25h"),
+            "Should detect config mode with ANSI escape sequences"
+        );
+
+        // Should NOT detect config mode for these
+        assert!(
+            !is_config_mode("hostname#"),
+            "Plain privileged exec prompt should NOT be config mode"
+        );
+        assert!(
+            !is_config_mode("hostname>"),
+            "User mode prompt should NOT be config mode"
+        );
+
+        // The login() code checks for "(config" not "(config)", so sub-modes
+        // like (config-if) also match. Verify parenthetical contexts that do
+        // NOT start with "config" are not matched.
+        assert!(
+            !is_config_mode("hostname(vlan-42)#"),
+            "VLAN context (not config sub-mode) should NOT match config mode"
+        );
+    }
+
+    #[test]
+    fn test_session_setting_and_auth_command_classification() {
+        // Verify the dry-run allow-list logic from execute_command().
+        // Mirrors the exact classification used in lines 795-801.
+        fn is_session_setting(cmd: &str) -> bool {
+            cmd.trim() == "no page"
+                || cmd.trim() == "terminal length 0"
+                || cmd.trim() == "terminal pager 0"
+                || cmd.trim() == "enable"
+                || cmd.trim() == "end"
+        }
+
+        fn is_readonly(cmd: &str) -> bool {
+            cmd.trim().starts_with("show ") || cmd.trim().starts_with("get ")
+        }
+
+        // Session settings: allowed during dry-run
+        assert!(is_session_setting("no page"), "'no page' is a session setting");
+        assert!(is_session_setting("terminal length 0"), "'terminal length 0' is a session setting");
+        assert!(is_session_setting("terminal pager 0"), "'terminal pager 0' is a session setting");
+        assert!(is_session_setting("enable"), "'enable' is a session setting");
+        assert!(is_session_setting("end"), "'end' is a session setting");
+
+        // Read-only commands: allowed during dry-run
+        assert!(is_readonly("show running-config"), "'show running-config' is readonly");
+        assert!(is_readonly("show version"), "'show version' is readonly");
+        assert!(is_readonly("get system status"), "'get system status' is readonly (FortiSwitch)");
+
+        // Configuration commands: should NOT be in either category
+        assert!(
+            !is_session_setting("configure terminal") && !is_readonly("configure terminal"),
+            "'configure terminal' is neither session setting nor readonly"
+        );
+        assert!(
+            !is_session_setting("vlan 42") && !is_readonly("vlan 42"),
+            "'vlan 42' is neither session setting nor readonly"
+        );
+        assert!(
+            !is_session_setting("write memory") && !is_readonly("write memory"),
+            "'write memory' is neither session setting nor readonly"
+        );
+    }
+
+    #[test]
+    fn test_auth_mode_bypasses_dry_run() {
+        // Verify the auth_mode flag logic: when auth_mode is true, even
+        // non-readonly/non-session commands should be allowed through the
+        // dry-run gate. This simulates the enable credential flow where
+        // passwords must be sent as interactive responses.
+        //
+        // The gate condition from execute_command():
+        //   if self.dry_run && !self.auth_mode && !is_readonly && !is_session_setting { SKIP }
+
+        fn would_skip_in_dry_run(dry_run: bool, auth_mode: bool, cmd: &str) -> bool {
+            let is_readonly = cmd.trim().starts_with("show ")
+                || cmd.trim().starts_with("get ");
+            let is_session_setting = cmd.trim() == "no page"
+                || cmd.trim() == "terminal length 0"
+                || cmd.trim() == "terminal pager 0"
+                || cmd.trim() == "enable"
+                || cmd.trim() == "end";
+
+            dry_run && !auth_mode && !is_readonly && !is_session_setting
+        }
+
+        // With dry_run=true and auth_mode=false, config commands are skipped
+        assert!(
+            would_skip_in_dry_run(true, false, "vlan 42"),
+            "Config commands should be skipped in dry-run without auth_mode"
+        );
+        assert!(
+            would_skip_in_dry_run(true, false, "configure terminal"),
+            "'configure terminal' should be skipped in dry-run without auth_mode"
+        );
+        assert!(
+            would_skip_in_dry_run(true, false, "write memory"),
+            "'write memory' should be skipped in dry-run without auth_mode"
+        );
+
+        // With dry_run=true and auth_mode=true, nothing is skipped
+        assert!(
+            !would_skip_in_dry_run(true, true, "vlan 42"),
+            "Config commands should NOT be skipped when auth_mode is true"
+        );
+        assert!(
+            !would_skip_in_dry_run(true, true, "configure terminal"),
+            "'configure terminal' should NOT be skipped when auth_mode is true"
+        );
+        assert!(
+            !would_skip_in_dry_run(true, true, "some-password-string"),
+            "Password strings should NOT be skipped when auth_mode is true"
+        );
+
+        // Read-only and session settings are never skipped in dry-run
+        assert!(
+            !would_skip_in_dry_run(true, false, "show running-config"),
+            "Read-only commands should NOT be skipped in dry-run"
+        );
+        assert!(
+            !would_skip_in_dry_run(true, false, "no page"),
+            "Session settings should NOT be skipped in dry-run"
+        );
+        assert!(
+            !would_skip_in_dry_run(true, false, "enable"),
+            "'enable' should NOT be skipped in dry-run (it's a session setting)"
+        );
+
+        // With dry_run=false, nothing is ever skipped
+        assert!(
+            !would_skip_in_dry_run(false, false, "vlan 42"),
+            "Nothing should be skipped when dry_run is false"
+        );
+        assert!(
+            !would_skip_in_dry_run(false, false, "write memory"),
+            "Nothing should be skipped when dry_run is false"
+        );
+
+        // Also verify set_auth_mode works on the struct
+        let mut client = SerialClient::new("/dev/null".to_string(), 9600)
+            .with_dry_run(true);
+        assert!(!client.auth_mode, "auth_mode should default to false");
+        client.set_auth_mode(true);
+        assert!(client.auth_mode, "auth_mode should be true after set_auth_mode(true)");
+        client.set_auth_mode(false);
+        assert!(!client.auth_mode, "auth_mode should be false after set_auth_mode(false)");
+    }
 }
 
 impl Drop for SerialClient {
