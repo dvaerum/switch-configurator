@@ -5,7 +5,7 @@ switches:
   - id: test-aruba-2530-48g-2sfp
     hostname: test-aruba-2530-48g-2sfp
     model: Aruba2530_48G_2SFP
-    management_ip: "192.168.1.20"  # Not used for serial, but required field
+    management_ip: "192.168.1.2"
 
     settings:
       ssh_timeout_secs: 30
