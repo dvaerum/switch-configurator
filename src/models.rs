@@ -326,7 +326,7 @@ impl SwitchModel {
     /// Used to verify the configured model matches the actual hardware.
     pub fn product_numbers(&self) -> &[&str] {
         match self {
-            Self::Aruba2530_24G_POE => &["J9773A", "J9779A"],  // 2530-24G-PoE+ and 2530-24-PoE+
+            Self::Aruba2530_24G_POE => &["J9773A", "J9779A", "J9854A"],  // 2530-24G-PoE+, 2530-24-PoE+, 2530-24G-PoE+-2SFP+
             Self::Aruba2530_8G_POE => &["J9774A", "J9780A"],   // 2530-8G-PoE+ and 2530-8-PoE+
             Self::Aruba2530_48G_2SFP => &["J9855A"],           // 2530-48G-2SFP+
             Self::Aruba2540_24G => &["JL354A"],                // 2540-24G

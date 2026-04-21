@@ -189,6 +189,11 @@ mod tests {
             assert!(warnings.is_empty(), "{:?} should match product {} but got warnings: {:?}", model, product, warnings);
         }
 
+        // J9854A (2530-24G-PoE+-2SFP+) should also match Aruba2530_24G_POE
+        let config_j9854a = "; J9854A Configuration Editor; Created on release #WC.16.11.0018\n";
+        let warnings_j9854a = verify_hardware_model(config_j9854a, &SwitchModel::Aruba2530_24G_POE, &pattern);
+        assert!(warnings_j9854a.is_empty(), "J9854A should match Aruba2530_24G_POE but got warnings: {:?}", warnings_j9854a);
+
         // Cross-model should warn
         let config = "; JL253A Configuration Editor; Created on release #WC.16.11.0018\n";
         let warnings = verify_hardware_model(config, &SwitchModel::Aruba2530_24G_POE, &pattern);
