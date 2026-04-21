@@ -2152,7 +2152,6 @@ impl ArubaSwitch {
             commands.push("no mac-notify traps removed".to_string());
             // Only generate PoE commands if the switch model supports PoE
             if self.config.model().supports_poe() {
-                commands.push("poe-priority critical".to_string());  // Set PoE to default
                 commands.push("poe-allocate-by class".to_string());  // Set PoE allocation to default
             }
             commands.push("exit".to_string());
@@ -4510,8 +4509,6 @@ interface 5
         // Should NOT contain any PoE commands for non-PoE switch
         assert!(!commands.iter().any(|c| c.contains("power-over-ethernet")),
                 "Non-PoE switch should not generate 'power-over-ethernet' commands");
-        assert!(!commands.iter().any(|c| c.contains("poe-priority")),
-                "Non-PoE switch should not generate 'poe-priority' commands");
         assert!(!commands.iter().any(|c| c.contains("poe-allocate")),
                 "Non-PoE switch should not generate 'poe-allocate' commands");
 
@@ -5089,8 +5086,6 @@ vlan 1
                     "Aruba2540_24G should not generate any PoE command, found: '{}'", cmd);
             assert!(!cmd.contains("poe-allocate"),
                     "Aruba2540_24G should not generate any poe-allocate command, found: '{}'", cmd);
-            assert!(!cmd.contains("poe-priority"),
-                    "Aruba2540_24G should not generate any poe-priority command, found: '{}'", cmd);
         }
 
         // Should still generate other port commands correctly
