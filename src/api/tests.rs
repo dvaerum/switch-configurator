@@ -1772,8 +1772,7 @@ mod integration_tests {
             "credentials": {"username": "admin", "password": "secret"},
             "vlans": [{"id": 100, "name": "test-vlan"}],
             "ports": [
-                {"port_id": "1-5", "mode": "access", "vlan": 100, "enabled": true},
-                {"port_id": "10", "mode": "access", "vlan": 100, "enabled": true}
+                {"port_id": "1-5", "mode": "access", "vlan": 100, "enabled": true}
             ],
             "port_mirrors": [
                 {"session_id": "1", "source_ports": ["1-3"], "destination_port": "10", "direction": "both"}

@@ -1103,6 +1103,9 @@ pub struct StateDiff {
     pub mirrors_to_remove: Vec<String>,
     pub mirrors_to_update: Vec<PortMirror>,
 
+    /// Mirror destination port IDs that need baseline config (VLAN 1, enabled, access mode)
+    pub mirror_dest_ports_to_configure: Vec<String>,
+
     /// Legacy field - kept for backward compatibility
     pub snmp_config_changed: bool,
     /// Legacy field - the full desired SNMP config (used as fallback)
@@ -1125,9 +1128,51 @@ impl StateDiff {
             || !self.mirrors_to_add.is_empty()
             || !self.mirrors_to_remove.is_empty()
             || !self.mirrors_to_update.is_empty()
+            || !self.mirror_dest_ports_to_configure.is_empty()
             || self.snmp_config_changed
             || self.snmp_diff.as_ref().map_or(false, |d| d.has_changes())
             || self.management_vlan_changed
+    }
+
+    /// Produce a human-readable summary of remaining changes.
+    /// Used for convergence warnings when changes persist after apply.
+    pub fn remaining_changes_summary(&self) -> String {
+        let mut parts = Vec::new();
+        if !self.vlans_to_add.is_empty() {
+            parts.push(format!("{} VLANs to add", self.vlans_to_add.len()));
+        }
+        if !self.vlans_to_remove.is_empty() {
+            parts.push(format!("{} VLANs to remove", self.vlans_to_remove.len()));
+        }
+        if !self.vlans_to_update.is_empty() {
+            parts.push(format!("{} VLANs to update", self.vlans_to_update.len()));
+        }
+        if !self.ports_to_configure.is_empty() {
+            let port_ids: Vec<&str> = self.ports_to_configure.iter().map(|p| p.port_id.as_str()).collect();
+            parts.push(format!("ports to configure: [{}]", port_ids.join(", ")));
+        }
+        if !self.ports_to_reset.is_empty() {
+            parts.push(format!("ports to reset: [{}]", self.ports_to_reset.join(", ")));
+        }
+        if !self.mirrors_to_add.is_empty() {
+            parts.push(format!("{} mirrors to add", self.mirrors_to_add.len()));
+        }
+        if !self.mirrors_to_remove.is_empty() {
+            parts.push(format!("{} mirrors to remove", self.mirrors_to_remove.len()));
+        }
+        if !self.mirrors_to_update.is_empty() {
+            parts.push(format!("{} mirrors to update", self.mirrors_to_update.len()));
+        }
+        if !self.mirror_dest_ports_to_configure.is_empty() {
+            parts.push(format!("mirror dest ports: [{}]", self.mirror_dest_ports_to_configure.join(", ")));
+        }
+        if self.snmp_config_changed || self.snmp_diff.as_ref().map_or(false, |d| d.has_changes()) {
+            parts.push("SNMP config".to_string());
+        }
+        if self.management_vlan_changed {
+            parts.push("management VLAN".to_string());
+        }
+        parts.join("; ")
     }
 }
 

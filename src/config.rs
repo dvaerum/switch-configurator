@@ -996,7 +996,7 @@ fn validate_vlan_references(switch: &mut SwitchConfig) -> Result<()> {
         port.allowed_vlans = valid_vlans;
     }
 
-    // Check port mirror source/destination ports exist in port list
+    // Check port mirror source ports exist in port list and destination ports are not in port list
     let defined_port_ids: HashSet<String> = switch.ports.iter().map(|p| p.port_id.clone()).collect();
 
     for mirror in &switch.port_mirrors {
@@ -1009,17 +1009,22 @@ fn validate_vlan_references(switch: &mut SwitchConfig) -> Result<()> {
             }
         }
 
-        if !defined_port_ids.contains(&mirror.destination_port) {
-            warn!(
-                "Port mirror session {} references undefined destination port {}",
+        // Mirror destination ports are special-purpose: they get auto-configured with
+        // baseline settings (VLAN 1, enabled, access mode) and must NOT appear in the
+        // regular ports list.
+        if defined_port_ids.contains(&mirror.destination_port) {
+            error!(
+                "Port mirror session {} destination port {} is also defined in the ports list. \
+                 Mirror destination ports are special-purpose and must not be configured as regular ports.",
                 mirror.session_id, mirror.destination_port
             );
+            has_errors = true;
         }
     }
 
     if has_errors {
         return Err(anyhow!(
-            "Configuration validation failed for switch '{}': Ports reference non-existent VLANs",
+            "Configuration validation failed for switch '{}': Port/VLAN/mirror reference errors (see logs above)",
             switch.hostname.as_ref().unwrap_or(&switch.id)
         ));
     }
@@ -1768,7 +1773,7 @@ switches:
         assert!(result.is_err());
         let error_msg = result.unwrap_err().to_string();
         assert!(error_msg.contains("test-switch"));
-        assert!(error_msg.contains("non-existent VLANs"));
+        assert!(error_msg.contains("reference errors"));
     }
 
     #[test]
@@ -2698,5 +2703,138 @@ switches:
         assert_eq!(config.switches[0].vlans.len(), 2, "Aruba switch should have 2 VLANs");
         assert_eq!(config.switches[1].vlans.len(), 1, "Cisco switch should have 1 VLAN");
         assert_eq!(config.switches[2].vlans.len(), 3, "FortiSwitch should have 3 VLANs");
+    }
+
+    #[test]
+    fn test_mirror_dest_port_in_ports_list_is_rejected() {
+        use crate::models::{Port, PortMode, PortMirror, MirrorDirection, SwitchConfig, SwitchModel, Vlan, ConnectionType, Credentials};
+
+        let mut switch = SwitchConfig {
+            id: "test-sw-01".to_string(),
+            hostname: Some("test-switch".to_string()),
+            model: Some(SwitchModel::Aruba2930F),
+            management_ip: Some("192.168.1.1".to_string()),
+            credentials: Some(Credentials {
+                username: "admin".to_string(),
+                password: Some("password".to_string()),
+                ssh_key_path: None,
+                port: 22,
+                connection_type: ConnectionType::Ssh,
+                serial_device: None,
+                baud_rate: 9600,
+                jump_hosts: None,
+                enable_secret: None,
+            }),
+            vlans: vec![
+                Vlan {
+                    id: 10,
+                    name: "test".to_string(),
+                    description: None,
+                    ip_config: crate::models::VlanIpConfig::None,
+                },
+            ],
+            ports: vec![
+                Port {
+                    port_id: "1".to_string(),
+                    mode: PortMode::Access,
+                    vlan: 10,
+                    allowed_vlans: vec![],
+                    description: None,
+                    enabled: true,
+                    poe_enabled: false,
+                    mac_notify: false,
+                    speed_duplex: crate::models::SpeedDuplex::Auto,
+                },
+                Port {
+                    port_id: "22".to_string(),
+                    mode: PortMode::Access,
+                    vlan: 10,
+                    allowed_vlans: vec![],
+                    description: None,
+                    enabled: true,
+                    poe_enabled: false,
+                    mac_notify: false,
+                    speed_duplex: crate::models::SpeedDuplex::Auto,
+                },
+            ],
+            port_mirrors: vec![
+                PortMirror {
+                    session_id: "1".to_string(),
+                    source_ports: vec!["1".to_string()],
+                    destination_port: "22".to_string(), // Also in ports list — should fail
+                    direction: MirrorDirection::Both,
+                },
+            ],
+            snmp: None,
+            validation: None,
+            settings: Settings::default(),
+            vendor_specific: std::collections::HashMap::new(),
+            management_vlan: None,
+        };
+
+        let result = validate_vlan_references(&mut switch);
+        assert!(result.is_err(), "Mirror dest port in ports list should be rejected");
+        let error_msg = result.unwrap_err().to_string();
+        assert!(error_msg.contains("reference errors"), "Error should mention reference errors");
+    }
+
+    #[test]
+    fn test_mirror_dest_port_not_in_ports_list_is_ok() {
+        use crate::models::{Port, PortMode, PortMirror, MirrorDirection, SwitchConfig, SwitchModel, Vlan, ConnectionType, Credentials};
+
+        let mut switch = SwitchConfig {
+            id: "test-sw-01".to_string(),
+            hostname: Some("test-switch".to_string()),
+            model: Some(SwitchModel::Aruba2930F),
+            management_ip: Some("192.168.1.1".to_string()),
+            credentials: Some(Credentials {
+                username: "admin".to_string(),
+                password: Some("password".to_string()),
+                ssh_key_path: None,
+                port: 22,
+                connection_type: ConnectionType::Ssh,
+                serial_device: None,
+                baud_rate: 9600,
+                jump_hosts: None,
+                enable_secret: None,
+            }),
+            vlans: vec![
+                Vlan {
+                    id: 10,
+                    name: "test".to_string(),
+                    description: None,
+                    ip_config: crate::models::VlanIpConfig::None,
+                },
+            ],
+            ports: vec![
+                Port {
+                    port_id: "1".to_string(),
+                    mode: PortMode::Access,
+                    vlan: 10,
+                    allowed_vlans: vec![],
+                    description: None,
+                    enabled: true,
+                    poe_enabled: false,
+                    mac_notify: false,
+                    speed_duplex: crate::models::SpeedDuplex::Auto,
+                },
+            ],
+            port_mirrors: vec![
+                PortMirror {
+                    session_id: "1".to_string(),
+                    source_ports: vec!["1".to_string()],
+                    destination_port: "22".to_string(), // NOT in ports list — should be fine
+                    direction: MirrorDirection::Both,
+                },
+            ],
+            snmp: None,
+            validation: None,
+            settings: Settings::default(),
+            vendor_specific: std::collections::HashMap::new(),
+            management_vlan: None,
+        };
+
+        let result = validate_vlan_references(&mut switch);
+        assert!(result.is_ok(), "Mirror dest port NOT in ports list should be accepted: {:?}", result.err());
     }
 }

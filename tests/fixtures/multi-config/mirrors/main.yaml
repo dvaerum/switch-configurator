@@ -18,9 +18,6 @@ switches:
       - port_id: "2"
         mode: access
         vlan: 1
-      - port_id: "24"
-        mode: access
-        vlan: 1
     port_mirrors:
       - session_id: "1"
         source_ports: ["1"]

@@ -128,6 +128,18 @@ impl ArubaSwitch {
             match port.mode {
                 PortMode::Access => {
                     commands.push(format!("untagged vlan {}", port.vlan));
+
+                    // Remove any existing tagged VLANs — access ports should have none.
+                    // On Aruba, setting untagged vlan does NOT automatically remove tagged VLANs.
+                    if let Some(ref current_state) = self.current_state {
+                        if let Some(current_port) = current_state.ports.iter().find(|p| p.port_id == port.port_id) {
+                            for &vlan in &current_port.allowed_vlans {
+                                if vlan != current_port.vlan {
+                                    commands.push(format!("no tagged vlan {}", vlan));
+                                }
+                            }
+                        }
+                    }
                 }
                 PortMode::Trunk => {
                     commands.push(format!("untagged vlan {}", port.vlan));
@@ -1662,6 +1674,12 @@ impl SwitchVendor for ArubaSwitch {
             results.push(self.reset_ports(&diff.ports_to_reset).await?);
         }
 
+        // Configure mirror destination ports with baseline settings before mirror setup
+        if !diff.mirror_dest_ports_to_configure.is_empty() {
+            debug!("Configuring {} mirror destination ports", diff.mirror_dest_ports_to_configure.len());
+            results.push(self.configure_mirror_dest_ports(&diff.mirror_dest_ports_to_configure).await?);
+        }
+
         // Remove old mirrors
         if !diff.mirrors_to_remove.is_empty() {
             debug!("Removing {} port mirrors", diff.mirrors_to_remove.len());
@@ -1805,7 +1823,30 @@ impl SwitchVendor for ArubaSwitch {
 
         // Apply diff
         info!("Applying configuration changes to {}", self.config.hostname());
-        self.apply_diff(&diff).await
+        let results = self.apply_diff(&diff).await?;
+
+        // Post-apply convergence check: re-parse state and verify changes took effect
+        debug!("Verifying configuration convergence for {}", self.config.hostname());
+        match self.parse_current_state().await {
+            Ok(post_apply_state) => {
+                self.current_state = Some(post_apply_state.clone());
+                let remaining = crate::diff::compute_diff(&post_apply_state, &self.config, self.enforce_port_config);
+                if remaining.has_changes() {
+                    warn!(
+                        "Configuration did not fully converge for {}: still pending: {}",
+                        self.config.hostname(),
+                        remaining.remaining_changes_summary()
+                    );
+                } else {
+                    debug!("Configuration fully converged for {}", self.config.hostname());
+                }
+            }
+            Err(e) => {
+                warn!("Could not verify convergence for {}: {}", self.config.hostname(), e);
+            }
+        }
+
+        Ok(results)
     }
 
     async fn save_configuration(&mut self) -> Result<(), VendorError> {
@@ -2145,8 +2186,17 @@ impl ArubaSwitch {
             commands.push("disable".to_string());  // Disable the port
             commands.push("no name".to_string());  // Remove port name (Aruba uses "name", not "description")
             commands.push("untagged vlan 1".to_string());  // Set to default VLAN (access mode)
-            // Note: "no tagged vlan" without VLAN ID is invalid on Aruba switches.
-            // Setting untagged vlan 1 puts the port in access mode where tagged VLANs don't apply.
+            // Remove any existing tagged VLANs — resetting to default means no tagged VLANs.
+            // "no tagged vlan" without VLAN ID is invalid on Aruba, so we must remove each one.
+            if let Some(ref current_state) = self.current_state {
+                if let Some(current_port) = current_state.ports.iter().find(|p| p.port_id == *port_id) {
+                    for &vlan in &current_port.allowed_vlans {
+                        if vlan != current_port.vlan {
+                            commands.push(format!("no tagged vlan {}", vlan));
+                        }
+                    }
+                }
+            }
             // Disable MAC notifications (must disable both trap types explicitly)
             commands.push("no mac-notify traps learned".to_string());
             commands.push("no mac-notify traps removed".to_string());
@@ -2173,6 +2223,44 @@ impl ArubaSwitch {
             switch: self.config.hostname().to_string(),
             success: true,
             message: format!("Reset {} ports to default state", port_ids.len()),
+            commands_executed: commands,
+            timestamp: chrono::Utc::now(),
+        })
+    }
+
+    /// Configure mirror destination ports with baseline settings (VLAN 1, enabled, access mode).
+    /// These ports are special-purpose and not part of the regular port configuration.
+    async fn configure_mirror_dest_ports(&mut self, port_ids: &[String]) -> Result<ConfigResult, VendorError> {
+        let mut commands = vec!["configure terminal".to_string()];
+
+        for port_id in port_ids {
+            let port_interface = self.normalize_port_id(port_id);
+            debug!("  Configuring mirror dest port {} with baseline settings", port_id);
+
+            commands.push(format!("interface {}", port_interface));
+            commands.push("disable".to_string());
+            commands.push("untagged vlan 1".to_string());
+            commands.push("no name".to_string());
+            commands.push("enable".to_string());
+            commands.push("exit".to_string());
+        }
+
+        commands.push("exit".to_string());
+
+        let client = self
+            .client
+            .as_mut()
+            .ok_or_else(|| VendorError::SshError("Not connected".to_string()))?;
+
+        let _outputs = client
+            .execute_commands(&commands)
+            .await
+            .map_err(|e| VendorError::CommandError(e.to_string()))?;
+
+        Ok(ConfigResult {
+            switch: self.config.hostname().to_string(),
+            success: true,
+            message: format!("Configured {} mirror destination ports with baseline settings", port_ids.len()),
             commands_executed: commands,
             timestamp: chrono::Utc::now(),
         })
@@ -5521,5 +5609,191 @@ interface 48
         let resolved_c = creds_c.enable_secret.clone().or_else(|| creds_c.password.clone());
         assert_eq!(resolved_c, None,
                    "When both enable_secret and password are None, resolved should be None");
+    }
+
+    // ============================================================================
+    // Bug fix: access mode ports must remove leftover tagged VLANs
+    // ============================================================================
+
+    #[test]
+    fn test_access_mode_removes_leftover_tagged_vlans() {
+        // Simulate: port 13 currently has untagged=1020, tagged=[2088]
+        // Desired: access mode on VLAN 1001 (no tagged VLANs)
+        // The "no tagged vlan 2088" command must be generated.
+        let config = SwitchConfig {
+            id: "test-sw-01".to_string(),
+            hostname: Some("test-switch".to_string()),
+            model: Some(SwitchModel::Aruba2530_24G_POE),
+            management_ip: Some("192.168.1.1".to_string()),
+            credentials: Some(Credentials {
+                username: "admin".to_string(),
+                password: Some("password".to_string()),
+                ssh_key_path: None,
+                port: 22,
+                connection_type: ConnectionType::Ssh,
+                serial_device: None,
+                baud_rate: 9600,
+                jump_hosts: None,
+                enable_secret: None,
+            }),
+            vlans: vec![],
+            ports: vec![],
+            port_mirrors: vec![],
+            snmp: None,
+            validation: None,
+            vendor_specific: std::collections::HashMap::new(),
+            management_vlan: None,
+            settings: crate::config::Settings::default(),
+        };
+
+        let mut switch = ArubaSwitch::new(config, RuntimeConfig::default(), false);
+
+        // Set current_state with port 13 having tagged VLAN 2088
+        switch.current_state = Some(SwitchState {
+            vlans: vec![],
+            ports: vec![
+                Port {
+                    port_id: "13".to_string(),
+                    mode: PortMode::Access,
+                    vlan: 1020,
+                    allowed_vlans: vec![2088],  // Leftover tagged VLAN
+                    description: None,
+                    enabled: true,
+                    poe_enabled: false,
+                    mac_notify: false,
+                    speed_duplex: SpeedDuplex::Auto,
+                },
+            ],
+            port_mirrors: vec![],
+            snmp: None,
+            management_vlan: None,
+            warnings: vec![],
+        });
+
+        let ports = vec![
+            Port {
+                port_id: "13".to_string(),
+                mode: PortMode::Access,
+                vlan: 1001,
+                allowed_vlans: vec![],
+                description: Some("Zone 1".to_string()),
+                enabled: true,
+                poe_enabled: false,
+                mac_notify: false,
+                speed_duplex: SpeedDuplex::Auto,
+            },
+        ];
+
+        let commands = switch.generate_port_commands(&ports, &[]);
+
+        assert!(commands.contains(&"untagged vlan 1001".to_string()),
+                "Should set untagged VLAN, got: {:?}", commands);
+        assert!(commands.contains(&"no tagged vlan 2088".to_string()),
+                "Should remove leftover tagged VLAN 2088, got: {:?}", commands);
+    }
+
+    #[test]
+    fn test_access_mode_no_tagged_removal_when_clean() {
+        // Port has no tagged VLANs — no "no tagged vlan" commands should be generated
+        let switch = create_test_switch();
+
+        let ports = vec![
+            Port {
+                port_id: "1".to_string(),
+                mode: PortMode::Access,
+                vlan: 10,
+                allowed_vlans: vec![],
+                description: None,
+                enabled: true,
+                poe_enabled: false,
+                mac_notify: false,
+                speed_duplex: SpeedDuplex::Auto,
+            },
+        ];
+
+        let commands = switch.generate_port_commands(&ports, &[]);
+
+        assert!(!commands.iter().any(|c| c.starts_with("no tagged vlan")),
+                "No 'no tagged vlan' commands when port has no tagged VLANs: {:?}", commands);
+    }
+
+    #[test]
+    fn test_reset_ports_removes_tagged_vlans() {
+        // Port 14 currently has tagged VLANs — reset should remove them
+        let config = SwitchConfig {
+            id: "test-sw-01".to_string(),
+            hostname: Some("test-switch".to_string()),
+            model: Some(SwitchModel::Aruba2530_24G_POE),
+            management_ip: Some("192.168.1.1".to_string()),
+            credentials: Some(Credentials {
+                username: "admin".to_string(),
+                password: Some("password".to_string()),
+                ssh_key_path: None,
+                port: 22,
+                connection_type: ConnectionType::Ssh,
+                serial_device: None,
+                baud_rate: 9600,
+                jump_hosts: None,
+                enable_secret: None,
+            }),
+            vlans: vec![],
+            ports: vec![],
+            port_mirrors: vec![],
+            snmp: None,
+            validation: None,
+            vendor_specific: std::collections::HashMap::new(),
+            management_vlan: None,
+            settings: crate::config::Settings::default(),
+        };
+
+        let mut switch = ArubaSwitch::new(config, RuntimeConfig::default(), false);
+
+        // Port 14 currently has untagged=1020, tagged=[2088]
+        switch.current_state = Some(SwitchState {
+            vlans: vec![],
+            ports: vec![
+                Port {
+                    port_id: "14".to_string(),
+                    mode: PortMode::Access,
+                    vlan: 1020,
+                    allowed_vlans: vec![2088],
+                    description: None,
+                    enabled: true,
+                    poe_enabled: false,
+                    mac_notify: false,
+                    speed_duplex: SpeedDuplex::Auto,
+                },
+            ],
+            port_mirrors: vec![],
+            snmp: None,
+            management_vlan: None,
+            warnings: vec![],
+        });
+
+        // We can't call reset_ports directly (needs SSH client), but we can verify
+        // the command generation logic by checking generate_port_commands for an
+        // access mode port transitioning from tagged state.
+        // The reset_ports method uses the same current_state lookup pattern.
+        // This test verifies the pattern works in generate_port_commands;
+        // reset_ports has the same fix applied.
+        let ports = vec![
+            Port {
+                port_id: "14".to_string(),
+                mode: PortMode::Access,
+                vlan: 1,
+                allowed_vlans: vec![],
+                description: None,
+                enabled: false,
+                poe_enabled: false,
+                mac_notify: false,
+                speed_duplex: SpeedDuplex::Auto,
+            },
+        ];
+
+        let commands = switch.generate_port_commands(&ports, &[]);
+
+        assert!(commands.contains(&"untagged vlan 1".to_string()));
+        assert!(commands.contains(&"no tagged vlan 2088".to_string()),
+                "Reset should remove tagged VLAN 2088, got: {:?}", commands);
     }
 }

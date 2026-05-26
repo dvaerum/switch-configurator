@@ -52,6 +52,7 @@ pub fn compute_diff(current: &SwitchState, desired: &SwitchConfig, enforce_port_
         debug!("  Mirrors to add: {}", diff.mirrors_to_add.len());
         debug!("  Mirrors to remove: {}", diff.mirrors_to_remove.len());
         debug!("  Mirrors to update: {}", diff.mirrors_to_update.len());
+        debug!("  Mirror dest ports to configure: {}", diff.mirror_dest_ports_to_configure.len());
         debug!("  SNMP config changed: {}", diff.snmp_config_changed);
         debug!("  Management VLAN changed: {}", diff.management_vlan_changed);
     } else {
@@ -323,6 +324,46 @@ fn diff_mirrors(current: &SwitchState, desired: &SwitchConfig, diff: &mut StateD
                     session_id, current_mirror, desired_mirror);
                 diff.mirrors_to_update.push((*desired_mirror).clone());
             }
+        }
+    }
+
+    // Collect mirror destination ports that need baseline configuration.
+    // These are special-purpose ports: auto-configured to VLAN 1, enabled, access mode.
+    let current_ports: HashMap<String, &Port> = current
+        .ports
+        .iter()
+        .map(|p| (p.port_id.clone(), p))
+        .collect();
+
+    let mut seen_dest_ports = HashSet::new();
+    for mirror in &desired.port_mirrors {
+        let dest = &mirror.destination_port;
+        if !seen_dest_ports.insert(dest.clone()) {
+            continue; // Already processed this dest port
+        }
+
+        // Check if the port needs baseline configuration
+        let needs_config = match current_ports.get(dest) {
+            Some(port) => {
+                // Port exists — check if it's already in baseline state
+                let is_baseline = port.vlan == 1
+                    && port.enabled
+                    && matches!(port.mode, PortMode::Access)
+                    && port.allowed_vlans.is_empty();
+                if !is_baseline {
+                    debug!("  Mirror dest port {} needs baseline config (current: vlan={}, enabled={}, mode={:?})",
+                        dest, port.vlan, port.enabled, port.mode);
+                }
+                !is_baseline
+            }
+            None => {
+                debug!("  Mirror dest port {} needs baseline config (not in current state)", dest);
+                true
+            }
+        };
+
+        if needs_config {
+            diff.mirror_dest_ports_to_configure.push(dest.clone());
         }
     }
 }
@@ -2296,5 +2337,248 @@ mod tests {
         assert_eq!(snmp_diff.traps_to_disable.len(), 1,
                    "Should have 1 trap to disable");
         assert!(snmp_diff.traps_to_disable.contains(&TrapType::MacNotify));
+    }
+
+    // ============================================================================
+    // Mirror destination port baseline config tests
+    // ============================================================================
+
+    #[test]
+    fn test_mirror_dest_port_needs_baseline_config() {
+        // Mirror dest port exists but is not in baseline state (wrong VLAN)
+        let current = SwitchState {
+            vlans: vec![],
+            ports: vec![
+                Port {
+                    port_id: "22".to_string(),
+                    mode: PortMode::Access,
+                    vlan: 10,  // Not VLAN 1
+                    allowed_vlans: vec![],
+                    description: None,
+                    enabled: true,
+                    poe_enabled: false,
+                    mac_notify: false,
+                    speed_duplex: SpeedDuplex::Auto,
+                },
+            ],
+            port_mirrors: vec![],
+            snmp: None,
+            management_vlan: None,
+            warnings: vec![],
+        };
+
+        let mut desired = create_test_switch_config();
+        desired.port_mirrors = vec![
+            PortMirror {
+                session_id: "1".to_string(),
+                source_ports: vec!["1".to_string()],
+                destination_port: "22".to_string(),
+                direction: MirrorDirection::Both,
+            },
+        ];
+
+        let diff = compute_diff(&current, &desired, false);
+        assert_eq!(diff.mirror_dest_ports_to_configure.len(), 1,
+                   "Dest port on wrong VLAN should need baseline config");
+        assert_eq!(diff.mirror_dest_ports_to_configure[0], "22");
+    }
+
+    #[test]
+    fn test_mirror_dest_port_already_in_baseline() {
+        // Mirror dest port is already in baseline state — no config needed
+        let current = SwitchState {
+            vlans: vec![],
+            ports: vec![
+                Port {
+                    port_id: "22".to_string(),
+                    mode: PortMode::Access,
+                    vlan: 1,
+                    allowed_vlans: vec![],
+                    description: None,
+                    enabled: true,
+                    poe_enabled: false,
+                    mac_notify: false,
+                    speed_duplex: SpeedDuplex::Auto,
+                },
+            ],
+            port_mirrors: vec![
+                PortMirror {
+                    session_id: "1".to_string(),
+                    source_ports: vec!["1".to_string()],
+                    destination_port: "22".to_string(),
+                    direction: MirrorDirection::Both,
+                },
+            ],
+            snmp: None,
+            management_vlan: None,
+            warnings: vec![],
+        };
+
+        let mut desired = create_test_switch_config();
+        desired.port_mirrors = vec![
+            PortMirror {
+                session_id: "1".to_string(),
+                source_ports: vec!["1".to_string()],
+                destination_port: "22".to_string(),
+                direction: MirrorDirection::Both,
+            },
+        ];
+
+        let diff = compute_diff(&current, &desired, false);
+        assert!(diff.mirror_dest_ports_to_configure.is_empty(),
+                "Dest port already in baseline should not need config");
+    }
+
+    #[test]
+    fn test_mirror_dest_port_not_in_current_state() {
+        // Mirror dest port doesn't exist in current state — needs config
+        let current = SwitchState {
+            vlans: vec![],
+            ports: vec![],
+            port_mirrors: vec![],
+            snmp: None,
+            management_vlan: None,
+            warnings: vec![],
+        };
+
+        let mut desired = create_test_switch_config();
+        desired.port_mirrors = vec![
+            PortMirror {
+                session_id: "1".to_string(),
+                source_ports: vec!["1".to_string()],
+                destination_port: "22".to_string(),
+                direction: MirrorDirection::Both,
+            },
+        ];
+
+        let diff = compute_diff(&current, &desired, false);
+        assert_eq!(diff.mirror_dest_ports_to_configure.len(), 1,
+                   "Dest port not in current state should need baseline config");
+        assert_eq!(diff.mirror_dest_ports_to_configure[0], "22");
+    }
+
+    #[test]
+    fn test_mirror_dest_port_excluded_from_reset() {
+        // Mirror dest port should not appear in ports_to_reset even with enforce_port_config
+        let current = SwitchState {
+            vlans: vec![],
+            ports: vec![
+                Port {
+                    port_id: "22".to_string(),
+                    mode: PortMode::Trunk,
+                    vlan: 10,
+                    allowed_vlans: vec![10, 20],
+                    description: Some("mirror dest".to_string()),
+                    enabled: true,
+                    poe_enabled: false,
+                    mac_notify: false,
+                    speed_duplex: SpeedDuplex::Auto,
+                },
+            ],
+            port_mirrors: vec![],
+            snmp: None,
+            management_vlan: None,
+            warnings: vec![],
+        };
+
+        let mut desired = create_test_switch_config();
+        desired.port_mirrors = vec![
+            PortMirror {
+                session_id: "1".to_string(),
+                source_ports: vec!["1".to_string()],
+                destination_port: "22".to_string(),
+                direction: MirrorDirection::Both,
+            },
+        ];
+
+        let diff = compute_diff(&current, &desired, true);
+        assert!(!diff.ports_to_reset.contains(&"22".to_string()),
+                "Mirror dest port should NOT be in ports_to_reset");
+        assert_eq!(diff.mirror_dest_ports_to_configure.len(), 1,
+                   "Mirror dest port should be in mirror_dest_ports_to_configure instead");
+    }
+
+    #[test]
+    fn test_mirror_dest_port_deduplicated() {
+        // Two mirrors using the same dest port should only produce one entry
+        let current = SwitchState {
+            vlans: vec![],
+            ports: vec![],
+            port_mirrors: vec![],
+            snmp: None,
+            management_vlan: None,
+            warnings: vec![],
+        };
+
+        let mut desired = create_test_switch_config();
+        desired.port_mirrors = vec![
+            PortMirror {
+                session_id: "1".to_string(),
+                source_ports: vec!["1".to_string()],
+                destination_port: "22".to_string(),
+                direction: MirrorDirection::Both,
+            },
+            PortMirror {
+                session_id: "2".to_string(),
+                source_ports: vec!["2".to_string()],
+                destination_port: "22".to_string(),
+                direction: MirrorDirection::Rx,
+            },
+        ];
+
+        let diff = compute_diff(&current, &desired, false);
+        assert_eq!(diff.mirror_dest_ports_to_configure.len(), 1,
+                   "Same dest port used by two mirrors should only appear once");
+    }
+
+    // ============================================================================
+    // Bug fix: access mode port with leftover tagged VLANs must be detected
+    // ============================================================================
+
+    #[test]
+    fn test_access_port_with_leftover_tagged_vlans_detected() {
+        // Port 13 is access mode VLAN 1001 in both current and desired,
+        // but current has a leftover tagged VLAN 2088.
+        // The diff MUST detect this as needing reconfiguration.
+        let current = SwitchState {
+            vlans: vec![],
+            ports: vec![
+                Port {
+                    port_id: "13".to_string(),
+                    mode: PortMode::Access,
+                    vlan: 1001,
+                    allowed_vlans: vec![2088],  // Leftover tagged VLAN
+                    description: Some("Zone 1".to_string()),
+                    enabled: true,
+                    poe_enabled: false,
+                    mac_notify: false,
+                    speed_duplex: SpeedDuplex::Auto,
+                },
+            ],
+            port_mirrors: vec![],
+            snmp: None,
+            management_vlan: None,
+            warnings: vec![],
+        };
+
+        let mut desired = create_test_switch_config();
+        desired.ports = vec![
+            Port {
+                port_id: "13".to_string(),
+                mode: PortMode::Access,
+                vlan: 1001,
+                allowed_vlans: vec![],  // No tagged VLANs desired
+                description: Some("Zone 1".to_string()),
+                enabled: true,
+                poe_enabled: false,
+                mac_notify: false,
+                speed_duplex: SpeedDuplex::Auto,
+            },
+        ];
+
+        let diff = compute_diff(&current, &desired, false);
+        assert_eq!(diff.ports_to_configure.len(), 1,
+                   "Port with leftover tagged VLANs must be detected as needing config");
+        assert_eq!(diff.ports_to_configure[0].port_id, "13");
     }
 }

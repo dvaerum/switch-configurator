@@ -739,6 +739,12 @@ impl SwitchVendor for CiscoSwitch {
             results.push(self.reset_ports(&diff.ports_to_reset).await?);
         }
 
+        // Configure mirror destination ports with baseline settings before mirror setup
+        if !diff.mirror_dest_ports_to_configure.is_empty() {
+            debug!("Configuring {} mirror destination ports", diff.mirror_dest_ports_to_configure.len());
+            results.push(self.configure_mirror_dest_ports(&diff.mirror_dest_ports_to_configure).await?);
+        }
+
         // Remove old mirrors
         if !diff.mirrors_to_remove.is_empty() {
             debug!("Removing {} port mirrors", diff.mirrors_to_remove.len());
@@ -881,7 +887,30 @@ impl SwitchVendor for CiscoSwitch {
 
         // Apply diff
         info!("Applying configuration changes to {}", self.config.hostname());
-        self.apply_diff(&diff).await
+        let results = self.apply_diff(&diff).await?;
+
+        // Post-apply convergence check: re-parse state and verify changes took effect
+        debug!("Verifying configuration convergence for {}", self.config.hostname());
+        match self.parse_current_state().await {
+            Ok(post_apply_state) => {
+                self.current_state = Some(post_apply_state.clone());
+                let remaining = crate::diff::compute_diff(&post_apply_state, &self.config, self.enforce_port_config);
+                if remaining.has_changes() {
+                    warn!(
+                        "Configuration did not fully converge for {}: still pending: {}",
+                        self.config.hostname(),
+                        remaining.remaining_changes_summary()
+                    );
+                } else {
+                    debug!("Configuration fully converged for {}", self.config.hostname());
+                }
+            }
+            Err(e) => {
+                warn!("Could not verify convergence for {}: {}", self.config.hostname(), e);
+            }
+        }
+
+        Ok(results)
     }
 
     async fn save_configuration(&mut self) -> Result<(), VendorError> {
@@ -1112,6 +1141,43 @@ impl CiscoSwitch {
             switch: self.config.hostname().to_string(),
             success: true,
             message: format!("Reset {} ports to default state", port_ids.len()),
+            commands_executed: commands,
+            timestamp: chrono::Utc::now(),
+        })
+    }
+
+    /// Configure mirror destination ports with baseline settings (VLAN 1, enabled, access mode).
+    async fn configure_mirror_dest_ports(&mut self, port_ids: &[String]) -> Result<ConfigResult, VendorError> {
+        let mut commands = vec!["configure terminal".to_string()];
+
+        for port_id in port_ids {
+            let interface = self.normalize_port_id(port_id);
+            debug!("  Configuring mirror dest port {} with baseline settings", port_id);
+
+            commands.push(format!("interface {}", interface));
+            commands.push("switchport mode access".to_string());
+            commands.push("switchport access vlan 1".to_string());
+            commands.push("no description".to_string());
+            commands.push("no shutdown".to_string());
+            commands.push("exit".to_string());
+        }
+
+        commands.push("end".to_string());
+
+        let client = self
+            .client
+            .as_mut()
+            .ok_or_else(|| VendorError::SshError("Not connected".to_string()))?;
+
+        let _outputs = client
+            .execute_commands(&commands)
+            .await
+            .map_err(|e| VendorError::CommandError(e.to_string()))?;
+
+        Ok(ConfigResult {
+            switch: self.config.hostname().to_string(),
+            success: true,
+            message: format!("Configured {} mirror destination ports with baseline settings", port_ids.len()),
             commands_executed: commands,
             timestamp: chrono::Utc::now(),
         })
