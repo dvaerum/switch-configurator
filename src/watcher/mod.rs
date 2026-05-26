@@ -202,13 +202,13 @@ async fn apply_switch_with_pending(
 
     match &result {
         Ok(warnings) => {
-            // Record warnings (e.g., model mismatch) in the status tracker
+            // Always update warnings — clears stale warnings when issues resolve
             if !warnings.is_empty() {
                 for w in warnings {
                     warn!("Switch {}: {}", switch_id, w);
                 }
-                status.record_warnings(switch_id, warnings.clone()).await;
             }
+            status.record_warnings(switch_id, warnings.clone()).await;
             status.record_apply_success(switch_id).await;
         }
         Err(e) => {
@@ -236,8 +236,8 @@ async fn apply_switch_with_pending(
                     for w in warnings {
                         warn!("Switch {}: {}", switch_id, w);
                     }
-                    status.record_warnings(switch_id, warnings.clone()).await;
                 }
+                status.record_warnings(switch_id, warnings.clone()).await;
                 status.record_apply_success(switch_id).await;
             }
             Err(e) => {

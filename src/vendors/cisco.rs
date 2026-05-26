@@ -892,18 +892,21 @@ impl SwitchVendor for CiscoSwitch {
         // Post-apply convergence check: re-parse state and verify changes took effect
         debug!("Verifying configuration convergence for {}", self.config.hostname());
         match self.parse_current_state().await {
-            Ok(post_apply_state) => {
-                self.current_state = Some(post_apply_state.clone());
+            Ok(mut post_apply_state) => {
                 let remaining = crate::diff::compute_diff(&post_apply_state, &self.config, self.enforce_port_config);
                 if remaining.has_changes() {
+                    let summary = remaining.remaining_changes_summary();
                     warn!(
                         "Configuration did not fully converge for {}: still pending: {}",
-                        self.config.hostname(),
-                        remaining.remaining_changes_summary()
+                        self.config.hostname(), summary
                     );
+                    post_apply_state.warnings.push(format!(
+                        "Configuration did not converge: {}", summary
+                    ));
                 } else {
                     debug!("Configuration fully converged for {}", self.config.hostname());
                 }
+                self.current_state = Some(post_apply_state);
             }
             Err(e) => {
                 warn!("Could not verify convergence for {}: {}", self.config.hostname(), e);
