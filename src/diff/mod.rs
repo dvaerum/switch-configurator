@@ -90,7 +90,12 @@ fn diff_vlans(current: &SwitchState, desired: &SwitchConfig, diff: &mut StateDif
     }
 
     // VLANs to remove (in current but not in desired)
+    // VLAN 1 is the default VLAN on all switches and cannot be removed
     for vlan_id in current_ids.difference(&desired_ids) {
+        if *vlan_id == 1 {
+            debug!("  VLAN 1 skipped from removal: default VLAN cannot be removed");
+            continue;
+        }
         if let Some(vlan) = current_vlans.get(vlan_id) {
             debug!("  VLAN {} ({}) to remove: not in desired config", vlan_id, vlan.name);
         }
