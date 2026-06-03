@@ -4,6 +4,7 @@ use axum::{
     Router,
 };
 use std::net::SocketAddr;
+use std::path::Path;
 use tower_http::trace::TraceLayer;
 use tracing::info;
 
@@ -25,8 +26,20 @@ pub const API_ENDPOINTS: &[&str] = &[
     "POST /config/reload",
 ];
 
-pub async fn start(store: ConfigStore) -> anyhow::Result<()> {
+pub async fn start(store: ConfigStore, socket_path: Option<std::path::PathBuf>) -> anyhow::Result<()> {
     let app = create_router(store.clone());
+
+    if let Some(ref path) = socket_path {
+        if path.exists() {
+            std::fs::remove_file(path)?;
+        }
+        let uds = tokio::net::UnixListener::bind(path)?;
+        info!("API server listening on unix socket: {}", path.display());
+        let uds_app = app.clone();
+        tokio::spawn(async move {
+            serve_unix_socket(uds, uds_app).await;
+        });
+    }
 
     let addr = SocketAddr::from(([0, 0, 0, 0], store.api_port));
     info!("Starting API server on {}", addr);
@@ -35,6 +48,49 @@ pub async fn start(store: ConfigStore) -> anyhow::Result<()> {
     axum::serve(listener, app).await?;
 
     Ok(())
+}
+
+pub async fn serve_unix_socket(listener: tokio::net::UnixListener, app: Router) {
+    use hyper::body::Incoming;
+    use hyper_util::rt::TokioIo;
+    use tower::Service;
+
+    let mut make_service = app.into_make_service();
+
+    loop {
+        let (stream, _addr) = match listener.accept().await {
+            Ok(conn) => conn,
+            Err(e) => {
+                tracing::error!("Unix socket accept error: {}", e);
+                continue;
+            }
+        };
+
+        let tower_service = unwrap_infallible(make_service.call(&stream).await);
+
+        tokio::spawn(async move {
+            let io = TokioIo::new(stream);
+            let hyper_service = hyper::service::service_fn(move |req: hyper::Request<Incoming>| {
+                tower_service.clone().call(req)
+            });
+
+            if let Err(e) = hyper::server::conn::http1::Builder::new()
+                .serve_connection(io, hyper_service)
+                .await
+            {
+                if !e.is_incomplete_message() {
+                    tracing::error!("Unix socket connection error: {}", e);
+                }
+            }
+        });
+    }
+}
+
+fn unwrap_infallible<T>(result: Result<T, std::convert::Infallible>) -> T {
+    match result {
+        Ok(value) => value,
+        Err(err) => match err {},
+    }
 }
 
 pub fn create_router(store: ConfigStore) -> Router {

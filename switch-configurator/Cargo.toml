@@ -57,10 +57,16 @@ serde_path_to_error = "0.1.20"
 # Home directory expansion for SSH key paths
 dirs = "5.0"
 
+# Unix socket serving
+hyper = { version = "1.6", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+
 [dev-dependencies]
 tokio-test = "0.4"
 mockall = "0.13"
 tempfile = "3.13"
+hyper-util = { version = "0.1", features = ["tokio", "client-legacy"] }
+http-body-util = "0.1"
 
 # Development profile (default for 'cargo build')
 # Optimized for fast compilation with parallel codegen

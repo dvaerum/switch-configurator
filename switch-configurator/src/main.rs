@@ -64,6 +64,10 @@ struct Args {
     /// Show detailed merge trace and exit (audit trail of merge decisions)
     #[arg(long, default_value = "false")]
     show_merge_trace: bool,
+
+    /// Unix socket path for the API (in addition to TCP)
+    #[arg(long)]
+    socket: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -183,7 +187,7 @@ async fn main() -> Result<()> {
     }).await;
 
     // Start API server
-    let api_handle = tokio::spawn(api::server::start(store.clone()));
+    let api_handle = tokio::spawn(api::server::start(store.clone(), args.socket.clone()));
 
     // Start file watcher if enabled
     let watcher_handle = if args.watch {

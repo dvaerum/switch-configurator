@@ -2052,4 +2052,36 @@ mod integration_tests {
         // Should return 202 Accepted
         assert_eq!(response.status(), StatusCode::ACCEPTED);
     }
+
+    #[tokio::test]
+    async fn test_unix_socket_health_endpoint() {
+        let store = create_test_config_store();
+        let app = crate::api::create_router(store);
+
+        let socket_dir = tempfile::tempdir().unwrap();
+        let socket_path = socket_dir.path().join("test-api.sock");
+
+        let uds = tokio::net::UnixListener::bind(&socket_path).unwrap();
+        tokio::spawn(async move {
+            crate::api::server::serve_unix_socket(uds, app).await;
+        });
+
+        // Give server a moment to start accepting
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Connect via unix socket using hyper
+        let stream = tokio::net::UnixStream::connect(&socket_path).await.unwrap();
+        let io = hyper_util::rt::TokioIo::new(stream);
+        let (mut sender, conn) = hyper::client::conn::http1::handshake(io).await.unwrap();
+        tokio::spawn(async move { let _ = conn.await; });
+
+        let req = hyper::Request::builder()
+            .uri("/health")
+            .header("host", "localhost")
+            .body(http_body_util::Empty::<hyper::body::Bytes>::new())
+            .unwrap();
+
+        let resp = sender.send_request(req).await.unwrap();
+        assert_eq!(resp.status(), 200, "Health endpoint should return 200 over unix socket");
+    }
 }
