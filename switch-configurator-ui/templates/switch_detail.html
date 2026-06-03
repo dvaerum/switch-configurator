@@ -17,30 +17,12 @@
 </div>
 
 <div class="tabs">
-    <a class="tab{% if active_tab == "overview" %} active{% endif %}"
-       hx-get="/switch/{{ switch.id }}/tab/overview"
-       hx-target="#tab-content"
-       hx-push-url="/switch/{{ switch.id }}">Overview</a>
-    <a class="tab{% if active_tab == "vlans" %} active{% endif %}"
-       hx-get="/switch/{{ switch.id }}/tab/vlans"
-       hx-target="#tab-content"
-       hx-push-url="/switch/{{ switch.id }}/vlans">VLANs</a>
-    <a class="tab{% if active_tab == "ports" %} active{% endif %}"
-       hx-get="/switch/{{ switch.id }}/tab/ports"
-       hx-target="#tab-content"
-       hx-push-url="/switch/{{ switch.id }}/ports">Ports</a>
-    <a class="tab{% if active_tab == "mirrors" %} active{% endif %}"
-       hx-get="/switch/{{ switch.id }}/tab/mirrors"
-       hx-target="#tab-content"
-       hx-push-url="/switch/{{ switch.id }}/mirrors">Mirrors</a>
-    <a class="tab{% if active_tab == "snmp" %} active{% endif %}"
-       hx-get="/switch/{{ switch.id }}/tab/snmp"
-       hx-target="#tab-content"
-       hx-push-url="/switch/{{ switch.id }}/snmp">SNMP</a>
-    <a class="tab{% if active_tab == "sources" %} active{% endif %}"
-       hx-get="/switch/{{ switch.id }}/tab/sources"
-       hx-target="#tab-content"
-       hx-push-url="/switch/{{ switch.id }}/sources">Config Sources</a>
+    <a class="tab{% if active_tab == "overview" %} active{% endif %}" href="/switch/{{ switch.id }}">Overview</a>
+    <a class="tab{% if active_tab == "vlans" %} active{% endif %}" href="/switch/{{ switch.id }}/vlans">VLANs</a>
+    <a class="tab{% if active_tab == "ports" %} active{% endif %}" href="/switch/{{ switch.id }}/ports">Ports</a>
+    <a class="tab{% if active_tab == "mirrors" %} active{% endif %}" href="/switch/{{ switch.id }}/mirrors">Mirrors</a>
+    <a class="tab{% if active_tab == "snmp" %} active{% endif %}" href="/switch/{{ switch.id }}/snmp">SNMP</a>
+    <a class="tab{% if active_tab == "sources" %} active{% endif %}" href="/switch/{{ switch.id }}/sources">Config Sources</a>
 </div>
 
 <div id="tab-content">

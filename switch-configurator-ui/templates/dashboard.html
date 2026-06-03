@@ -21,7 +21,7 @@
                 {% when Some with ("configuring") %}
                     <span class="badge badge-info">Configuring</span>
                 {% when _ %}
-                    <span class="badge">Unknown</span>
+                    <span class="badge" style="background:#f1f5f9;color:#64748b;">Not applied</span>
             {% endmatch %}
         </div>
         <div class="text-sm text-muted mt-1">{{ sw.model }}</div>
