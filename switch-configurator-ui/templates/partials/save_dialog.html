@@ -7,20 +7,25 @@
     <h3 class="mb-1">Save Configuration Overlay</h3>
     <p class="text-sm text-muted mb-1">Save your changes to a YAML overlay file in the config folder.</p>
 
+    {% match error %}
+    {% when Some with (msg) %}
+    <div style="background:var(--danger-light);color:var(--danger);padding:0.75rem;border-radius:var(--radius);margin-bottom:0.75rem;font-size:0.85rem;">
+        <strong>Save failed:</strong> {{ msg }}
+    </div>
+    {% when None %}
+    {% endmatch %}
+
     <form action="/save/{{ switch_id }}/confirm" method="POST">
         <div class="mb-1">
             <label class="text-sm" for="filename">Filename</label>
             <input type="text" id="filename" name="filename" value="{{ default_filename }}"
-                   style="width:100%;padding:0.4rem;border:1px solid var(--border);border-radius:var(--radius);"
-                   required>
+                   style="width:100%;padding:0.4rem;" required>
         </div>
 
         <div class="mb-1">
             <label class="text-sm" for="priority">Merge Priority (11-9999, lower = higher priority)</label>
             <input type="number" id="priority" name="priority" value="{{ default_priority }}"
-                   min="11" max="9999"
-                   style="width:100%;padding:0.4rem;border:1px solid var(--border);border-radius:var(--radius);"
-                   required>
+                   min="11" max="9999" style="width:100%;padding:0.4rem;" required>
         </div>
 
         <div class="flex gap-1 justify-between mt-1">

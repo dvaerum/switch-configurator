@@ -118,6 +118,19 @@ in
       '';
     };
 
+    readOnly = mkOption {
+      type = types.bool;
+      default = false;
+      description = ''
+        When false (default), the service can write overlay configuration
+        files to config folders via the web UI or API. The config folders
+        are added to ReadWritePaths in the systemd service.
+
+        When true, the service runs in read-only mode: no overlay files
+        can be saved, and the web UI save feature is disabled.
+      '';
+    };
+
     environmentVariables = mkOption {
       type = types.attrsOf types.str;
       default = { };
@@ -205,7 +218,9 @@ in
         ProtectHome = true;
         PrivateNetwork = false;
         RestrictAddressFamilies = [ "AF_INET" "AF_INET6" "AF_UNIX" ];
-        ReadWritePaths = [ "/etc/switch-configurator" ] ++ cfg.extraConfigFolders;
+        # Allow writing to config folders for overlay saves (unless readOnly)
+        ReadWritePaths = lib.mkIf (!cfg.readOnly)
+          ([ "/etc/switch-configurator" ] ++ cfg.extraConfigFolders);
       };
     };
 
