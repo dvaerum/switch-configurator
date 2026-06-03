@@ -1,0 +1,39 @@
+<div class="card">
+    <div class="flex justify-between items-center mb-1">
+        <h3>Change Preview</h3>
+        <div class="flex gap-1">
+            <span class="btn active" hx-post="/preview/{{ switch_id }}" hx-target="#diff-panel">Structured</span>
+            <span class="btn" hx-get="/preview/{{ switch_id }}/yaml" hx-target="#diff-panel">YAML Diff</span>
+            <span class="btn" hx-get="/preview/{{ switch_id }}/commands" hx-target="#diff-panel">CLI Commands</span>
+        </div>
+    </div>
+
+    {% if !has_changes %}
+    <p class="text-muted" style="text-align:center;padding:1rem;">No changes detected</p>
+    {% else %}
+    <table>
+        <thead>
+            <tr><th>Type</th><th>Change</th><th>Description</th></tr>
+        </thead>
+        <tbody>
+            {% for entry in entries %}
+            <tr>
+                <td>
+                    {% if entry.change_type == "add" %}
+                    <span class="badge badge-success">Add</span>
+                    {% else if entry.change_type == "remove" %}
+                    <span class="badge badge-danger">Remove</span>
+                    {% else if entry.change_type == "update" %}
+                    <span class="badge badge-warning">Update</span>
+                    {% else %}
+                    <span class="badge">{{ entry.change_type }}</span>
+                    {% endif %}
+                </td>
+                <td>{{ entry.category }}</td>
+                <td>{{ entry.description }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% endif %}
+</div>

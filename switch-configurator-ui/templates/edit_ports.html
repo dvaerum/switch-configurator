@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+
+{% block title %}Edit Ports - {{ hostname }}{% endblock %}
+
+{% block content %}
+<div class="flex justify-between items-center mb-1">
+    <div>
+        <h2>Edit Ports - {{ hostname }}</h2>
+        <span class="badge badge-warning">Draft Mode</span>
+    </div>
+    <div class="flex gap-1">
+        <a href="/switch/{{ switch_id }}/edit/vlans" class="btn">Edit VLANs</a>
+        <a hx-post="/preview/{{ switch_id }}" hx-target="#diff-panel" class="btn btn-primary">Preview Changes</a>
+        <a href="/save/{{ switch_id }}" class="btn btn-primary">Save</a>
+        <a href="/draft/{{ switch_id }}/discard" class="btn btn-danger">Discard</a>
+    </div>
+</div>
+
+<div class="card">
+    <table>
+        <thead>
+            <tr>
+                <th>Port</th>
+                <th>Mode</th>
+                <th>VLAN</th>
+                <th>Tagged VLANs</th>
+                <th>Description</th>
+                <th>Enabled</th>
+                <th>PoE</th>
+                <th>Speed</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for port in ports %}
+            <tr>
+                <td>{{ port.port_id }}</td>
+                <td>{{ port.mode }}</td>
+                <td>{{ port.vlan }}</td>
+                <td>{{ port.allowed_vlans }}</td>
+                <td>{{ port.description }}</td>
+                <td>{% if port.enabled %}Yes{% else %}No{% endif %}</td>
+                <td>{% if port.poe_enabled %}Yes{% else %}-{% endif %}</td>
+                <td>{{ port.speed_duplex }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<div id="diff-panel" class="mt-1"></div>
+{% endblock %}

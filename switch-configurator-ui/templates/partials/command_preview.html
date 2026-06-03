@@ -1,0 +1,44 @@
+<div class="card">
+    <div class="flex justify-between items-center mb-1">
+        <h3>CLI Commands</h3>
+        <div class="flex gap-1">
+            <span class="btn" hx-post="/preview/{{ switch_id }}" hx-target="#diff-panel">Structured</span>
+            <span class="btn" hx-get="/preview/{{ switch_id }}/yaml" hx-target="#diff-panel">YAML Diff</span>
+            <span class="btn active" hx-get="/preview/{{ switch_id }}/commands" hx-target="#diff-panel">CLI Commands</span>
+        </div>
+    </div>
+
+    {% if !vlan_commands.is_empty() %}
+    <h4 class="text-sm text-muted mb-1">VLAN Commands</h4>
+    <pre style="background:#1e293b;color:#e2e8f0;padding:0.75rem;border-radius:var(--radius);font-size:0.85rem;overflow-x:auto;">{% for cmd in vlan_commands %}{{ cmd }}
+{% endfor %}</pre>
+    {% endif %}
+
+    {% if !port_commands.is_empty() %}
+    <h4 class="text-sm text-muted mb-1 mt-1">Port Commands</h4>
+    <pre style="background:#1e293b;color:#e2e8f0;padding:0.75rem;border-radius:var(--radius);font-size:0.85rem;overflow-x:auto;">{% for cmd in port_commands %}{{ cmd }}
+{% endfor %}</pre>
+    {% endif %}
+
+    {% if !mirror_commands.is_empty() %}
+    <h4 class="text-sm text-muted mb-1 mt-1">Mirror Commands</h4>
+    <pre style="background:#1e293b;color:#e2e8f0;padding:0.75rem;border-radius:var(--radius);font-size:0.85rem;overflow-x:auto;">{% for cmd in mirror_commands %}{{ cmd }}
+{% endfor %}</pre>
+    {% endif %}
+
+    {% if !snmp_commands.is_empty() %}
+    <h4 class="text-sm text-muted mb-1 mt-1">SNMP Commands</h4>
+    <pre style="background:#1e293b;color:#e2e8f0;padding:0.75rem;border-radius:var(--radius);font-size:0.85rem;overflow-x:auto;">{% for cmd in snmp_commands %}{{ cmd }}
+{% endfor %}</pre>
+    {% endif %}
+
+    {% if !reset_commands.is_empty() %}
+    <h4 class="text-sm text-muted mb-1 mt-1">Reset Commands</h4>
+    <pre style="background:#1e293b;color:#e2e8f0;padding:0.75rem;border-radius:var(--radius);font-size:0.85rem;overflow-x:auto;">{% for cmd in reset_commands %}{{ cmd }}
+{% endfor %}</pre>
+    {% endif %}
+
+    {% if vlan_commands.is_empty() && port_commands.is_empty() && mirror_commands.is_empty() && snmp_commands.is_empty() && reset_commands.is_empty() %}
+    <p class="text-muted" style="text-align:center;padding:1rem;">No commands to execute</p>
+    {% endif %}
+</div>

@@ -1,0 +1,21 @@
+<div class="card">
+    <div class="flex justify-between items-center mb-1">
+        <h3>YAML Diff</h3>
+        <div class="flex gap-1">
+            <span class="btn" hx-post="/preview/{{ switch_id }}" hx-target="#diff-panel">Structured</span>
+            <span class="btn active" hx-get="/preview/{{ switch_id }}/yaml" hx-target="#diff-panel">YAML Diff</span>
+            <span class="btn" hx-get="/preview/{{ switch_id }}/commands" hx-target="#diff-panel">CLI Commands</span>
+        </div>
+    </div>
+
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem;">
+        <div>
+            <h4 class="text-sm text-muted mb-1">Current</h4>
+            <pre style="background:#fef2f2;padding:0.75rem;border-radius:var(--radius);font-size:0.8rem;overflow-x:auto;max-height:400px;overflow-y:auto;">{{ original_yaml }}</pre>
+        </div>
+        <div>
+            <h4 class="text-sm text-muted mb-1">Proposed</h4>
+            <pre style="background:#f0fdf4;padding:0.75rem;border-radius:var(--radius);font-size:0.8rem;overflow-x:auto;max-height:400px;overflow-y:auto;">{{ edited_yaml }}</pre>
+        </div>
+    </div>
+</div>

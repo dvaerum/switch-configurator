@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+
+{% block title %}Edit VLANs - {{ hostname }}{% endblock %}
+
+{% block content %}
+<div class="flex justify-between items-center mb-1">
+    <div>
+        <h2>Edit VLANs - {{ hostname }}</h2>
+        <span class="badge badge-warning">Draft Mode</span>
+    </div>
+    <div class="flex gap-1">
+        <a href="/switch/{{ switch_id }}/edit/ports" class="btn">Edit Ports</a>
+        <a hx-post="/preview/{{ switch_id }}" hx-target="#diff-panel" class="btn btn-primary">Preview Changes</a>
+        <a href="/save/{{ switch_id }}" class="btn btn-primary">Save</a>
+        <a href="/draft/{{ switch_id }}/discard" class="btn btn-danger">Discard</a>
+    </div>
+</div>
+
+<div class="card">
+    <table>
+        <thead>
+            <tr>
+                <th>ID</th>
+                <th>Name</th>
+                <th>IP Config</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for vlan in vlans %}
+            <tr>
+                <form hx-post="/draft/{{ switch_id }}/vlan/{{ vlan.id }}" hx-target="closest tr" hx-swap="outerHTML">
+                    <td>{{ vlan.id }}</td>
+                    <td><input type="text" name="name" value="{{ vlan.name }}" style="width:100%;padding:0.25rem;"></td>
+                    <td>
+                        <select name="ip_config" style="padding:0.25rem;">
+                            <option value="none"{% if vlan.ip_config == "none" %} selected{% endif %}>None</option>
+                            <option value="dhcp"{% if vlan.ip_config == "dhcp" %} selected{% endif %}>DHCP</option>
+                        </select>
+                    </td>
+                    <td><button type="submit" class="btn" style="padding:0.2rem 0.5rem;">Update</button></td>
+                </form>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<div id="diff-panel" class="mt-1"></div>
+{% endblock %}

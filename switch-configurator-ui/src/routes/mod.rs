@@ -1,10 +1,13 @@
 pub mod dashboard;
+pub mod diff;
+pub mod edit;
 pub mod events;
+pub mod save;
 pub mod switch;
 
 use crate::proxy::BackendClient;
 use crate::state::DraftStore;
-use axum::{routing::get, Router};
+use axum::{routing::{get, post}, Router};
 use tower_http::services::ServeDir;
 
 #[derive(Clone)]
@@ -21,6 +24,16 @@ pub fn create_router(state: AppState) -> Router {
         .route("/switch/:id", get(switch::detail))
         .route("/switch/:id/:tab", get(switch::detail_with_tab))
         .route("/switch/:id/tab/:tab", get(switch::tab_content))
+        .route("/switch/:id/edit/vlans", get(edit::edit_vlans))
+        .route("/switch/:id/edit/ports", get(edit::edit_ports))
+        .route("/draft/:id/start", post(edit::start_draft))
+        .route("/draft/:id/discard", get(edit::discard_draft))
+        .route("/draft/:id/vlan/:vlan_id", post(edit::update_vlan))
+        .route("/preview/:id", post(diff::preview))
+        .route("/preview/:id/commands", get(diff::commands))
+        .route("/preview/:id/yaml", get(diff::yaml_diff))
+        .route("/save/:id", get(save::save_dialog))
+        .route("/save/:id/confirm", post(save::save_overlay))
         .route("/events", get(events::sse_proxy))
         .nest_service("/static", ServeDir::new(static_dir))
         .with_state(state)
