@@ -20,6 +20,8 @@ pub const API_ENDPOINTS: &[&str] = &[
     "POST /switches/:id/apply",
     "POST /switches/:id/reload",
     "POST /switches/:id/preview-diff",
+    "POST /switches/:id/save-overlay",
+    "GET /switches/:id/config-sources",
     "GET /switches/:id/config",
     "GET /switches/:id/desired-config",
     "PUT /switches/:id/desired-config",
@@ -104,6 +106,8 @@ pub fn create_router(store: ConfigStore) -> Router {
         .route("/switches/:id/apply", post(handlers::apply_config))
         .route("/switches/:id/reload", post(handlers::reload_switch_config))
         .route("/switches/:id/preview-diff", post(handlers::preview_diff))
+        .route("/switches/:id/save-overlay", post(handlers::save_overlay))
+        .route("/switches/:id/config-sources", get(handlers::config_sources))
         // GET retrieves running config from switch hardware via SSH
         .route("/switches/:id/config", get(handlers::get_config))
         // PUT creates/replaces in-memory config, PATCH updates, DELETE removes

@@ -48,6 +48,14 @@ pub struct PreviewDiffRequest {
     pub current_state: Option<crate::models::SwitchState>,
 }
 
+/// Request body for POST /switches/{id}/save-overlay
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SaveOverlayRequest {
+    pub filename: String,
+    pub merge_priority: u16,
+    pub config: crate::config::AppConfig,
+}
+
 /// Request body for PUT /switches/{id}/config (create/overwrite)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SetSwitchConfigRequest {
@@ -438,6 +446,139 @@ pub async fn preview_diff(
         "has_changes": diff.has_changes(),
         "diff": diff,
         "commands": commands,
+    })))
+}
+
+/// Save switch config changes to an overlay YAML file in the config folder
+pub async fn save_overlay(
+    State(store): State<ConfigStore>,
+    Path(id): Path<String>,
+    Json(body): Json<SaveOverlayRequest>,
+) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    // Validate filename: no path traversal, must end in .yaml or .yml
+    let filename = &body.filename;
+    if filename.contains("..") || filename.contains('/') || filename.contains('\\') {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "Invalid filename: path traversal not allowed"})),
+        ));
+    }
+    if !filename.ends_with(".yaml") && !filename.ends_with(".yml") {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "Filename must end with .yaml or .yml"})),
+        ));
+    }
+
+    // Validate priority range for folder configs (11-9999)
+    if body.merge_priority <= 10 || body.merge_priority > 9999 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "merge_priority must be between 11 and 9999 for overlay files"})),
+        ));
+    }
+
+    // Get config folder path from metadata
+    let config_paths = store.status.get_config_paths().await;
+    let config_folder = config_paths
+        .and_then(|(_, folders)| folders.into_iter().next())
+        .ok_or_else(|| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "No config folder configured"})),
+            )
+        })?;
+
+    // Build the YAML content with merge_priority at the top
+    let yaml_content = format!(
+        "merge_priority: {}\n\n{}",
+        body.merge_priority,
+        serde_yaml::to_string(&body.config).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("Failed to serialize config: {}", e)})),
+            )
+        })?
+    );
+
+    let file_path = config_folder.join(filename);
+    std::fs::write(&file_path, &yaml_content).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("Failed to write file: {}", e)})),
+        )
+    })?;
+
+    info!("Saved overlay config to {}", file_path.display());
+
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({
+            "status": "saved",
+            "file": file_path.to_string_lossy(),
+            "merge_priority": body.merge_priority,
+        })),
+    ))
+}
+
+/// Get configuration source files and their priorities for a switch
+pub async fn config_sources(
+    State(store): State<ConfigStore>,
+    Path(id): Path<String>,
+) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    // Verify switch exists
+    let config = store.config.read().await;
+    if !config.switches.iter().any(|s| s.id == id) {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": format!("Switch '{}' not found", id)})),
+        ));
+    }
+    drop(config);
+
+    let config_paths = store.status.get_config_paths().await;
+    let mut sources = Vec::new();
+
+    if let Some((main_file, folders)) = config_paths {
+        // Main config file
+        sources.push(json!({
+            "file": main_file.to_string_lossy(),
+            "priority": 50,
+            "source_type": "main",
+        }));
+
+        // Scan config folders for overlay files
+        for folder in &folders {
+            if let Ok(entries) = std::fs::read_dir(folder) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.extension().map_or(false, |ext| ext == "yaml" || ext == "yml") {
+                        // Try to read the merge_priority from the file
+                        let priority = std::fs::read_to_string(&path)
+                            .ok()
+                            .and_then(|content| {
+                                serde_yaml::from_str::<crate::config::AppConfigFile>(&content).ok()
+                            })
+                            .and_then(|f| f.merge_priority)
+                            .unwrap_or(100);
+
+                        sources.push(json!({
+                            "file": path.to_string_lossy(),
+                            "priority": priority,
+                            "source_type": "folder",
+                        }));
+                    }
+                }
+            }
+        }
+    }
+
+    // Sort by priority (lowest first = highest priority)
+    sources.sort_by_key(|s| s["priority"].as_u64().unwrap_or(u64::MAX));
+
+    Ok(Json(json!({
+        "switch_id": id,
+        "sources": sources,
     })))
 }
 

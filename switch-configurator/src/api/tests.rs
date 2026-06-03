@@ -2196,6 +2196,119 @@ mod integration_tests {
     }
 
     #[tokio::test]
+    async fn test_save_overlay_creates_file() {
+        let store = create_test_config_store();
+
+        // Set config metadata with a temp config folder
+        let config_dir = tempfile::tempdir().unwrap();
+        store.status.set_config_metadata(crate::status::ConfigMetadata {
+            config_file: std::path::PathBuf::from("/tmp/main.yaml"),
+            config_folders: vec![config_dir.path().to_path_buf()],
+            last_loaded: chrono::Utc::now(),
+            switches_count: 1,
+        }).await;
+
+        let app = crate::api::create_router(store);
+
+        let body = serde_json::json!({
+            "filename": "test-overlay.yaml",
+            "merge_priority": 200,
+            "config": {
+                "switches": [{
+                    "id": "test-sw-01",
+                    "vlans": [{"id": 99, "name": "new-vlan"}]
+                }]
+            }
+        });
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/switches/test-sw-01/save-overlay")
+            .header("Content-Type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED,
+                   "save-overlay should return 201");
+
+        // Verify file was created
+        let file_path = config_dir.path().join("test-overlay.yaml");
+        assert!(file_path.exists(), "Overlay file should be created");
+
+        let content = std::fs::read_to_string(&file_path).unwrap();
+        assert!(content.contains("merge_priority: 200"), "File should contain priority");
+        assert!(content.contains("new-vlan"), "File should contain the VLAN config");
+    }
+
+    #[tokio::test]
+    async fn test_save_overlay_rejects_path_traversal() {
+        let store = create_test_config_store();
+
+        let config_dir = tempfile::tempdir().unwrap();
+        store.status.set_config_metadata(crate::status::ConfigMetadata {
+            config_file: std::path::PathBuf::from("/tmp/main.yaml"),
+            config_folders: vec![config_dir.path().to_path_buf()],
+            last_loaded: chrono::Utc::now(),
+            switches_count: 1,
+        }).await;
+
+        let app = crate::api::create_router(store);
+
+        let body = serde_json::json!({
+            "filename": "../etc/passwd",
+            "merge_priority": 200,
+            "config": { "switches": [{"id": "test-sw-01"}] }
+        });
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/switches/test-sw-01/save-overlay")
+            .header("Content-Type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST,
+                   "Path traversal should be rejected");
+    }
+
+    #[tokio::test]
+    async fn test_config_sources_returns_files() {
+        let store = create_test_config_store();
+
+        // Set config metadata
+        store.status.set_config_metadata(crate::status::ConfigMetadata {
+            config_file: std::path::PathBuf::from("/etc/main.yaml"),
+            config_folders: vec![std::path::PathBuf::from("/etc/switch-configurator")],
+            last_loaded: chrono::Utc::now(),
+            switches_count: 1,
+        }).await;
+
+        let app = crate::api::create_router(store);
+
+        let request = Request::builder()
+            .method("GET")
+            .uri("/switches/test-sw-01/config-sources")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(json["switch_id"], "test-sw-01");
+        assert!(json["sources"].is_array(), "Should include sources array");
+        // At minimum, the main config should be listed
+        let sources = json["sources"].as_array().unwrap();
+        assert!(!sources.is_empty(), "Should have at least one source");
+        assert!(sources[0]["file"].is_string(), "Source should have a file path");
+        assert!(sources[0]["priority"].is_number(), "Source should have a priority");
+    }
+
+    #[tokio::test]
     async fn test_preview_diff_switch_not_found() {
         let store = create_test_config_store();
         let app = crate::api::create_router(store);
