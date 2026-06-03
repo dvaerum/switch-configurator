@@ -24,11 +24,32 @@ pub fn create_router(state: AppState) -> Router {
         .route("/switch/:id", get(switch::detail))
         .route("/switch/:id/:tab", get(switch::detail_with_tab))
         .route("/switch/:id/tab/:tab", get(switch::tab_content))
+        // Edit views
         .route("/switch/:id/edit/vlans", get(edit::edit_vlans))
         .route("/switch/:id/edit/ports", get(edit::edit_ports))
+        .route("/switch/:id/edit/mirrors", get(edit::edit_mirrors))
+        .route("/switch/:id/edit/snmp", get(edit::edit_snmp))
+        // Draft lifecycle
         .route("/draft/:id/start", post(edit::start_draft))
         .route("/draft/:id/discard", get(edit::discard_draft))
+        // VLAN CRUD
+        .route("/draft/:id/vlan/add", post(edit::add_vlan))
         .route("/draft/:id/vlan/:vlan_id", post(edit::update_vlan))
+        .route("/draft/:id/vlan/:vlan_id/remove", get(edit::remove_vlan))
+        // Port CRUD
+        .route("/draft/:id/port/add", post(edit::add_port))
+        .route("/draft/:id/port/:port_id", post(edit::update_port))
+        .route("/draft/:id/port/:port_id/remove", get(edit::remove_port))
+        // Mirror CRUD
+        .route("/draft/:id/mirror/add", post(edit::add_mirror))
+        .route("/draft/:id/mirror/:session_id", post(edit::update_mirror))
+        .route("/draft/:id/mirror/:session_id/remove", get(edit::remove_mirror))
+        // SNMP CRUD
+        .route("/draft/:id/snmp/community/add", post(edit::add_snmp_community))
+        .route("/draft/:id/snmp/community/:name/remove", get(edit::remove_snmp_community))
+        .route("/draft/:id/snmp/trap-receiver/add", post(edit::add_snmp_trap_receiver))
+        .route("/draft/:id/snmp/trap-receiver/:host/remove", get(edit::remove_snmp_trap_receiver))
+        .route("/draft/:id/snmp/traps", post(edit::update_snmp_traps))
         .route("/preview/:id", post(diff::preview))
         .route("/preview/:id/commands", get(diff::commands))
         .route("/preview/:id/yaml", get(diff::yaml_diff))

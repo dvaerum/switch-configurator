@@ -1,0 +1,103 @@
+{% extends "base.html" %}
+
+{% block title %}Edit SNMP - {{ hostname }}{% endblock %}
+
+{% block content %}
+<div class="flex justify-between items-center mb-1">
+    <div>
+        <h2>{{ hostname }}</h2>
+        <span class="badge badge-warning">Draft Mode</span>
+    </div>
+    <div class="flex gap-1">
+        <a href="/switch/{{ switch_id }}/edit/vlans" class="btn">VLANs</a>
+        <a href="/switch/{{ switch_id }}/edit/ports" class="btn">Ports</a>
+        <a href="/switch/{{ switch_id }}/edit/mirrors" class="btn">Mirrors</a>
+        <a href="/switch/{{ switch_id }}/edit/snmp" class="btn btn-primary">SNMP</a>
+        <span style="border-left:1px solid var(--border);margin:0 0.25rem;"></span>
+        <a hx-post="/preview/{{ switch_id }}" hx-target="#diff-panel" class="btn">Preview Changes</a>
+        <a href="/save/{{ switch_id }}" class="btn btn-primary">Save</a>
+        <a href="/draft/{{ switch_id }}/discard" class="btn btn-danger">Discard</a>
+    </div>
+</div>
+
+<div class="card mb-1">
+    <h3 class="mb-1">Communities</h3>
+    <table>
+        <thead><tr><th>Name</th><th>Access</th><th style="width:80px;">Actions</th></tr></thead>
+        <tbody>
+            {% for c in communities %}
+            <tr>
+                <td>{{ c.name }}</td>
+                <td>{{ c.access }}</td>
+                <td><a href="/draft/{{ switch_id }}/snmp/community/{{ c.name }}/remove" class="btn btn-danger" style="padding:0.2rem 0.5rem;">Remove</a></td>
+            </tr>
+            {% endfor %}
+            {% if communities.is_empty() %}
+            <tr><td colspan="3" class="text-muted" style="text-align:center;">None</td></tr>
+            {% endif %}
+        </tbody>
+        <tfoot>
+            <tr>
+                <form action="/draft/{{ switch_id }}/snmp/community/add" method="POST">
+                    <td><input type="text" name="name" placeholder="Community name" required style="padding:0.2rem;border:1px solid var(--border);border-radius:4px;"></td>
+                    <td>
+                        <select name="access" style="padding:0.2rem;border:1px solid var(--border);border-radius:4px;">
+                            <option value="operator">operator</option>
+                            <option value="manager">manager</option>
+                        </select>
+                    </td>
+                    <td><button type="submit" class="btn btn-primary" style="padding:0.2rem 0.5rem;">+ Add</button></td>
+                </form>
+            </tr>
+        </tfoot>
+    </table>
+</div>
+
+<div class="card mb-1">
+    <h3 class="mb-1">Trap Receivers</h3>
+    <table>
+        <thead><tr><th>Host</th><th>Community</th><th>Version</th><th style="width:80px;">Actions</th></tr></thead>
+        <tbody>
+            {% for r in trap_receivers %}
+            <tr>
+                <td>{{ r.host }}</td>
+                <td>{{ r.community }}</td>
+                <td>{{ r.version }}</td>
+                <td><a href="/draft/{{ switch_id }}/snmp/trap-receiver/{{ r.host }}/remove" class="btn btn-danger" style="padding:0.2rem 0.5rem;">Remove</a></td>
+            </tr>
+            {% endfor %}
+            {% if trap_receivers.is_empty() %}
+            <tr><td colspan="4" class="text-muted" style="text-align:center;">None</td></tr>
+            {% endif %}
+        </tbody>
+        <tfoot>
+            <tr>
+                <form action="/draft/{{ switch_id }}/snmp/trap-receiver/add" method="POST">
+                    <td><input type="text" name="host" placeholder="IP address" required style="padding:0.2rem;border:1px solid var(--border);border-radius:4px;"></td>
+                    <td><input type="text" name="community" placeholder="Community" required style="padding:0.2rem;border:1px solid var(--border);border-radius:4px;"></td>
+                    <td>
+                        <select name="version" style="padding:0.2rem;border:1px solid var(--border);border-radius:4px;">
+                            <option value="2c">2c</option>
+                            <option value="1">1</option>
+                        </select>
+                    </td>
+                    <td><button type="submit" class="btn btn-primary" style="padding:0.2rem 0.5rem;">+ Add</button></td>
+                </form>
+            </tr>
+        </tfoot>
+    </table>
+</div>
+
+<div class="card mb-1">
+    <h3 class="mb-1">Enabled Traps</h3>
+    <form action="/draft/{{ switch_id }}/snmp/traps" method="POST">
+        <div class="flex gap-1 items-center">
+            <label><input type="checkbox" name="mac_notify" value="on"{% for t in enabled_traps %}{% if t == "macnotify" %} checked{% endif %}{% endfor %}> MAC Notify</label>
+            <label><input type="checkbox" name="link_change" value="on"{% for t in enabled_traps %}{% if t == "linkchange" %} checked{% endif %}{% endfor %}> Link Change</label>
+            <button type="submit" class="btn" style="padding:0.2rem 0.5rem;">Update Traps</button>
+        </div>
+    </form>
+</div>
+
+<div id="diff-panel" class="mt-1"></div>
+{% endblock %}

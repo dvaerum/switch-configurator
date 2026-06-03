@@ -5,12 +5,16 @@
 {% block content %}
 <div class="flex justify-between items-center mb-1">
     <div>
-        <h2>Edit VLANs - {{ hostname }}</h2>
+        <h2>{{ hostname }}</h2>
         <span class="badge badge-warning">Draft Mode</span>
     </div>
     <div class="flex gap-1">
-        <a href="/switch/{{ switch_id }}/edit/ports" class="btn">Edit Ports</a>
-        <a hx-post="/preview/{{ switch_id }}" hx-target="#diff-panel" class="btn btn-primary">Preview Changes</a>
+        <a href="/switch/{{ switch_id }}/edit/vlans" class="btn btn-primary">VLANs</a>
+        <a href="/switch/{{ switch_id }}/edit/ports" class="btn">Ports</a>
+        <a href="/switch/{{ switch_id }}/edit/mirrors" class="btn">Mirrors</a>
+        <a href="/switch/{{ switch_id }}/edit/snmp" class="btn">SNMP</a>
+        <span style="border-left:1px solid var(--border);margin:0 0.25rem;"></span>
+        <a hx-post="/preview/{{ switch_id }}" hx-target="#diff-panel" class="btn">Preview Changes</a>
         <a href="/save/{{ switch_id }}" class="btn btn-primary">Save</a>
         <a href="/draft/{{ switch_id }}/discard" class="btn btn-danger">Discard</a>
     </div>
@@ -19,30 +23,43 @@
 <div class="card">
     <table>
         <thead>
-            <tr>
-                <th>ID</th>
-                <th>Name</th>
-                <th>IP Config</th>
-                <th>Actions</th>
-            </tr>
+            <tr><th>ID</th><th>Name</th><th>IP Config</th><th style="width:120px;">Actions</th></tr>
         </thead>
         <tbody>
             {% for vlan in vlans %}
             <tr>
-                <form hx-post="/draft/{{ switch_id }}/vlan/{{ vlan.id }}" hx-target="closest tr" hx-swap="outerHTML">
+                <form action="/draft/{{ switch_id }}/vlan/{{ vlan.id }}" method="POST">
                     <td>{{ vlan.id }}</td>
-                    <td><input type="text" name="name" value="{{ vlan.name }}" style="width:100%;padding:0.25rem;"></td>
+                    <td><input type="text" name="name" value="{{ vlan.name }}" style="width:100%;padding:0.25rem;border:1px solid var(--border);border-radius:4px;"></td>
                     <td>
-                        <select name="ip_config" style="padding:0.25rem;">
+                        <select name="ip_config" style="padding:0.25rem;border:1px solid var(--border);border-radius:4px;">
                             <option value="none"{% if vlan.ip_config == "none" %} selected{% endif %}>None</option>
                             <option value="dhcp"{% if vlan.ip_config == "dhcp" %} selected{% endif %}>DHCP</option>
                         </select>
                     </td>
-                    <td><button type="submit" class="btn" style="padding:0.2rem 0.5rem;">Update</button></td>
+                    <td class="flex gap-1">
+                        <button type="submit" class="btn" style="padding:0.2rem 0.5rem;">Save</button>
+                        <a href="/draft/{{ switch_id }}/vlan/{{ vlan.id }}/remove" class="btn btn-danger" style="padding:0.2rem 0.5rem;">Remove</a>
+                    </td>
                 </form>
             </tr>
             {% endfor %}
         </tbody>
+        <tfoot>
+            <tr>
+                <form action="/draft/{{ switch_id }}/vlan/add" method="POST">
+                    <td><input type="number" name="id" placeholder="ID" min="2" max="4094" required style="width:80px;padding:0.25rem;border:1px solid var(--border);border-radius:4px;"></td>
+                    <td><input type="text" name="name" placeholder="VLAN name" required style="width:100%;padding:0.25rem;border:1px solid var(--border);border-radius:4px;"></td>
+                    <td>
+                        <select name="ip_config" style="padding:0.25rem;border:1px solid var(--border);border-radius:4px;">
+                            <option value="none">None</option>
+                            <option value="dhcp">DHCP</option>
+                        </select>
+                    </td>
+                    <td><button type="submit" class="btn btn-primary" style="padding:0.2rem 0.5rem;">+ Add</button></td>
+                </form>
+            </tr>
+        </tfoot>
     </table>
 </div>
 
