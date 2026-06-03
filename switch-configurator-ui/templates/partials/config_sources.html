@@ -1,0 +1,23 @@
+<div class="card">
+    <table>
+        <thead>
+            <tr>
+                <th>Priority</th>
+                <th>File</th>
+                <th>Type</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for source in sources %}
+            <tr>
+                <td>{{ source.priority }}</td>
+                <td><code>{{ source.file }}</code></td>
+                <td><span class="badge {% if source.source_type == "main" %}badge-info{% else %}badge-success{% endif %}">{{ source.source_type }}</span></td>
+            </tr>
+            {% endfor %}
+            {% if sources.is_empty() %}
+            <tr><td colspan="3" class="text-muted" style="text-align:center;">No config source information available</td></tr>
+            {% endif %}
+        </tbody>
+    </table>
+</div>

@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+
+{% block title %}Dashboard - Switch Configurator{% endblock %}
+
+{% block content %}
+<div class="flex justify-between items-center mb-1">
+    <h2>Switches</h2>
+    <span class="text-muted text-sm">{{ switches.len() }} switch(es)</span>
+</div>
+
+<div class="card-grid">
+    {% for sw in switches %}
+    <a href="/switch/{{ sw.id }}" class="card" style="text-decoration:none;color:inherit;">
+        <div class="flex justify-between items-center">
+            <strong>{{ sw.hostname }}</strong>
+            {% match sw.status.as_deref() %}
+                {% when Some with ("success") %}
+                    <span class="badge badge-success">OK</span>
+                {% when Some with ("failed") %}
+                    <span class="badge badge-danger">Failed</span>
+                {% when Some with ("configuring") %}
+                    <span class="badge badge-info">Configuring</span>
+                {% when _ %}
+                    <span class="badge">Unknown</span>
+            {% endmatch %}
+        </div>
+        <div class="text-sm text-muted mt-1">{{ sw.model }}</div>
+        <div class="text-sm text-muted">{{ sw.management_ip }}</div>
+        <div class="text-sm mt-1">
+            {{ sw.vlan_count }} VLANs, {{ sw.port_count }} ports
+        </div>
+        {% if !sw.warnings.is_empty() %}
+        <div class="text-sm mt-1" style="color:var(--warning);">
+            {{ sw.warnings.len() }} warning(s)
+        </div>
+        {% endif %}
+    </a>
+    {% endfor %}
+</div>
+
+{% if switches.is_empty() %}
+<div class="card" style="text-align:center;padding:3rem;">
+    <p class="text-muted">No switches configured</p>
+</div>
+{% endif %}
+{% endblock %}

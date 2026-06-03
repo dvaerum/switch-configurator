@@ -20,11 +20,11 @@ struct Args {
     backend_url: String,
 
     /// Listen address for the UI server
-    #[arg(short, long, default_value = "0.0.0.0:8080")]
+    #[arg(long, default_value = "0.0.0.0:8080")]
     listen: SocketAddr,
 
     /// Log level
-    #[arg(short = 'l', long, default_value = "info")]
+    #[arg(long, default_value = "info")]
     log_level: Level,
 }
 

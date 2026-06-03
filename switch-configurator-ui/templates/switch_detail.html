@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+
+{% block title %}{{ switch.hostname }} - Switch Configurator{% endblock %}
+
+{% block content %}
+<div class="flex justify-between items-center mb-1">
+    <div>
+        <h2>{{ switch.hostname }}</h2>
+        <div class="text-sm text-muted">{{ switch.model }} | {{ switch.management_ip }}</div>
+    </div>
+    <a href="/" class="btn">Back to Dashboard</a>
+</div>
+
+<div class="tabs">
+    <a class="tab{% if active_tab == "overview" %} active{% endif %}"
+       hx-get="/switch/{{ switch.id }}/tab/overview"
+       hx-target="#tab-content"
+       hx-push-url="/switch/{{ switch.id }}">Overview</a>
+    <a class="tab{% if active_tab == "vlans" %} active{% endif %}"
+       hx-get="/switch/{{ switch.id }}/tab/vlans"
+       hx-target="#tab-content"
+       hx-push-url="/switch/{{ switch.id }}/vlans">VLANs</a>
+    <a class="tab{% if active_tab == "ports" %} active{% endif %}"
+       hx-get="/switch/{{ switch.id }}/tab/ports"
+       hx-target="#tab-content"
+       hx-push-url="/switch/{{ switch.id }}/ports">Ports</a>
+    <a class="tab{% if active_tab == "mirrors" %} active{% endif %}"
+       hx-get="/switch/{{ switch.id }}/tab/mirrors"
+       hx-target="#tab-content"
+       hx-push-url="/switch/{{ switch.id }}/mirrors">Mirrors</a>
+    <a class="tab{% if active_tab == "snmp" %} active{% endif %}"
+       hx-get="/switch/{{ switch.id }}/tab/snmp"
+       hx-target="#tab-content"
+       hx-push-url="/switch/{{ switch.id }}/snmp">SNMP</a>
+    <a class="tab{% if active_tab == "sources" %} active{% endif %}"
+       hx-get="/switch/{{ switch.id }}/tab/sources"
+       hx-target="#tab-content"
+       hx-push-url="/switch/{{ switch.id }}/sources">Config Sources</a>
+</div>
+
+<div id="tab-content">
+    {% match active_tab.as_str() %}
+        {% when "vlans" %}
+            {% include "partials/vlan_table.html" %}
+        {% when "ports" %}
+            {% include "partials/port_table.html" %}
+        {% when "mirrors" %}
+            {% include "partials/mirror_table.html" %}
+        {% when "snmp" %}
+            {% include "partials/snmp_panel.html" %}
+        {% when "sources" %}
+            {% include "partials/config_sources.html" %}
+        {% when _ %}
+            {% include "partials/overview.html" %}
+    {% endmatch %}
+</div>
+{% endblock %}

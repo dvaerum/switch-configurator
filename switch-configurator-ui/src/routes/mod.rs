@@ -1,4 +1,5 @@
 pub mod dashboard;
+pub mod switch;
 
 use crate::proxy::BackendClient;
 use crate::state::DraftStore;
@@ -16,6 +17,9 @@ pub fn create_router(state: AppState) -> Router {
     Router::new()
         .route("/", get(dashboard::index))
         .route("/health", get(health))
+        .route("/switch/:id", get(switch::detail))
+        .route("/switch/:id/:tab", get(switch::detail_with_tab))
+        .route("/switch/:id/tab/:tab", get(switch::tab_content))
         .nest_service("/static", ServeDir::new(static_dir))
         .with_state(state)
 }

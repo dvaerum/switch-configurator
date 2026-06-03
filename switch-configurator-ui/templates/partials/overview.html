@@ -1,0 +1,10 @@
+<div class="card">
+    <table>
+        <tr><th style="width:200px;">Hostname</th><td>{{ switch.hostname }}</td></tr>
+        <tr><th>Model</th><td>{{ switch.model }}</td></tr>
+        <tr><th>Management IP</th><td>{{ switch.management_ip }}</td></tr>
+        <tr><th>VLANs</th><td>{{ switch.vlans.len() }}</td></tr>
+        <tr><th>Ports</th><td>{{ switch.ports.len() }}</td></tr>
+        <tr><th>Port Mirrors</th><td>{{ switch.mirrors.len() }}</td></tr>
+    </table>
+</div>

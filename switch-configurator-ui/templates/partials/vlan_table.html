@@ -1,0 +1,23 @@
+<div class="card">
+    <table>
+        <thead>
+            <tr>
+                <th>ID</th>
+                <th>Name</th>
+                <th>IP Config</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for vlan in switch.vlans %}
+            <tr>
+                <td>{{ vlan.id }}</td>
+                <td>{{ vlan.name }}</td>
+                <td class="text-muted">{{ vlan.ip_display }}</td>
+            </tr>
+            {% endfor %}
+            {% if switch.vlans.is_empty() %}
+            <tr><td colspan="3" class="text-muted" style="text-align:center;">No VLANs configured</td></tr>
+            {% endif %}
+        </tbody>
+    </table>
+</div>

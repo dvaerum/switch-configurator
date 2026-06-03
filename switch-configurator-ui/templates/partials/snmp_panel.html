@@ -1,0 +1,42 @@
+<div class="card">
+    {% match switch.snmp %}
+    {% when Some with (snmp) %}
+    <h3 class="mb-1">Communities</h3>
+    <table>
+        <thead><tr><th>Name</th><th>Access</th></tr></thead>
+        <tbody>
+            {% for c in snmp.communities %}
+            <tr><td>{{ c.name }}</td><td>{{ c.access_display }}</td></tr>
+            {% endfor %}
+            {% if snmp.communities.is_empty() %}
+            <tr><td colspan="2" class="text-muted" style="text-align:center;">None</td></tr>
+            {% endif %}
+        </tbody>
+    </table>
+
+    <h3 class="mb-1 mt-1">Trap Receivers</h3>
+    <table>
+        <thead><tr><th>Host</th><th>Community</th><th>Version</th></tr></thead>
+        <tbody>
+            {% for r in snmp.trap_receivers %}
+            <tr><td>{{ r.host }}</td><td>{{ r.community }}</td><td>{{ r.version }}</td></tr>
+            {% endfor %}
+            {% if snmp.trap_receivers.is_empty() %}
+            <tr><td colspan="3" class="text-muted" style="text-align:center;">None</td></tr>
+            {% endif %}
+        </tbody>
+    </table>
+
+    <h3 class="mb-1 mt-1">Enabled Traps</h3>
+    <div class="flex gap-1">
+        {% for t in snmp.enabled_traps %}
+        <span class="badge badge-info">{{ t }}</span>
+        {% endfor %}
+        {% if snmp.enabled_traps.is_empty() %}
+        <span class="text-muted">None</span>
+        {% endif %}
+    </div>
+    {% when None %}
+    <p class="text-muted" style="text-align:center;padding:2rem;">No SNMP configuration</p>
+    {% endmatch %}
+</div>

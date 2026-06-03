@@ -1,0 +1,25 @@
+<div class="card">
+    <table>
+        <thead>
+            <tr>
+                <th>Session</th>
+                <th>Source Ports</th>
+                <th>Destination</th>
+                <th>Direction</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for mirror in switch.mirrors %}
+            <tr>
+                <td>{{ mirror.session_id }}</td>
+                <td>{{ mirror.source_ports.join(", ") }}</td>
+                <td>{{ mirror.destination_port }}</td>
+                <td>{{ mirror.direction_display }}</td>
+            </tr>
+            {% endfor %}
+            {% if switch.mirrors.is_empty() %}
+            <tr><td colspan="4" class="text-muted" style="text-align:center;">No port mirrors configured</td></tr>
+            {% endif %}
+        </tbody>
+    </table>
+</div>
