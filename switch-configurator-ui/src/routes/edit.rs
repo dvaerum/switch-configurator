@@ -11,9 +11,16 @@ use super::AppState;
 // Draft lifecycle
 // ============================================================================
 
+#[derive(Deserialize)]
+pub struct StartDraftForm {
+    #[serde(default)]
+    pub tab: Option<String>,
+}
+
 pub async fn start_draft(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    Form(form): Form<StartDraftForm>,
 ) -> impl IntoResponse {
     let json = match state.backend.get(&format!("/switches/{}/desired-config", id)).await {
         Ok(json) => json,
@@ -32,7 +39,14 @@ pub async fn start_draft(
     };
 
     state.drafts.create(id.clone(), config).await;
-    Redirect::to(&format!("/switch/{}/edit/vlans", id)).into_response()
+
+    let edit_tab = match form.tab.as_deref() {
+        Some("ports") => "ports",
+        Some("mirrors") => "mirrors",
+        Some("snmp") => "snmp",
+        _ => "vlans",
+    };
+    Redirect::to(&format!("/switch/{}/edit/{}", id, edit_tab)).into_response()
 }
 
 pub async fn discard_draft(
