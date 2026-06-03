@@ -1,0 +1,36 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git *:*)",
+      "Bash(GIT_*:*)",
+      "Bash(cargo *:*)",
+      "Bash(nix *:*)",
+      "Bash(rustc *:*)",
+      "Bash(rustfmt *:*)",
+      "Bash(clippy *:*)",
+      "Bash(ls *:*)",
+      "Bash(cat *:*)",
+      "Bash(grep *:*)",
+      "Bash(find *:*)",
+      "Bash(tree *:*)",
+      "Bash(which *:*)",
+      "Bash(echo *:*)",
+      "Bash(head *:*)",
+      "Bash(tail *:*)",
+      "Bash(wc *:*)",
+      "Bash(mkdir *:*)",
+      "Bash(rm *:*)",
+      "Bash(mv *:*)",
+      "Bash(cp *:*)",
+      "Bash(chmod *:*)",
+      "Bash(chown *:*)"
+    ]
+  },
+  "mcpServers": {
+    "playwright": {
+      "command": "nix-shell",
+      "args": ["-p", "nodejs", "--run", "PLAYWRIGHT_BROWSERS_PATH=$(nix build nixpkgs#playwright-driver.browsers --no-link --print-out-paths 2>/dev/null) npx @playwright/mcp --headless"],
+      "env": {}
+    }
+  }
+}
