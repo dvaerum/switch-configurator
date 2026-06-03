@@ -1,4 +1,5 @@
 pub mod dashboard;
+pub mod events;
 pub mod switch;
 
 use crate::proxy::BackendClient;
@@ -20,6 +21,7 @@ pub fn create_router(state: AppState) -> Router {
         .route("/switch/:id", get(switch::detail))
         .route("/switch/:id/:tab", get(switch::detail_with_tab))
         .route("/switch/:id/tab/:tab", get(switch::tab_content))
+        .route("/events", get(events::sse_proxy))
         .nest_service("/static", ServeDir::new(static_dir))
         .with_state(state)
 }

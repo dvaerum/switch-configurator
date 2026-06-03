@@ -1,7 +1,12 @@
 use crate::config::BackendTransport;
 use anyhow::Result;
-use hyper::body::Incoming;
 use hyper_util::rt::TokioIo;
+
+#[derive(Debug, Clone)]
+pub struct SseEvent {
+    pub event_type: String,
+    pub data: String,
+}
 
 #[derive(Clone)]
 pub struct BackendClient {
@@ -22,6 +27,71 @@ impl BackendClient {
         let req_body = serde_json::to_vec(body)?;
         let resp_body = self.request_with_status("POST", path, Some(req_body)).await?;
         Ok(resp_body)
+    }
+
+    pub async fn sse_stream(&self, path: &str) -> Result<tokio::sync::mpsc::Receiver<SseEvent>> {
+        use http_body_util::BodyExt;
+
+        let req = hyper::Request::builder()
+            .method("GET")
+            .uri(path)
+            .header("host", "localhost")
+            .header("accept", "text/event-stream")
+            .body(http_body_util::Empty::<hyper::body::Bytes>::new())?;
+
+        let resp = match &self.transport {
+            BackendTransport::UnixSocket(socket_path) => {
+                let stream = tokio::net::UnixStream::connect(socket_path).await?;
+                let io = TokioIo::new(stream);
+                let (mut sender, conn) = hyper::client::conn::http1::handshake(io).await?;
+                tokio::spawn(async move { let _ = conn.await; });
+                sender.send_request(req).await?
+            }
+            BackendTransport::Tcp(url) => {
+                let parsed: hyper::Uri = url.parse()?;
+                let host = parsed.host().unwrap_or("localhost");
+                let port = parsed.port_u16().unwrap_or(4002);
+                let stream = tokio::net::TcpStream::connect(format!("{}:{}", host, port)).await?;
+                let io = TokioIo::new(stream);
+                let (mut sender, conn) = hyper::client::conn::http1::handshake(io).await?;
+                tokio::spawn(async move { let _ = conn.await; });
+                sender.send_request(req).await?
+            }
+        };
+
+        let (tx, rx) = tokio::sync::mpsc::channel(32);
+        let mut body = resp.into_body();
+
+        tokio::spawn(async move {
+            let mut buffer = String::new();
+            while let Some(frame) = body.frame().await {
+                if let Ok(frame) = frame {
+                    if let Some(data) = frame.data_ref() {
+                        buffer.push_str(&String::from_utf8_lossy(data));
+                        // Parse SSE events from buffer
+                        while let Some(pos) = buffer.find("\n\n") {
+                            let event_text = buffer[..pos].to_string();
+                            buffer = buffer[pos + 2..].to_string();
+
+                            let mut event_type = "message".to_string();
+                            let mut data = String::new();
+                            for line in event_text.lines() {
+                                if let Some(val) = line.strip_prefix("event: ") {
+                                    event_type = val.to_string();
+                                } else if let Some(val) = line.strip_prefix("data: ") {
+                                    data = val.to_string();
+                                }
+                            }
+                            if tx.send(SseEvent { event_type, data }).await.is_err() {
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        Ok(rx)
     }
 
     async fn request(&self, method: &str, path: &str, body: Option<Vec<u8>>) -> Result<Vec<u8>> {
