@@ -76,6 +76,10 @@ pub trait SwitchVendor: Send + Sync {
         method: RollbackMethod,
     ) -> Result<(), VendorError>;
 
+    /// Generate CLI commands for a given diff without executing them.
+    /// Used for preview/dry-run in the web UI.
+    fn generate_commands_for_diff(&self, diff: &StateDiff) -> crate::models::CommandPreview;
+
     /// Get warnings accumulated during the last configuration cycle
     /// (e.g., hardware model mismatch, deprecated features, etc.)
     fn get_warnings(&self) -> Vec<String> {

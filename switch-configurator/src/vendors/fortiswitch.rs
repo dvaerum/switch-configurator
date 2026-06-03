@@ -939,6 +939,39 @@ impl SwitchVendor for FortiswitchSwitch {
         })
     }
 
+    fn generate_commands_for_diff(&self, diff: &StateDiff) -> crate::models::CommandPreview {
+        let mut preview = crate::models::CommandPreview::default();
+
+        if !diff.vlans_to_remove.is_empty() {
+            preview.vlan_commands.extend(self.generate_remove_vlan_commands(&diff.vlans_to_remove));
+        }
+        if !diff.vlans_to_add.is_empty() {
+            preview.vlan_commands.extend(self.generate_vlan_commands(&diff.vlans_to_add));
+        }
+        if !diff.vlans_to_update.is_empty() {
+            preview.vlan_commands.extend(self.generate_vlan_commands(&diff.vlans_to_update));
+        }
+        if !diff.ports_to_configure.is_empty() {
+            preview.port_commands.extend(self.generate_port_commands(&diff.ports_to_configure));
+        }
+        if !diff.mirrors_to_remove.is_empty() {
+            preview.mirror_commands.extend(self.generate_remove_mirror_commands(&diff.mirrors_to_remove));
+        }
+        if !diff.mirrors_to_add.is_empty() {
+            preview.mirror_commands.extend(self.generate_mirror_commands(&diff.mirrors_to_add));
+        }
+        if !diff.mirrors_to_update.is_empty() {
+            preview.mirror_commands.extend(self.generate_mirror_commands(&diff.mirrors_to_update));
+        }
+        if let Some(snmp_config) = &diff.snmp_config {
+            if diff.snmp_config_changed {
+                preview.snmp_commands.extend(self.generate_snmp_commands(snmp_config));
+            }
+        }
+
+        preview
+    }
+
     fn get_warnings(&self) -> Vec<String> {
         self.current_state
             .as_ref()

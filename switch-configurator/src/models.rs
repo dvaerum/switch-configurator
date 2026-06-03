@@ -1056,7 +1056,7 @@ pub struct SwitchState {
 
 /// Granular SNMP state difference for efficient configuration
 /// Instead of replacing all SNMP config, this tracks individual changes
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct SnmpStateDiff {
     /// Communities to add (not present in current config)
     pub communities_to_add: Vec<SnmpCommunity>,
@@ -1089,8 +1089,19 @@ impl SnmpStateDiff {
     }
 }
 
+/// Categorized CLI commands for preview (what would be sent to the switch)
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct CommandPreview {
+    pub vlan_commands: Vec<String>,
+    pub port_commands: Vec<String>,
+    pub mirror_commands: Vec<String>,
+    pub snmp_commands: Vec<String>,
+    pub reset_commands: Vec<String>,
+    pub other_commands: Vec<String>,
+}
+
 /// Represents the difference between current and desired state
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct StateDiff {
     pub vlans_to_add: Vec<Vlan>,
     pub vlans_to_remove: Vec<u16>,
@@ -1636,5 +1647,24 @@ mod tests {
         assert!(!all_caps[1].supports_poe()); // Port 2
         assert!(all_caps[2].supports_poe()); // Port 3
         assert!(!all_caps[3].supports_poe()); // Port 4
+    }
+
+    #[test]
+    fn test_state_diff_serializable() {
+        let diff = StateDiff::default();
+        let json = serde_json::to_string(&diff).expect("StateDiff should serialize to JSON");
+        assert!(json.contains("vlans_to_add"));
+        assert!(json.contains("ports_to_configure"));
+        assert!(json.contains("mirrors_to_add"));
+        assert!(json.contains("mirror_dest_ports_to_configure"));
+        assert!(json.contains("snmp_config_changed"));
+    }
+
+    #[test]
+    fn test_snmp_state_diff_serializable() {
+        let diff = SnmpStateDiff::default();
+        let json = serde_json::to_string(&diff).expect("SnmpStateDiff should serialize to JSON");
+        assert!(json.contains("communities_to_add"));
+        assert!(json.contains("traps_to_enable"));
     }
 }

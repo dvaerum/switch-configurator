@@ -1796,6 +1796,61 @@ impl SwitchVendor for ArubaSwitch {
         })
     }
 
+    fn generate_commands_for_diff(&self, diff: &StateDiff) -> crate::models::CommandPreview {
+        let mut preview = crate::models::CommandPreview::default();
+
+        if !diff.vlans_to_remove.is_empty() {
+            preview.vlan_commands.extend(self.generate_remove_vlan_commands(&diff.vlans_to_remove));
+        }
+        if !diff.vlans_to_add.is_empty() {
+            preview.vlan_commands.extend(self.generate_vlan_commands(&diff.vlans_to_add));
+        }
+        if !diff.vlans_to_update.is_empty() {
+            preview.vlan_commands.extend(self.generate_vlan_commands(&diff.vlans_to_update));
+        }
+
+        if !diff.ports_to_configure.is_empty() {
+            let all_mirrors: Vec<_> = diff.mirrors_to_add.iter()
+                .chain(diff.mirrors_to_update.iter())
+                .cloned()
+                .collect();
+            preview.port_commands.extend(self.generate_port_commands(&diff.ports_to_configure, &all_mirrors));
+        }
+
+        if !diff.ports_to_reset.is_empty() {
+            for port_id in &diff.ports_to_reset {
+                preview.reset_commands.push(format!("interface {}", self.normalize_port_id(port_id)));
+                preview.reset_commands.push("disable".to_string());
+                preview.reset_commands.push("untagged vlan 1".to_string());
+                preview.reset_commands.push("exit".to_string());
+            }
+        }
+
+        if !diff.mirrors_to_remove.is_empty() {
+            preview.mirror_commands.extend(self.generate_remove_mirror_commands(&diff.mirrors_to_remove));
+        }
+        if !diff.mirrors_to_add.is_empty() {
+            preview.mirror_commands.extend(self.generate_mirror_commands(&diff.mirrors_to_add));
+        }
+        if !diff.mirrors_to_update.is_empty() {
+            preview.mirror_commands.extend(self.generate_mirror_commands(&diff.mirrors_to_update));
+        }
+
+        if let Some(snmp_diff) = &diff.snmp_diff {
+            if snmp_diff.has_changes() {
+                if let Some(snmp_config) = &diff.snmp_config {
+                    let current_traps = self.current_state.as_ref()
+                        .and_then(|s| s.snmp.as_ref())
+                        .map(|s| s.enabled_traps.clone())
+                        .unwrap_or_default();
+                    preview.snmp_commands.extend(self.generate_snmp_commands(snmp_config, &current_traps));
+                }
+            }
+        }
+
+        preview
+    }
+
     fn get_warnings(&self) -> Vec<String> {
         self.current_state
             .as_ref()
@@ -5798,5 +5853,47 @@ interface 48
         assert!(commands.contains(&"untagged vlan 1".to_string()));
         assert!(commands.contains(&"no tagged vlan 2088".to_string()),
                 "Reset should remove tagged VLAN 2088, got: {:?}", commands);
+    }
+
+    #[test]
+    fn test_generate_commands_for_diff_trait_method() {
+        use crate::vendors::traits::SwitchVendor;
+
+        let switch = create_test_switch();
+
+        let diff = StateDiff {
+            vlans_to_add: vec![
+                crate::models::Vlan {
+                    id: 42,
+                    name: "test-vlan".to_string(),
+                    description: None,
+                    ip_config: crate::models::VlanIpConfig::None,
+                },
+            ],
+            ports_to_configure: vec![
+                Port {
+                    port_id: "1".to_string(),
+                    mode: PortMode::Access,
+                    vlan: 42,
+                    allowed_vlans: vec![],
+                    description: Some("Test".to_string()),
+                    enabled: true,
+                    poe_enabled: false,
+                    mac_notify: false,
+                    speed_duplex: SpeedDuplex::Auto,
+                },
+            ],
+            ..Default::default()
+        };
+
+        let preview = switch.generate_commands_for_diff(&diff);
+
+        assert!(!preview.vlan_commands.is_empty(), "Should have VLAN commands");
+        assert!(preview.vlan_commands.iter().any(|c| c.contains("vlan 42")),
+                "VLAN commands should reference VLAN 42, got: {:?}", preview.vlan_commands);
+
+        assert!(!preview.port_commands.is_empty(), "Should have port commands");
+        assert!(preview.port_commands.iter().any(|c| c.contains("interface 1")),
+                "Port commands should reference interface 1, got: {:?}", preview.port_commands);
     }
 }

@@ -1,0 +1,95 @@
+[package]
+name = "switch-configurator"
+version = "0.3.25"
+edition = "2021"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1.41", features = ["full"] }
+async-trait = "0.1"
+
+# Web framework for API
+axum = "0.7"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace", "cors"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+humantime-serde = "1.1"
+
+# SSH for switch communication
+russh = "0.45"
+russh-keys = "0.45"
+
+# Serial communication
+tokio-serial = "5.4"
+
+# Configuration and file watching
+notify = "6.1"
+config = "0.14"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+# CLI
+clap = { version = "4.5", features = ["derive"] }
+
+# Time handling
+chrono = { version = "0.4", features = ["serde"] }
+
+# Validation
+validator = { version = "0.18", features = ["derive"] }
+
+# Regex for serial prompt detection
+regex = "1.10"
+
+# Unix system calls for serial device locking
+libc = "0.2"
+serde_path_to_error = "0.1.20"
+
+# Home directory expansion for SSH key paths
+dirs = "5.0"
+
+[dev-dependencies]
+tokio-test = "0.4"
+mockall = "0.13"
+tempfile = "3.13"
+
+# Development profile (default for 'cargo build')
+# Optimized for fast compilation with parallel codegen
+[profile.dev]
+opt-level = 0
+debug = true
+split-debuginfo = "unpacked"  # Faster on macOS
+incremental = true
+
+# Release profile - optimized for performance, slower to build
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1  # Single-threaded but produces fastest binary
+strip = true       # Remove debug symbols
+
+# Fast development profile - use with 'cargo build --profile dev-fast'
+# Balances compilation speed with some runtime performance
+[profile.dev-fast]
+inherits = "dev"
+opt-level = 1      # Minimal optimization for better runtime perf
+codegen-units = 256  # Maximum parallelism
+incremental = true
+debug = true
+
+# Fast release profile - use with 'cargo build --profile release-fast'
+# Faster builds than full release, still good performance
+[profile.release-fast]
+inherits = "release"
+opt-level = 2
+lto = "thin"       # Faster than full LTO
+codegen-units = 16  # More parallelism than release
