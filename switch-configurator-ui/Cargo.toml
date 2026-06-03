@@ -7,7 +7,7 @@ edition = "2021"
 # Web framework
 axum = "0.7"
 tower = "0.5"
-tower-http = { version = "0.6", features = ["trace", "fs"] }
+tower-http = { version = "0.6", features = ["trace"] }
 
 # Template engine
 askama = "0.12"
