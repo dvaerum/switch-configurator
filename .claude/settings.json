@@ -25,12 +25,5 @@
       "Bash(chmod *:*)",
       "Bash(chown *:*)"
     ]
-  },
-  "mcpServers": {
-    "playwright": {
-      "command": "nix-shell",
-      "args": ["-p", "nodejs", "--run", "PLAYWRIGHT_BROWSERS_PATH=$(nix build nixpkgs#playwright-driver.browsers --no-link --print-out-paths 2>/dev/null) npx @playwright/mcp --headless"],
-      "env": {}
-    }
   }
 }
