@@ -15,9 +15,11 @@ use super::handlers;
 pub const API_ENDPOINTS: &[&str] = &[
     "GET /health",
     "GET /api/status",
+    "GET /api/events",
     "GET /switches",
     "POST /switches/:id/apply",
     "POST /switches/:id/reload",
+    "POST /switches/:id/preview-diff",
     "GET /switches/:id/config",
     "GET /switches/:id/desired-config",
     "PUT /switches/:id/desired-config",
@@ -98,8 +100,10 @@ pub fn create_router(store: ConfigStore) -> Router {
         .route("/health", get(handlers::health))
         .route("/api/status", get(handlers::status))
         .route("/switches", get(handlers::list_switches))
+        .route("/api/events", get(handlers::events))
         .route("/switches/:id/apply", post(handlers::apply_config))
         .route("/switches/:id/reload", post(handlers::reload_switch_config))
+        .route("/switches/:id/preview-diff", post(handlers::preview_diff))
         // GET retrieves running config from switch hardware via SSH
         .route("/switches/:id/config", get(handlers::get_config))
         // PUT creates/replaces in-memory config, PATCH updates, DELETE removes

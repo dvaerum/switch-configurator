@@ -1,4 +1,5 @@
-use crate::config::{validate_switch_config, AppConfig, ConfigStore};
+use crate::config::{validate_switch_config, AppConfig, ConfigStore, SseEvent};
+use tokio_stream::StreamExt;
 use crate::models::{
     Credentials, Port, PortMirror, SnmpConfig, SwitchConfig, SwitchModel, Vlan,
 };
@@ -12,6 +13,40 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{error, info, warn};
+
+/// SSE endpoint for real-time status updates
+pub async fn events(
+    State(store): State<ConfigStore>,
+) -> axum::response::sse::Sse<impl futures_core::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>> {
+    let rx = store.events.subscribe();
+
+    let stream = tokio_stream::wrappers::BroadcastStream::new(rx)
+        .filter_map(|result| {
+            match result {
+                Ok(event) => {
+                    let data = serde_json::to_string(&event).unwrap_or_default();
+                    let event_name = match &event {
+                        crate::config::SseEvent::Status { .. } => "status",
+                        crate::config::SseEvent::ConfigReload { .. } => "config-reload",
+                        crate::config::SseEvent::Warning { .. } => "warning",
+                    };
+                    Some(Ok(axum::response::sse::Event::default()
+                        .event(event_name)
+                        .data(data)))
+                }
+                Err(_) => None,
+            }
+        });
+
+    axum::response::sse::Sse::new(stream)
+        .keep_alive(axum::response::sse::KeepAlive::default())
+}
+
+/// Request body for POST /switches/{id}/preview-diff
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PreviewDiffRequest {
+    pub current_state: Option<crate::models::SwitchState>,
+}
 
 /// Request body for PUT /switches/{id}/config (create/overwrite)
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -317,6 +352,93 @@ async fn apply_config_impl(
     store.status.clear_currently_configuring(&id).await;
 
     Ok(results)
+}
+
+/// Preview the diff and CLI commands that would be applied, without executing them.
+/// Accepts an optional `current_state` in the request body; if omitted, connects to
+/// the switch to read the current running configuration.
+pub async fn preview_diff(
+    State(store): State<ConfigStore>,
+    Path(id): Path<String>,
+    Json(body): Json<PreviewDiffRequest>,
+) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    let config = store.config.read().await;
+
+    let switch_config = config
+        .switches
+        .iter()
+        .find(|s| s.id == id)
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": format!("Switch '{}' not found", id)})),
+            )
+        })?
+        .clone();
+
+    let current_state = match body.current_state {
+        Some(state) => state,
+        None => {
+            // Connect to switch and parse current state
+            drop(config);
+            let mut vendor = vendors::create_vendor_with_runtime(
+                &switch_config,
+                &crate::config::RuntimeConfig::default(),
+                switch_config.settings.enforce_port_config,
+            )
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("Failed to create vendor: {}", e)})),
+                )
+            })?;
+
+            vendor.connect().await.map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("Failed to connect: {}", e)})),
+                )
+            })?;
+
+            let state = vendor.parse_current_state().await.map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("Failed to parse state: {}", e)})),
+                )
+            })?;
+
+            let _ = vendor.disconnect().await;
+            state
+        }
+    };
+
+    let diff = crate::diff::compute_diff(
+        &current_state,
+        &switch_config,
+        switch_config.settings.enforce_port_config,
+    );
+
+    // Generate command preview using the vendor
+    let vendor = vendors::create_vendor_with_runtime(
+        &switch_config,
+        &crate::config::RuntimeConfig::default(),
+        switch_config.settings.enforce_port_config,
+    )
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("Failed to create vendor: {}", e)})),
+        )
+    })?;
+
+    let commands = vendor.generate_commands_for_diff(&diff);
+
+    Ok(Json(json!({
+        "switch_id": id,
+        "has_changes": diff.has_changes(),
+        "diff": diff,
+        "commands": commands,
+    })))
 }
 
 /// Get running configuration from a switch

@@ -245,22 +245,41 @@ impl AppConfig {
 }
 
 /// Thread-safe configuration store
+/// SSE event types for real-time status updates
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "event", content = "data")]
+pub enum SseEvent {
+    #[serde(rename = "status")]
+    Status { switch_id: String, state: String },
+    #[serde(rename = "config-reload")]
+    ConfigReload { switches_affected: Vec<String> },
+    #[serde(rename = "warning")]
+    Warning { switch_id: String, message: String },
+}
+
 /// Shared configuration store with status tracking
 #[derive(Clone)]
 pub struct ConfigStore {
     pub config: Arc<RwLock<AppConfig>>,
     pub status: crate::status::StatusTracker,
     pub api_port: u16,
+    pub events: Arc<tokio::sync::broadcast::Sender<SseEvent>>,
 }
 
 impl ConfigStore {
     pub fn new(config: AppConfig, api_port: u16) -> Self {
         let status = crate::status::StatusTracker::new();
+        let (tx, _) = tokio::sync::broadcast::channel(64);
         Self {
             config: Arc::new(RwLock::new(config)),
             status,
             api_port,
+            events: Arc::new(tx),
         }
+    }
+
+    pub fn emit_event(&self, event: SseEvent) {
+        let _ = self.events.send(event);
     }
 }
 

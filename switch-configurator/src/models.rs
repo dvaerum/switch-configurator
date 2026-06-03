@@ -1042,7 +1042,7 @@ pub struct ConfigResult {
 }
 
 /// Represents the current state of a switch
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SwitchState {
     pub vlans: Vec<Vlan>,
     pub ports: Vec<Port>,

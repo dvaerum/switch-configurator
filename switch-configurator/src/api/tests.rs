@@ -2084,4 +2084,130 @@ mod integration_tests {
         let resp = sender.send_request(req).await.unwrap();
         assert_eq!(resp.status(), 200, "Health endpoint should return 200 over unix socket");
     }
+
+    #[tokio::test]
+    async fn test_preview_diff_with_current_state() {
+        use crate::models::{SwitchState, PortMode, VlanIpConfig, SpeedDuplex};
+
+        let store = create_test_config_store();
+        let app = crate::api::create_router(store);
+
+        // Provide a current_state that differs from the desired config
+        // The desired config has VLAN 10, port 1 on VLAN 10
+        // We'll provide a current state with VLAN 10 but port 1 on VLAN 1
+        let body = serde_json::json!({
+            "current_state": {
+                "vlans": [
+                    {"id": 10, "name": "vlan10", "ip_config": "none"}
+                ],
+                "ports": [
+                    {
+                        "port_id": "1",
+                        "mode": "access",
+                        "vlan": 1,
+                        "allowed_vlans": [],
+                        "enabled": true,
+                        "poe_enabled": false,
+                        "mac_notify": false,
+                        "speed_duplex": "auto"
+                    }
+                ],
+                "port_mirrors": [],
+                "warnings": []
+            }
+        });
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/switches/test-sw-01/preview-diff")
+            .header("Content-Type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK,
+                   "preview-diff should return 200 with current_state provided");
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(json["switch_id"], "test-sw-01");
+        assert!(json["has_changes"].as_bool().unwrap(), "Should detect changes");
+        assert!(json["diff"].is_object(), "Should include diff object");
+        assert!(json["commands"].is_object(), "Should include commands object");
+    }
+
+    #[tokio::test]
+    async fn test_sse_events_endpoint() {
+        use crate::config::SseEvent;
+
+        let store = create_test_config_store();
+        let events_tx = store.events.clone();
+        let app = crate::api::create_router(store);
+
+        // Start SSE server on a unix socket so we can test the streaming response
+        let socket_dir = tempfile::tempdir().unwrap();
+        let socket_path = socket_dir.path().join("sse-test.sock");
+        let uds = tokio::net::UnixListener::bind(&socket_path).unwrap();
+        tokio::spawn(async move {
+            crate::api::server::serve_unix_socket(uds, app).await;
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Connect and send SSE request
+        let stream = tokio::net::UnixStream::connect(&socket_path).await.unwrap();
+        let io = hyper_util::rt::TokioIo::new(stream);
+        let (mut sender, conn) = hyper::client::conn::http1::handshake(io).await.unwrap();
+        tokio::spawn(async move { let _ = conn.await; });
+
+        let req = hyper::Request::builder()
+            .uri("/api/events")
+            .header("host", "localhost")
+            .header("accept", "text/event-stream")
+            .body(http_body_util::Empty::<hyper::body::Bytes>::new())
+            .unwrap();
+
+        let resp = sender.send_request(req).await.unwrap();
+        assert_eq!(resp.status(), 200, "SSE endpoint should return 200");
+
+        // Emit an event after a short delay
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            events_tx.send(SseEvent::Status {
+                switch_id: "sw-01".to_string(),
+                state: "configuring".to_string(),
+            }).unwrap();
+        });
+
+        // Read the first frame from the SSE stream with a timeout
+        use http_body_util::BodyExt;
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            resp.into_body().frame(),
+        ).await;
+
+        assert!(result.is_ok(), "Should receive SSE frame within timeout");
+        let frame = result.unwrap();
+        assert!(frame.is_some(), "Should have at least one frame");
+        let data = frame.unwrap().unwrap().into_data().unwrap();
+        let text = String::from_utf8_lossy(&data);
+        assert!(text.contains("event: status") || text.contains("sw-01"),
+                "SSE frame should contain status event data, got: {}", text);
+    }
+
+    #[tokio::test]
+    async fn test_preview_diff_switch_not_found() {
+        let store = create_test_config_store();
+        let app = crate::api::create_router(store);
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/switches/nonexistent/preview-diff")
+            .header("Content-Type", "application/json")
+            .body(Body::from("{}"))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
 }
