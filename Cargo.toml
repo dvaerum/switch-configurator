@@ -1,5 +1,6 @@
 [workspace]
 members = [
     "switch-configurator",
+    "switch-configurator-ui",
 ]
 resolver = "2"
