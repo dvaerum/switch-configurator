@@ -84,13 +84,19 @@
           inherit nativeBuildInputs buildInputs;
         };
 
-        # Alias for the package
+        # Aliases for the packages (both binaries are in the default package)
         packages.switch-configurator = self.packages.${system}.default;
+        packages.switch-configurator-ui = self.packages.${system}.default;
 
         # Apps
         apps.default = {
           type = "app";
           program = "${self.packages.${system}.default}/bin/switch-configurator";
+        };
+
+        apps.switch-configurator-ui = {
+          type = "app";
+          program = "${self.packages.${system}.default}/bin/switch-configurator-ui";
         };
       }
     ) // {

@@ -64,6 +64,16 @@ in
       description = "Port for the REST API server";
     };
 
+    socketPath = mkOption {
+      type = types.nullOr types.str;
+      default = "/run/switch-configurator/api.sock";
+      description = ''
+        Unix socket path for the backend API.
+        Used by the web UI for local communication.
+        Set to null to disable unix socket listening.
+      '';
+    };
+
     enableFileWatching = mkOption {
       type = types.bool;
       default = true;
@@ -119,6 +129,30 @@ in
         }
       '';
     };
+
+    # Web UI options
+    ui = {
+      enable = mkEnableOption "Switch configurator web UI";
+
+      port = mkOption {
+        type = types.port;
+        default = 8080;
+        description = "Port for the web UI server";
+      };
+
+      backendSocket = mkOption {
+        type = types.str;
+        default = "/run/switch-configurator/api.sock";
+        description = "Unix socket path to connect to the backend API";
+      };
+
+      logLevel = mkOption {
+        type = types.enum [ "trace" "debug" "info" "warn" "error" ];
+        default = cfg.logLevel;
+        defaultText = literalExpression "config.services.switch-configurator.logLevel";
+        description = "Logging level for the web UI";
+      };
+    };
   };
 
   config = mkIf cfg.enable {
@@ -132,12 +166,11 @@ in
     users.groups.${cfg.group} = { };
 
     # Create config directories with proper permissions
-    # Always create /etc/switch-configurator
     systemd.tmpfiles.rules = [
       "d /etc/switch-configurator ${cfg.configDirectoryMode} ${cfg.user} ${cfg.configDirectoryGroup} -"
     ];
 
-    # Systemd service
+    # Backend service
     systemd.services.switch-configurator = {
       description = "Multi-vendor Switch Configurator";
       wantedBy = [ "multi-user.target" ];
@@ -152,12 +185,14 @@ in
         SupplementaryGroups = cfg.extraGroups;
         Restart = "on-failure";
         RestartSec = "10s";
+        RuntimeDirectory = "switch-configurator";
 
         ExecStart = ''
           ${cfg.package}/bin/switch-configurator \
             --config-file ${cfg.configFile} \
             ${concatMapStringsSep " " (folder: "--config-folder ${folder}") ([ "/etc/switch-configurator" ] ++ cfg.extraConfigFolders)} \
             --port ${toString cfg.port} \
+            ${optionalString (cfg.socketPath != null) "--socket ${cfg.socketPath}"} \
             ${if cfg.enableFileWatching then "--watch" else "--watch=false"} \
             ${if cfg.applyOnStartup then "--apply-on-startup" else ""} \
             --log-level ${cfg.logLevel}
@@ -168,11 +203,37 @@ in
         PrivateTmp = true;
         ProtectSystem = "strict";
         ProtectHome = true;
+        PrivateNetwork = false;
+        RestrictAddressFamilies = [ "AF_INET" "AF_INET6" "AF_UNIX" ];
+      };
+    };
 
-        # Serial device access is managed via SupplementaryGroups (dialout)
-        # DevicePolicy is left at default to allow normal device access with group permissions
+    # Web UI service
+    systemd.services.switch-configurator-ui = mkIf cfg.ui.enable {
+      description = "Switch Configurator Web UI";
+      wantedBy = [ "multi-user.target" ];
+      after = [ "switch-configurator.service" ];
+      requires = [ "switch-configurator.service" ];
 
-        # Network access needed for SSH to switches
+      serviceConfig = {
+        Type = "simple";
+        User = cfg.user;
+        Group = cfg.group;
+        Restart = "on-failure";
+        RestartSec = "5s";
+
+        ExecStart = ''
+          ${cfg.package}/bin/switch-configurator-ui \
+            --backend-socket ${cfg.ui.backendSocket} \
+            --listen 0.0.0.0:${toString cfg.ui.port} \
+            --log-level ${cfg.ui.logLevel}
+        '';
+
+        # Security hardening
+        NoNewPrivileges = true;
+        PrivateTmp = true;
+        ProtectSystem = "strict";
+        ProtectHome = true;
         PrivateNetwork = false;
         RestrictAddressFamilies = [ "AF_INET" "AF_INET6" "AF_UNIX" ];
       };

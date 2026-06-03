@@ -4,14 +4,12 @@
 }:
 
 let
-  cargoToml = builtins.fromTOML (builtins.readFile ./Cargo.toml);
+  cargoToml = builtins.fromTOML (builtins.readFile ./switch-configurator/Cargo.toml);
 in
 pkgs.rustPlatform.buildRustPackage {
   pname = "switch-configurator";
   version = cargoToml.package.version;
 
-  # Only include files needed for the Rust build to avoid unnecessary rebuilds
-  # Excludes: nixos-module.nix, flake.nix, docs/, examples/, *.md, etc.
   src = pkgs.lib.cleanSourceWith {
     src = ./.;
     filter = path: type:
@@ -19,14 +17,15 @@ pkgs.rustPlatform.buildRustPackage {
         baseName = baseNameOf path;
         relPath = pkgs.lib.removePrefix (toString ./. + "/") (toString path);
       in
-        # Include Cargo files
+        # Include workspace root Cargo files
         baseName == "Cargo.toml" ||
         baseName == "Cargo.lock" ||
-        baseName == "build.rs" ||
-        # Include src directory and all its contents
-        (pkgs.lib.hasPrefix "src/" relPath || baseName == "src") ||
-        # Include any .rs files at root level
-        (type == "regular" && pkgs.lib.hasSuffix ".rs" baseName);
+        # Include backend crate directory and all contents
+        baseName == "switch-configurator" ||
+        (pkgs.lib.hasPrefix "switch-configurator/" relPath) ||
+        # Include UI crate directory and all contents
+        baseName == "switch-configurator-ui" ||
+        (pkgs.lib.hasPrefix "switch-configurator-ui/" relPath);
   };
 
   cargoLock = {
@@ -35,11 +34,10 @@ pkgs.rustPlatform.buildRustPackage {
 
   inherit nativeBuildInputs buildInputs;
 
-  # Skip tests during build (they may require network/SSH)
   doCheck = false;
 
   meta = with pkgs.lib; {
-    description = "Multi-vendor network switch configurator";
+    description = "Multi-vendor network switch configurator with web UI";
     homepage = "https://github.com/yourusername/switch-configurator";
     license = licenses.mit;
     maintainers = [ ];
