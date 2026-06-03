@@ -8,7 +8,7 @@ pub mod switch;
 use crate::proxy::BackendClient;
 use crate::state::DraftStore;
 use axum::{routing::{get, post}, Router};
-use tower_http::services::ServeDir;
+use axum::http::header;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -16,8 +16,22 @@ pub struct AppState {
     pub drafts: DraftStore,
 }
 
+async fn static_css() -> ([(header::HeaderName, &'static str); 1], &'static str) {
+    ([(header::CONTENT_TYPE, "text/css")],
+     include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/static/style.css")))
+}
+
+async fn static_htmx() -> ([(header::HeaderName, &'static str); 1], &'static [u8]) {
+    ([(header::CONTENT_TYPE, "application/javascript")],
+     include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/static/htmx.min.js")))
+}
+
+async fn static_htmx_sse() -> ([(header::HeaderName, &'static str); 1], &'static [u8]) {
+    ([(header::CONTENT_TYPE, "application/javascript")],
+     include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/static/htmx-sse.js")))
+}
+
 pub fn create_router(state: AppState) -> Router {
-    let static_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("static");
     Router::new()
         .route("/", get(dashboard::index))
         .route("/health", get(health))
@@ -56,7 +70,9 @@ pub fn create_router(state: AppState) -> Router {
         .route("/save/:id", get(save::save_dialog))
         .route("/save/:id/confirm", post(save::save_overlay))
         .route("/events", get(events::sse_proxy))
-        .nest_service("/static", ServeDir::new(static_dir))
+        .route("/static/style.css", get(static_css))
+        .route("/static/htmx.min.js", get(static_htmx))
+        .route("/static/htmx-sse.js", get(static_htmx_sse))
         .with_state(state)
 }
 
