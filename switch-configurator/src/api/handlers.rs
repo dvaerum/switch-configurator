@@ -540,10 +540,18 @@ pub async fn config_sources(
     let mut sources = Vec::new();
 
     if let Some((main_file, folders)) = config_paths {
-        // Main config file
+        // Main config file — read actual merge_priority
+        let main_priority = std::fs::read_to_string(&main_file)
+            .ok()
+            .and_then(|content| {
+                serde_yaml::from_str::<crate::config::AppConfigFile>(&content).ok()
+            })
+            .and_then(|f| f.merge_priority)
+            .unwrap_or(50);
+
         sources.push(json!({
             "file": main_file.to_string_lossy(),
-            "priority": 50,
+            "priority": main_priority,
             "source_type": "main",
         }));
 
