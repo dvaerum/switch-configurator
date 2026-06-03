@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+
+{% block title %}Edit Mirrors - {{ hostname }}{% endblock %}
+
+{% block content %}
+<div class="flex justify-between items-center mb-1">
+    <div>
+        <h2>{{ hostname }}</h2>
+        <span class="badge badge-warning">Draft Mode</span>
+    </div>
+    <div class="flex gap-1">
+        <a href="/switch/{{ switch_id }}/edit/vlans" class="btn">VLANs</a>
+        <a href="/switch/{{ switch_id }}/edit/ports" class="btn">Ports</a>
+        <a href="/switch/{{ switch_id }}/edit/mirrors" class="btn btn-primary">Mirrors</a>
+        <a href="/switch/{{ switch_id }}/edit/snmp" class="btn">SNMP</a>
+        <span style="border-left:1px solid var(--border);margin:0 0.25rem;"></span>
+        <a hx-post="/preview/{{ switch_id }}" hx-target="#diff-panel" class="btn">Preview Changes</a>
+        <a href="/save/{{ switch_id }}" class="btn btn-primary">Save</a>
+        <a href="/draft/{{ switch_id }}/discard" class="btn btn-danger">Discard</a>
+    </div>
+</div>
+
+<div class="card">
+    <table>
+        <thead>
+            <tr><th>Session</th><th>Source Ports</th><th>Destination</th><th>Direction</th><th style="width:120px;">Actions</th></tr>
+        </thead>
+        <tbody>
+            {% for mirror in mirrors %}
+            <tr>
+                <form action="/draft/{{ switch_id }}/mirror/{{ mirror.session_id }}" method="POST">
+                    <input type="hidden" name="session_id" value="{{ mirror.session_id }}">
+                    <td>{{ mirror.session_id }}</td>
+                    <td><input type="text" name="source_ports" value="{{ mirror.source_ports }}" style="width:120px;padding:0.2rem;border:1px solid var(--border);border-radius:4px;"></td>
+                    <td><input type="text" name="destination_port" value="{{ mirror.destination_port }}" style="width:60px;padding:0.2rem;border:1px solid var(--border);border-radius:4px;"></td>
+                    <td>
+                        <select name="direction" style="padding:0.2rem;border:1px solid var(--border);border-radius:4px;">
+                            <option value="both"{% if mirror.direction == "both" %} selected{% endif %}>both</option>
+                            <option value="rx"{% if mirror.direction == "rx" %} selected{% endif %}>rx</option>
+                            <option value="tx"{% if mirror.direction == "tx" %} selected{% endif %}>tx</option>
+                        </select>
+                    </td>
+                    <td class="flex gap-1">
+                        <button type="submit" class="btn" style="padding:0.2rem 0.5rem;">Save</button>
+                        <a href="/draft/{{ switch_id }}/mirror/{{ mirror.session_id }}/remove" class="btn btn-danger" style="padding:0.2rem 0.5rem;">Remove</a>
+                    </td>
+                </form>
+            </tr>
+            {% endfor %}
+            {% if mirrors.is_empty() %}
+            <tr><td colspan="5" class="text-muted" style="text-align:center;">No port mirrors configured</td></tr>
+            {% endif %}
+        </tbody>
+        <tfoot>
+            <tr>
+                <form action="/draft/{{ switch_id }}/mirror/add" method="POST">
+                    <td><input type="text" name="session_id" placeholder="e.g. 1" required style="width:60px;padding:0.2rem;border:1px solid var(--border);border-radius:4px;"></td>
+                    <td><input type="text" name="source_ports" placeholder="e.g. 1,2,3" required style="width:120px;padding:0.2rem;border:1px solid var(--border);border-radius:4px;"></td>
+                    <td><input type="text" name="destination_port" placeholder="e.g. 24" required style="width:60px;padding:0.2rem;border:1px solid var(--border);border-radius:4px;"></td>
+                    <td>
+                        <select name="direction" style="padding:0.2rem;border:1px solid var(--border);border-radius:4px;">
+                            <option value="both">both</option>
+                            <option value="rx">rx</option>
+                            <option value="tx">tx</option>
+                        </select>
+                    </td>
+                    <td><button type="submit" class="btn btn-primary" style="padding:0.2rem 0.5rem;">+ Add</button></td>
+                </form>
+            </tr>
+        </tfoot>
+    </table>
+</div>
+
+<div id="diff-panel" class="mt-1"></div>
+{% endblock %}

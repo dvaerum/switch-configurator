@@ -5,45 +5,90 @@
 {% block content %}
 <div class="flex justify-between items-center mb-1">
     <div>
-        <h2>Edit Ports - {{ hostname }}</h2>
+        <h2>{{ hostname }}</h2>
         <span class="badge badge-warning">Draft Mode</span>
     </div>
     <div class="flex gap-1">
-        <a href="/switch/{{ switch_id }}/edit/vlans" class="btn">Edit VLANs</a>
-        <a hx-post="/preview/{{ switch_id }}" hx-target="#diff-panel" class="btn btn-primary">Preview Changes</a>
+        <a href="/switch/{{ switch_id }}/edit/vlans" class="btn">VLANs</a>
+        <a href="/switch/{{ switch_id }}/edit/ports" class="btn btn-primary">Ports</a>
+        <a href="/switch/{{ switch_id }}/edit/mirrors" class="btn">Mirrors</a>
+        <a href="/switch/{{ switch_id }}/edit/snmp" class="btn">SNMP</a>
+        <span style="border-left:1px solid var(--border);margin:0 0.25rem;"></span>
+        <a hx-post="/preview/{{ switch_id }}" hx-target="#diff-panel" class="btn">Preview Changes</a>
         <a href="/save/{{ switch_id }}" class="btn btn-primary">Save</a>
         <a href="/draft/{{ switch_id }}/discard" class="btn btn-danger">Discard</a>
     </div>
 </div>
 
-<div class="card">
+<div class="card" style="overflow-x:auto;">
     <table>
         <thead>
             <tr>
-                <th>Port</th>
-                <th>Mode</th>
-                <th>VLAN</th>
-                <th>Tagged VLANs</th>
-                <th>Description</th>
-                <th>Enabled</th>
-                <th>PoE</th>
-                <th>Speed</th>
+                <th>Port</th><th>Mode</th><th>VLAN</th><th>Tagged VLANs</th>
+                <th>Description</th><th>Enabled</th><th>PoE</th><th>Speed</th><th style="width:120px;">Actions</th>
             </tr>
         </thead>
         <tbody>
             {% for port in ports %}
             <tr>
-                <td>{{ port.port_id }}</td>
-                <td>{{ port.mode }}</td>
-                <td>{{ port.vlan }}</td>
-                <td>{{ port.allowed_vlans }}</td>
-                <td>{{ port.description }}</td>
-                <td>{% if port.enabled %}Yes{% else %}No{% endif %}</td>
-                <td>{% if port.poe_enabled %}Yes{% else %}-{% endif %}</td>
-                <td>{{ port.speed_duplex }}</td>
+                <form action="/draft/{{ switch_id }}/port/{{ port.port_id }}" method="POST">
+                    <input type="hidden" name="port_id" value="{{ port.port_id }}">
+                    <td>{{ port.port_id }}</td>
+                    <td>
+                        <select name="mode" style="padding:0.2rem;border:1px solid var(--border);border-radius:4px;">
+                            <option value="access"{% if port.mode == "access" %} selected{% endif %}>access</option>
+                            <option value="trunk"{% if port.mode == "trunk" %} selected{% endif %}>trunk</option>
+                        </select>
+                    </td>
+                    <td><input type="number" name="vlan" value="{{ port.vlan }}" min="1" max="4094" style="width:70px;padding:0.2rem;border:1px solid var(--border);border-radius:4px;"></td>
+                    <td><input type="text" name="allowed_vlans" value="{{ port.allowed_vlans }}" placeholder="e.g. 10,20,30" style="width:100px;padding:0.2rem;border:1px solid var(--border);border-radius:4px;"></td>
+                    <td><input type="text" name="description" value="{{ port.description }}" style="width:140px;padding:0.2rem;border:1px solid var(--border);border-radius:4px;"></td>
+                    <td><input type="checkbox" name="enabled" value="on"{% if port.enabled %} checked{% endif %}></td>
+                    <td><input type="checkbox" name="poe_enabled" value="on"{% if port.poe_enabled %} checked{% endif %}></td>
+                    <td>
+                        <select name="speed_duplex" style="padding:0.2rem;border:1px solid var(--border);border-radius:4px;">
+                            <option value="auto"{% if port.speed_duplex == "auto" %} selected{% endif %}>auto</option>
+                            <option value="10-half"{% if port.speed_duplex == "10-half" %} selected{% endif %}>10-half</option>
+                            <option value="10-full"{% if port.speed_duplex == "10-full" %} selected{% endif %}>10-full</option>
+                            <option value="100-half"{% if port.speed_duplex == "100-half" %} selected{% endif %}>100-half</option>
+                            <option value="100-full"{% if port.speed_duplex == "100-full" %} selected{% endif %}>100-full</option>
+                            <option value="1000-full"{% if port.speed_duplex == "1000-full" %} selected{% endif %}>1000-full</option>
+                        </select>
+                    </td>
+                    <td class="flex gap-1">
+                        <button type="submit" class="btn" style="padding:0.2rem 0.5rem;">Save</button>
+                        <a href="/draft/{{ switch_id }}/port/{{ port.port_id }}/remove" class="btn btn-danger" style="padding:0.2rem 0.5rem;">Remove</a>
+                    </td>
+                </form>
             </tr>
             {% endfor %}
         </tbody>
+        <tfoot>
+            <tr>
+                <form action="/draft/{{ switch_id }}/port/add" method="POST">
+                    <td><input type="text" name="port_id" placeholder="e.g. 5" required style="width:60px;padding:0.2rem;border:1px solid var(--border);border-radius:4px;"></td>
+                    <td>
+                        <select name="mode" style="padding:0.2rem;border:1px solid var(--border);border-radius:4px;">
+                            <option value="access">access</option>
+                            <option value="trunk">trunk</option>
+                        </select>
+                    </td>
+                    <td><input type="number" name="vlan" value="1" min="1" max="4094" style="width:70px;padding:0.2rem;border:1px solid var(--border);border-radius:4px;"></td>
+                    <td><input type="text" name="allowed_vlans" placeholder="e.g. 10,20" style="width:100px;padding:0.2rem;border:1px solid var(--border);border-radius:4px;"></td>
+                    <td><input type="text" name="description" placeholder="Description" style="width:140px;padding:0.2rem;border:1px solid var(--border);border-radius:4px;"></td>
+                    <td><input type="checkbox" name="enabled" value="on" checked></td>
+                    <td><input type="checkbox" name="poe_enabled" value="on"></td>
+                    <td>
+                        <select name="speed_duplex" style="padding:0.2rem;border:1px solid var(--border);border-radius:4px;">
+                            <option value="auto">auto</option>
+                            <option value="100-full">100-full</option>
+                            <option value="1000-full">1000-full</option>
+                        </select>
+                    </td>
+                    <td><button type="submit" class="btn btn-primary" style="padding:0.2rem 0.5rem;">+ Add</button></td>
+                </form>
+            </tr>
+        </tfoot>
     </table>
 </div>
 
