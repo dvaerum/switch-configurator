@@ -12,6 +12,7 @@ struct SaveDialogTemplate {
     switch_id: String,
     default_filename: String,
     default_priority: u16,
+    error: Option<String>,
 }
 
 pub async fn save_dialog(
@@ -27,6 +28,7 @@ pub async fn save_dialog(
         switch_id: id.clone(),
         default_filename: format!("{}.yaml", id),
         default_priority: 200,
+        error: None,
     }.into_response()
 }
 
@@ -46,7 +48,6 @@ pub async fn save_overlay(
         None => return Redirect::to(&format!("/switch/{}", id)).into_response(),
     };
 
-    // Build the save request for the backend
     let save_body = serde_json::json!({
         "filename": form.filename,
         "merge_priority": form.priority,
@@ -67,14 +68,28 @@ pub async fn save_overlay(
             if status >= 200 && status < 300 {
                 tracing::info!("Saved overlay for {}: {:?}", id, resp);
                 state.drafts.discard(&id).await;
+                Redirect::to(&format!("/switch/{}", id)).into_response()
             } else {
-                tracing::error!("Failed to save overlay: {} {:?}", status, resp);
+                let error_msg = resp["error"].as_str()
+                    .unwrap_or("Unknown error from backend")
+                    .to_string();
+                tracing::error!("Failed to save overlay: {} {}", status, error_msg);
+                SaveDialogTemplate {
+                    switch_id: id,
+                    default_filename: form.filename,
+                    default_priority: form.priority,
+                    error: Some(error_msg),
+                }.into_response()
             }
         }
         Err(e) => {
             tracing::error!("Failed to save overlay: {}", e);
+            SaveDialogTemplate {
+                switch_id: id,
+                default_filename: form.filename,
+                default_priority: form.priority,
+                error: Some(format!("Connection error: {}", e)),
+            }.into_response()
         }
     }
-
-    Redirect::to(&format!("/switch/{}", id)).into_response()
 }
