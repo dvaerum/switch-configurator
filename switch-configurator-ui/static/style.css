@@ -366,6 +366,60 @@ code {
 }
 
 /* ============================================================
+   Draft mode badge
+   ============================================================ */
+
+.badge-draft {
+    background: #fef3c7;
+    color: #92400e;
+    border: 1px solid #fbbf24;
+}
+
+/* ============================================================
+   Not-applied badge (dashboard)
+   ============================================================ */
+
+.badge-neutral {
+    background: #e2e8f0;
+    color: #475569;
+}
+
+/* ============================================================
+   Edit nav — active section tab
+   ============================================================ */
+
+.edit-nav .btn {
+    border: 1px solid var(--border-strong);
+}
+
+.edit-nav .btn-primary {
+    border-color: var(--primary);
+}
+
+/* ============================================================
+   Preview Changes button — outline style to distinguish
+   ============================================================ */
+
+/* Active toggle button (e.g., Structured/YAML/CLI toggle) */
+.btn.active {
+    background: var(--primary);
+    color: white;
+    border-color: var(--primary);
+    font-weight: 600;
+}
+
+.btn-outline {
+    background: transparent;
+    color: var(--primary);
+    border: 2px solid var(--primary);
+    font-weight: 600;
+}
+
+.btn-outline:hover {
+    background: var(--primary-light);
+}
+
+/* ============================================================
    Responsive
    ============================================================ */
 
