@@ -70,7 +70,6 @@ pub async fn preview(
         false,
     );
 
-    let has_changes = diff.has_changes();
     let mut entries = Vec::new();
 
     // VLANs
@@ -176,7 +175,7 @@ pub async fn preview(
 
     DiffPreviewTemplate {
         switch_id: id,
-        has_changes,
+        has_changes: !entries.is_empty(),
         entries,
     }.into_response()
 }
