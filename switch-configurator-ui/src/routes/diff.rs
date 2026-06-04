@@ -1,6 +1,7 @@
 use askama::Template;
 use axum::extract::{Path, State};
 use axum::response::IntoResponse;
+use switch_configurator::models::*;
 
 use super::AppState;
 
@@ -8,7 +9,7 @@ use super::AppState;
 pub struct DiffEntry {
     pub category: String,
     pub description: String,
-    pub change_type: String, // "add", "remove", "update"
+    pub change_type: String,
 }
 
 #[derive(Template)]
@@ -53,62 +54,125 @@ pub async fn preview(
         }
     };
 
-    // Compute diff by posting to backend preview-diff with a synthetic current state from original
-    let current_state = serde_json::json!({
-        "current_state": {
-            "vlans": draft.original.vlans,
-            "ports": draft.original.ports,
-            "port_mirrors": draft.original.port_mirrors,
-            "snmp": draft.original.snmp,
-            "warnings": []
-        }
-    });
-
-    // First temporarily update the backend's desired config with the draft
-    let _ = state.backend.post(
-        &format!("/switches/{}/desired-config", id),
-        &serde_json::to_value(&draft.edited).unwrap_or_default(),
-    ).await;
-
-    let result = state.backend.post(
-        &format!("/switches/{}/preview-diff", id),
-        &current_state,
-    ).await;
-
-    // Restore original config
-    let _ = state.backend.post(
-        &format!("/switches/{}/desired-config", id),
-        &serde_json::to_value(&draft.original).unwrap_or_default(),
-    ).await;
-
-    let (has_changes, entries) = match result {
-        Ok((_, json)) => {
-            let has_changes = json["has_changes"].as_bool().unwrap_or(false);
-            let mut entries = Vec::new();
-
-            // Parse diff into structured entries
-            if let Some(diff) = json.get("diff") {
-                add_diff_entries(&mut entries, diff, "vlans_to_add", "VLAN", "add");
-                add_diff_entries(&mut entries, diff, "vlans_to_remove", "VLAN", "remove");
-                add_diff_entries(&mut entries, diff, "vlans_to_update", "VLAN", "update");
-                add_diff_entries(&mut entries, diff, "ports_to_configure", "Port", "update");
-                add_diff_entries(&mut entries, diff, "ports_to_reset", "Port", "remove");
-                add_diff_entries(&mut entries, diff, "mirrors_to_add", "Mirror", "add");
-                add_diff_entries(&mut entries, diff, "mirrors_to_remove", "Mirror", "remove");
-                add_diff_entries(&mut entries, diff, "mirrors_to_update", "Mirror", "update");
-            }
-
-            (has_changes, entries)
-        }
-        Err(e) => {
-            tracing::error!("Failed to compute diff: {}", e);
-            (false, vec![DiffEntry {
-                category: "Error".to_string(),
-                description: format!("Failed to compute diff: {}", e),
-                change_type: "error".to_string(),
-            }])
-        }
+    // Compute diff locally: original config as "current state", edited as "desired"
+    let current_state = SwitchState {
+        vlans: draft.original.vlans.clone(),
+        ports: draft.original.ports.clone(),
+        port_mirrors: draft.original.port_mirrors.clone(),
+        snmp: draft.original.snmp.clone(),
+        management_vlan: draft.original.management_vlan,
+        warnings: vec![],
     };
+
+    let diff = switch_configurator::diff::compute_diff(
+        &current_state,
+        &draft.edited,
+        false,
+    );
+
+    let has_changes = diff.has_changes();
+    let mut entries = Vec::new();
+
+    // VLANs
+    for vlan in &diff.vlans_to_add {
+        entries.push(DiffEntry {
+            category: "VLAN".to_string(),
+            description: format!("Add VLAN {} ({})", vlan.id, vlan.name),
+            change_type: "add".to_string(),
+        });
+    }
+    for vlan_id in &diff.vlans_to_remove {
+        entries.push(DiffEntry {
+            category: "VLAN".to_string(),
+            description: format!("Remove VLAN {}", vlan_id),
+            change_type: "remove".to_string(),
+        });
+    }
+    for vlan in &diff.vlans_to_update {
+        entries.push(DiffEntry {
+            category: "VLAN".to_string(),
+            description: format!("Update VLAN {} ({})", vlan.id, vlan.name),
+            change_type: "update".to_string(),
+        });
+    }
+
+    // Ports
+    for port in &diff.ports_to_configure {
+        entries.push(DiffEntry {
+            category: "Port".to_string(),
+            description: format!("Configure port {} (VLAN {}{})",
+                port.port_id, port.vlan,
+                if !port.tagged_vlans.is_empty() {
+                    format!(", tagged: {:?}", port.tagged_vlans)
+                } else { String::new() }),
+            change_type: "update".to_string(),
+        });
+    }
+    for port_id in &diff.ports_to_reset {
+        entries.push(DiffEntry {
+            category: "Port".to_string(),
+            description: format!("Reset port {} to default", port_id),
+            change_type: "remove".to_string(),
+        });
+    }
+
+    // Mirrors
+    for mirror in &diff.mirrors_to_add {
+        entries.push(DiffEntry {
+            category: "Mirror".to_string(),
+            description: format!("Add mirror session {} (src: {:?} → dst: {})",
+                mirror.session_id, mirror.source_ports, mirror.destination_port),
+            change_type: "add".to_string(),
+        });
+    }
+    for session_id in &diff.mirrors_to_remove {
+        entries.push(DiffEntry {
+            category: "Mirror".to_string(),
+            description: format!("Remove mirror session {}", session_id),
+            change_type: "remove".to_string(),
+        });
+    }
+    for mirror in &diff.mirrors_to_update {
+        entries.push(DiffEntry {
+            category: "Mirror".to_string(),
+            description: format!("Update mirror session {}", mirror.session_id),
+            change_type: "update".to_string(),
+        });
+    }
+
+    // SNMP
+    if let Some(snmp_diff) = &diff.snmp_diff {
+        if snmp_diff.has_changes() {
+            for c in &snmp_diff.communities_to_add {
+                entries.push(DiffEntry {
+                    category: "SNMP".to_string(),
+                    description: format!("Add community '{}'", c.name),
+                    change_type: "add".to_string(),
+                });
+            }
+            for name in &snmp_diff.communities_to_remove {
+                entries.push(DiffEntry {
+                    category: "SNMP".to_string(),
+                    description: format!("Remove community '{}'", name),
+                    change_type: "remove".to_string(),
+                });
+            }
+            for trap in &snmp_diff.traps_to_enable {
+                entries.push(DiffEntry {
+                    category: "SNMP".to_string(),
+                    description: format!("Enable trap {:?}", trap),
+                    change_type: "add".to_string(),
+                });
+            }
+            for trap in &snmp_diff.traps_to_disable {
+                entries.push(DiffEntry {
+                    category: "SNMP".to_string(),
+                    description: format!("Disable trap {:?}", trap),
+                    change_type: "remove".to_string(),
+                });
+            }
+        }
+    }
 
     DiffPreviewTemplate {
         switch_id: id,
@@ -135,6 +199,7 @@ pub async fn commands(
         }
     };
 
+    // Use backend preview-diff with the original as current_state
     let current_state = serde_json::json!({
         "current_state": {
             "vlans": draft.original.vlans,
@@ -161,7 +226,10 @@ pub async fn commands(
                 json_str_array(cmds, "reset_commands"),
             )
         }
-        Err(_) => (vec![], vec![], vec![], vec![], vec![]),
+        Err(e) => {
+            tracing::error!("Failed to get command preview: {}", e);
+            (vec![format!("Error: {}", e)], vec![], vec![], vec![], vec![])
+        }
     };
 
     CommandPreviewTemplate {
@@ -197,33 +265,6 @@ pub async fn yaml_diff(
         original_yaml,
         edited_yaml,
     }.into_response()
-}
-
-fn add_diff_entries(entries: &mut Vec<DiffEntry>, diff: &serde_json::Value, field: &str, category: &str, change_type: &str) {
-    if let Some(arr) = diff[field].as_array() {
-        for item in arr {
-            let desc = if let Some(id) = item.as_u64() {
-                format!("{} {}", category, id)
-            } else if let Some(id) = item.as_str() {
-                format!("{} {}", category, id)
-            } else if let Some(name) = item.get("name").and_then(|n| n.as_str()) {
-                let id = item.get("id").and_then(|i| i.as_u64()).map(|i| i.to_string())
-                    .or_else(|| item.get("port_id").and_then(|p| p.as_str()).map(|s| s.to_string()))
-                    .or_else(|| item.get("session_id").and_then(|s| s.as_str()).map(|s| s.to_string()))
-                    .unwrap_or_default();
-                format!("{} {} ({})", category, id, name)
-            } else if let Some(port_id) = item.get("port_id").and_then(|p| p.as_str()) {
-                format!("{} {}", category, port_id)
-            } else {
-                format!("{}", category)
-            };
-            entries.push(DiffEntry {
-                category: category.to_string(),
-                description: desc,
-                change_type: change_type.to_string(),
-            });
-        }
-    }
 }
 
 fn json_str_array(val: &serde_json::Value, field: &str) -> Vec<String> {

@@ -3,7 +3,6 @@
         <thead>
             <tr>
                 <th>Port</th>
-                <th>Mode</th>
                 <th>VLAN</th>
                 <th>Tagged VLANs</th>
                 <th>Description</th>
@@ -16,7 +15,6 @@
             {% for port in switch.ports %}
             <tr>
                 <td>{{ port.port_id }}</td>
-                <td>{{ port.mode_display }}</td>
                 <td>{{ port.vlan }}</td>
                 <td class="text-muted">{{ port.tagged_display }}</td>
                 <td>{{ port.description.as_deref().unwrap_or("-") }}</td>
@@ -26,7 +24,7 @@
             </tr>
             {% endfor %}
             {% if switch.ports.is_empty() %}
-            <tr><td colspan="8" class="text-muted" style="text-align:center;">No ports configured</td></tr>
+            <tr><td colspan="7" class="text-muted" style="text-align:center;">No ports configured</td></tr>
             {% endif %}
         </tbody>
     </table>
