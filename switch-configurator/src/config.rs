@@ -101,6 +101,9 @@ impl AppConfig {
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("Failed to read config file: {:?}", path))?;
 
+        // Check for deprecated field names in raw YAML before parsing
+        check_deprecated_fields(&content, path);
+
         let config: AppConfig = {
             let deserializer = serde_yaml::Deserializer::from_str(&content);
             serde_path_to_error::deserialize(deserializer)
@@ -131,6 +134,9 @@ impl AppConfig {
     pub fn load_with_metadata(path: &Path, source_type: ConfigSourceType) -> Result<ConfigWithMetadata> {
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("Failed to read config file: {:?}", path))?;
+
+        // Check for deprecated field names
+        check_deprecated_fields(&content, path);
 
         // Parse as AppConfigFile to extract merge_priority
         let config_file: AppConfigFile = {
@@ -963,6 +969,32 @@ fn expand_port_ranges(switch: &mut SwitchConfig) -> Result<()> {
 }
 
 /// Validate that all required identity fields are present (for single-file mode)
+/// Check for deprecated field names in raw YAML content and log warnings.
+/// IEEE 802.1Q migration: mode → inferred, allowed_vlans → tagged_vlans
+fn check_deprecated_fields(content: &str, source: &Path) {
+    use tracing::warn;
+
+    if regex::Regex::new(r"(?m)^\s+mode:\s*(access|trunk)")
+        .map(|re| re.is_match(content))
+        .unwrap_or(false)
+    {
+        warn!(
+            "Deprecated field 'mode' found in {:?}. \
+             Port mode is now inferred from tagged_vlans (IEEE 802.1Q). \
+             Remove 'mode:' lines from your config.",
+            source.file_name().unwrap_or_default()
+        );
+    }
+
+    if content.contains("allowed_vlans:") {
+        warn!(
+            "Deprecated field 'allowed_vlans' found in {:?}. \
+             Use 'tagged_vlans' instead (IEEE 802.1Q standard).",
+            source.file_name().unwrap_or_default()
+        );
+    }
+}
+
 fn validate_required_fields(switch: &SwitchConfig) -> Result<()> {
     let missing_fields = get_missing_required_fields(switch);
 
