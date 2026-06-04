@@ -181,7 +181,6 @@ pub async fn remove_vlan(
 #[derive(Debug, Clone)]
 pub struct EditablePort {
     pub port_id: String,
-    pub mode: String,
     pub vlan: u16,
     pub tagged_vlans: String,
     pub description: String,
@@ -219,7 +218,6 @@ pub async fn edit_ports(
 #[derive(Deserialize)]
 pub struct PortForm {
     pub port_id: String,
-    pub mode: String,
     pub vlan: u16,
     #[serde(default)]
     pub tagged_vlans: String,
@@ -622,11 +620,12 @@ fn parse_tagged_vlans(s: &str) -> Vec<u16> {
 }
 
 fn form_to_port(form: &PortForm) -> Port {
+    let tagged = parse_tagged_vlans(&form.tagged_vlans);
     Port {
         port_id: form.port_id.clone(),
-        mode: parse_port_mode(&form.mode),
+        mode: if tagged.is_empty() { PortMode::Access } else { PortMode::Trunk },
         vlan: form.vlan,
-        tagged_vlans: parse_tagged_vlans(&form.tagged_vlans),
+        tagged_vlans: tagged,
         description: if form.description.is_empty() { None } else { Some(form.description.clone()) },
         enabled: form.enabled.is_some(),
         poe_enabled: form.poe_enabled.is_some(),
@@ -651,7 +650,6 @@ fn form_to_mirror(form: &MirrorForm) -> PortMirror {
 fn port_to_editable(p: &Port) -> EditablePort {
     EditablePort {
         port_id: p.port_id.clone(),
-        mode: format!("{:?}", p.mode).to_lowercase(),
         vlan: p.vlan,
         tagged_vlans: p.tagged_vlans.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(","),
         description: p.description.clone().unwrap_or_default(),

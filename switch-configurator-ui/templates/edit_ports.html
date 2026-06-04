@@ -24,7 +24,7 @@
     <table>
         <thead>
             <tr>
-                <th>Port</th><th>Mode</th><th>VLAN</th><th>Tagged VLANs</th>
+                <th>Port</th><th>VLAN</th><th>Tagged VLANs</th>
                 <th>Description</th><th>Enabled</th><th>PoE</th><th>Speed</th><th style="width:120px;">Actions</th>
             </tr>
         </thead>
@@ -34,12 +34,6 @@
                 <form action="/draft/{{ switch_id }}/port/{{ port.port_id }}" method="POST">
                     <input type="hidden" name="port_id" value="{{ port.port_id }}">
                     <td>{{ port.port_id }}</td>
-                    <td>
-                        <select name="mode" style="padding:0.2rem;border:1px solid var(--border);border-radius:4px;">
-                            <option value="access"{% if port.mode == "access" %} selected{% endif %}>access</option>
-                            <option value="trunk"{% if port.mode == "trunk" %} selected{% endif %}>trunk</option>
-                        </select>
-                    </td>
                     <td><input type="number" name="vlan" value="{{ port.vlan }}" min="1" max="4094" style="width:70px;padding:0.2rem;border:1px solid var(--border);border-radius:4px;"></td>
                     <td><input type="text" name="tagged_vlans" value="{{ port.tagged_vlans }}" placeholder="e.g. 10,20,30" style="width:100px;padding:0.2rem;border:1px solid var(--border);border-radius:4px;"></td>
                     <td><input type="text" name="description" value="{{ port.description }}" style="width:140px;padding:0.2rem;border:1px solid var(--border);border-radius:4px;"></td>
@@ -67,12 +61,6 @@
             <tr>
                 <form action="/draft/{{ switch_id }}/port/add" method="POST">
                     <td><input type="text" name="port_id" placeholder="e.g. 5" required style="width:60px;padding:0.2rem;border:1px solid var(--border);border-radius:4px;"></td>
-                    <td>
-                        <select name="mode" style="padding:0.2rem;border:1px solid var(--border);border-radius:4px;">
-                            <option value="access">access</option>
-                            <option value="trunk">trunk</option>
-                        </select>
-                    </td>
                     <td><input type="number" name="vlan" value="1" min="1" max="4094" style="width:70px;padding:0.2rem;border:1px solid var(--border);border-radius:4px;"></td>
                     <td><input type="text" name="tagged_vlans" placeholder="e.g. 10,20" style="width:100px;padding:0.2rem;border:1px solid var(--border);border-radius:4px;"></td>
                     <td><input type="text" name="description" placeholder="Description" style="width:140px;padding:0.2rem;border:1px solid var(--border);border-radius:4px;"></td>

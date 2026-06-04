@@ -14,7 +14,6 @@ pub struct VlanView {
 #[derive(Debug, Clone)]
 pub struct PortView {
     pub port_id: String,
-    pub mode_display: String,
     pub vlan: u16,
     pub tagged_display: String,
     pub description: Option<String>,
@@ -177,7 +176,6 @@ fn parse_switch_view(id: &str, json: &serde_json::Value) -> SwitchView {
             arr.iter()
                 .map(|p| PortView {
                     port_id: p["port_id"].as_str().unwrap_or("").to_string(),
-                    mode_display: p["mode"].as_str().unwrap_or("access").to_string(),
                     vlan: p["vlan"].as_u64().unwrap_or(1) as u16,
                     tagged_display: p["tagged_vlans"]
                         .as_array()

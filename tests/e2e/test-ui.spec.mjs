@@ -112,14 +112,13 @@ test.describe('Ports Tab', () => {
   test('shows port table with all columns', async ({ page }) => {
     await page.goto(`${UI_URL}/switch/demo-sw-01/ports`);
     await expect(page.locator('th')).toContainText(['Port']);
-    await expect(page.locator('th')).toContainText(['Mode']);
     await expect(page.locator('th')).toContainText(['VLAN']);
+    await expect(page.locator('th')).toContainText(['Tagged VLANs']);
     await expect(page.locator('th')).toContainText(['Description']);
     await expect(page.locator('th')).toContainText(['Enabled']);
     await expect(page.locator('body')).toContainText('Uplink');
     await expect(page.locator('body')).toContainText('User ports');
     await expect(page.locator('body')).toContainText('Trunk');
-    await expect(page.locator('body')).toContainText('trunk');
   });
 });
 
@@ -270,8 +269,7 @@ test.describe('Edit Ports CRUD', () => {
     await page.locator('a:has-text("Ports")').click();
     await expect(page).toHaveURL(/\/edit\/ports/);
 
-    // Should have mode select, vlan input, description input, checkboxes, speed select
-    await expect(page.locator('select[name="mode"]').first()).toBeVisible();
+    // Should have vlan input, tagged_vlans, description input, checkboxes, speed select (no mode dropdown)
     await expect(page.locator('input[name="vlan"]').first()).toBeVisible();
     await expect(page.locator('input[name="description"]').first()).toBeVisible();
     await expect(page.locator('input[name="enabled"]').first()).toBeVisible();
