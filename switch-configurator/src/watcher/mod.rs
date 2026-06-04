@@ -66,8 +66,16 @@ pub async fn start(
             };
 
             match reload_result {
-                Ok(new_config) => {
+                Ok((new_config, validation_failures)) => {
                     info!("Configuration reloaded successfully");
+
+                    // Store validation failures for dashboard
+                    if !validation_failures.is_empty() {
+                        for f in &validation_failures {
+                            warn!("Switch '{}' skipped: {}", f.switch_id, f.error);
+                        }
+                    }
+                    *store.validation_failures.write().await = validation_failures;
 
                     // Clear any previous validation issues on success
                     store.status.clear_validation_issues().await;

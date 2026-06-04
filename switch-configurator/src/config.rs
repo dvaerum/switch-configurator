@@ -96,11 +96,12 @@ impl Default for Settings {
 
 impl AppConfig {
     /// Load configuration from a YAML file (legacy single-file mode)
-    pub fn load(path: &Path) -> Result<Self> {
+    /// Returns the config with only valid switches, plus any validation failures.
+    pub fn load(path: &Path) -> Result<(Self, Vec<SwitchValidationFailure>)> {
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("Failed to read config file: {:?}", path))?;
 
-        let mut config: AppConfig = {
+        let config: AppConfig = {
             let deserializer = serde_yaml::Deserializer::from_str(&content);
             serde_path_to_error::deserialize(deserializer)
                 .map_err(|err| {
@@ -118,12 +119,9 @@ impl AppConfig {
                 })?
         };
 
-        // Validate all switch configurations using shared validation function
-        for switch in &mut config.switches {
-            validate_switch_config(switch)?;
-        }
+        let result = validate_all_switches(config.switches);
 
-        Ok(config)
+        Ok((AppConfig { switches: result.valid }, result.failures))
     }
 
     /// Load configuration with metadata from a YAML file
@@ -195,7 +193,7 @@ impl AppConfig {
     ///
     /// # Returns
     /// Merged configuration with all sources combined according to priority
-    pub fn load_multi(main_config_path: &Path, folder_paths: &[PathBuf]) -> Result<Self> {
+    pub fn load_multi(main_config_path: &Path, folder_paths: &[PathBuf]) -> Result<(Self, Vec<SwitchValidationFailure>)> {
         use tracing::info;
 
         let mut configs: Vec<ConfigWithMetadata> = Vec::new();
@@ -244,6 +242,50 @@ impl AppConfig {
     }
 }
 
+/// A switch that failed validation during config load
+#[derive(Debug, Clone, Serialize)]
+pub struct SwitchValidationFailure {
+    pub switch_id: String,
+    pub hostname: Option<String>,
+    pub error: String,
+    pub config_sources: Vec<String>,
+}
+
+/// Result of validating all switches — valid configs + failures
+pub struct ValidationResult {
+    pub valid: Vec<crate::models::SwitchConfig>,
+    pub failures: Vec<SwitchValidationFailure>,
+}
+
+/// Validate all switches, returning valid ones and collecting failures.
+/// Invalid switches are skipped (not included in valid list).
+pub fn validate_all_switches(switches: Vec<crate::models::SwitchConfig>) -> ValidationResult {
+    let mut valid = Vec::new();
+    let mut failures = Vec::new();
+
+    for mut switch in switches {
+        match validate_switch_config(&mut switch) {
+            Ok(()) => valid.push(switch),
+            Err(e) => {
+                tracing::warn!(
+                    "Switch '{}' ({}) failed validation and will be skipped: {}",
+                    switch.id,
+                    switch.hostname.as_deref().unwrap_or("unknown"),
+                    e
+                );
+                failures.push(SwitchValidationFailure {
+                    switch_id: switch.id.clone(),
+                    hostname: switch.hostname.clone(),
+                    error: e.to_string(),
+                    config_sources: vec![],
+                });
+            }
+        }
+    }
+
+    ValidationResult { valid, failures }
+}
+
 /// Thread-safe configuration store
 /// SSE event types for real-time status updates
 #[derive(Debug, Clone, Serialize)]
@@ -264,6 +306,7 @@ pub struct ConfigStore {
     pub status: crate::status::StatusTracker,
     pub api_port: u16,
     pub events: Arc<tokio::sync::broadcast::Sender<SseEvent>>,
+    pub validation_failures: Arc<RwLock<Vec<SwitchValidationFailure>>>,
 }
 
 impl ConfigStore {
@@ -275,6 +318,7 @@ impl ConfigStore {
             status,
             api_port,
             events: Arc::new(tx),
+            validation_failures: Arc::new(RwLock::new(Vec::new())),
         }
     }
 
@@ -393,7 +437,7 @@ pub struct MergeConflict {
 /// # Conflict Detection:
 /// - Identity fields (hostname, management_ip, model) must match across all configs for same switch
 /// - Multiple definitions of same component with same priority = conflict
-fn merge_configs(configs: Vec<ConfigWithMetadata>) -> Result<AppConfig> {
+fn merge_configs(configs: Vec<ConfigWithMetadata>) -> Result<(AppConfig, Vec<SwitchValidationFailure>)> {
     use std::collections::{HashMap, BTreeMap};
     use tracing::{info, warn};
 
@@ -487,16 +531,17 @@ fn merge_configs(configs: Vec<ConfigWithMetadata>) -> Result<AppConfig> {
         return Err(anyhow!(error_msg));
     }
 
-    // Post-merge validation: VLAN references and required fields
-    // This allows splitting VLANs and ports into separate files while ensuring final config is valid
-    for switch in &mut merged_switches {
-        // Validate that all required identity fields are present after merge
-        // Use single-line error message for logging (detailed version available via API)
-        let missing_fields = get_missing_required_fields(switch);
+    // Post-merge validation: validate each switch individually, skip invalid ones
+    let mut valid_switches = Vec::new();
+    let mut failures = Vec::new();
+
+    for mut switch in merged_switches {
+        // Check required fields first
+        let missing_fields = get_missing_required_fields(&switch);
         if !missing_fields.is_empty() {
             let tracker = merge_trackers.get(&switch.id);
             let error = if let Some(tracker) = tracker {
-                tracker.to_validation_error(missing_fields)
+                tracker.to_validation_error(missing_fields.clone())
             } else {
                 errors::SwitchValidationError {
                     switch_id: switch.id.clone(),
@@ -504,21 +549,55 @@ fn merge_configs(configs: Vec<ConfigWithMetadata>) -> Result<AppConfig> {
                     contributing_sources: vec![],
                 }
             };
-            return Err(anyhow!(error.format_log_message()));
+            let sources: Vec<String> = merge_trackers.get(&switch.id)
+                .map(|t| t.source_files().into_iter().map(|p| p.to_string_lossy().to_string()).collect())
+                .unwrap_or_default();
+            tracing::warn!("Switch '{}' failed post-merge validation: {}", switch.id, error.format_log_message());
+            failures.push(SwitchValidationFailure {
+                switch_id: switch.id.clone(),
+                hostname: switch.hostname.clone(),
+                error: error.format_log_message(),
+                config_sources: sources,
+            });
+            continue;
         }
 
-        // Validate VLAN references (ports must reference defined VLANs)
-        validate_vlan_references(switch)
-            .with_context(|| format!("Post-merge VLAN reference validation failed for switch '{}'", switch.hostname.as_ref().unwrap_or(&switch.id)))?;
+        // Validate VLAN references and other checks
+        let vlan_result = validate_vlan_references(&mut switch);
+        let has_vlans_result = validate_has_vlans(&switch);
 
-        // Validate that switch has at least one VLAN defined
-        validate_has_vlans(switch)
-            .with_context(|| format!("Post-merge validation failed for switch '{}'", switch.hostname.as_ref().unwrap_or(&switch.id)))?;
+        if let Err(e) = vlan_result {
+            let sources: Vec<String> = merge_trackers.get(&switch.id)
+                .map(|t| t.source_files().into_iter().map(|p| p.to_string_lossy().to_string()).collect())
+                .unwrap_or_default();
+            tracing::warn!("Switch '{}' failed VLAN validation: {}", switch.id, e);
+            failures.push(SwitchValidationFailure {
+                switch_id: switch.id.clone(),
+                hostname: switch.hostname.clone(),
+                error: e.to_string(),
+                config_sources: sources,
+            });
+            continue;
+        }
+
+        if let Err(e) = has_vlans_result {
+            let sources: Vec<String> = merge_trackers.get(&switch.id)
+                .map(|t| t.source_files().into_iter().map(|p| p.to_string_lossy().to_string()).collect())
+                .unwrap_or_default();
+            tracing::warn!("Switch '{}' has no VLANs: {}", switch.id, e);
+            failures.push(SwitchValidationFailure {
+                switch_id: switch.id.clone(),
+                hostname: switch.hostname.clone(),
+                error: e.to_string(),
+                config_sources: sources,
+            });
+            continue;
+        }
+
+        valid_switches.push(switch);
     }
 
-    Ok(AppConfig {
-        switches: merged_switches,
-    })
+    Ok((AppConfig { switches: valid_switches }, failures))
 }
 
 /// Get list of missing required fields for a switch
@@ -2110,7 +2189,7 @@ settings:
         file.flush().unwrap();
 
         // Load the configuration - this should trigger validation and filtering
-        let config = AppConfig::load(file.path()).unwrap();
+        let (config, _failures) = AppConfig::load(file.path()).unwrap();
 
         // Verify the switch loaded
         assert_eq!(config.switches.len(), 1);
@@ -2165,11 +2244,11 @@ settings:
         temp_file.write_all(yaml.as_bytes()).unwrap();
         temp_file.flush().unwrap();
 
-        // Should fail to load because of validation error
+        // Should load but with validation failures (graceful mode)
         let result = AppConfig::load(temp_file.path());
-        assert!(result.is_err());
-        let error_msg = result.unwrap_err().to_string();
-        assert!(error_msg.contains("validation") || error_msg.contains("VLAN"));
+        assert!(result.is_ok(), "Load should succeed in graceful mode");
+        let (_config, failures) = result.unwrap();
+        assert!(!failures.is_empty(), "Should have validation failures");
     }
 
     #[test]
@@ -2216,7 +2295,8 @@ settings:
         // Should load successfully
         let result = AppConfig::load(temp_file.path());
         assert!(result.is_ok());
-        let config = result.unwrap();
+        let (config, failures) = result.unwrap();
+        assert!(failures.is_empty(), "Valid config should have no failures");
         assert_eq!(config.switches.len(), 1);
         assert_eq!(config.switches[0].hostname, Some("test-switch".to_string()));
         assert_eq!(config.switches[0].vlans.len(), 2);
@@ -2855,5 +2935,147 @@ switches:
 
         let result = validate_vlan_references(&mut switch);
         assert!(result.is_ok(), "Mirror dest port NOT in ports list should be accepted: {:?}", result.err());
+    }
+
+    // ============================================================================
+    // Graceful per-switch validation tests
+    // ============================================================================
+
+    #[test]
+    fn test_validate_all_switches_skips_invalid() {
+        use crate::models::*;
+
+        let valid_switch = SwitchConfig {
+            id: "valid-sw".to_string(),
+            hostname: Some("valid-switch".to_string()),
+            model: Some(SwitchModel::Aruba2930F),
+            management_ip: Some("192.168.1.1".to_string()),
+            credentials: Some(Credentials {
+                username: "admin".to_string(),
+                password: Some("pass".to_string()),
+                ssh_key_path: None,
+                port: 22,
+                connection_type: ConnectionType::Ssh,
+                serial_device: None,
+                baud_rate: 9600,
+                jump_hosts: None,
+                enable_secret: None,
+            }),
+            vlans: vec![Vlan { id: 10, name: "test".to_string(), description: None, ip_config: VlanIpConfig::None }],
+            ports: vec![Port {
+                port_id: "1".to_string(), mode: PortMode::Access, vlan: 10,
+                allowed_vlans: vec![], description: None, enabled: true,
+                poe_enabled: false, mac_notify: false, speed_duplex: SpeedDuplex::Auto,
+            }],
+            port_mirrors: vec![],
+            snmp: None,
+            validation: None,
+            settings: Settings::default(),
+            vendor_specific: std::collections::HashMap::new(),
+            management_vlan: None,
+        };
+
+        // Invalid: port references non-existent VLAN 999
+        let invalid_switch = SwitchConfig {
+            id: "invalid-sw".to_string(),
+            hostname: Some("invalid-switch".to_string()),
+            model: Some(SwitchModel::Aruba2930F),
+            management_ip: Some("192.168.1.2".to_string()),
+            credentials: Some(Credentials {
+                username: "admin".to_string(),
+                password: Some("pass".to_string()),
+                ssh_key_path: None,
+                port: 22,
+                connection_type: ConnectionType::Ssh,
+                serial_device: None,
+                baud_rate: 9600,
+                jump_hosts: None,
+                enable_secret: None,
+            }),
+            vlans: vec![Vlan { id: 10, name: "test".to_string(), description: None, ip_config: VlanIpConfig::None }],
+            ports: vec![Port {
+                port_id: "1".to_string(), mode: PortMode::Access, vlan: 999, // References non-existent VLAN
+                allowed_vlans: vec![], description: None, enabled: true,
+                poe_enabled: false, mac_notify: false, speed_duplex: SpeedDuplex::Auto,
+            }],
+            port_mirrors: vec![],
+            snmp: None,
+            validation: None,
+            settings: Settings::default(),
+            vendor_specific: std::collections::HashMap::new(),
+            management_vlan: None,
+        };
+
+        let result = validate_all_switches(vec![valid_switch, invalid_switch]);
+
+        assert_eq!(result.valid.len(), 1, "Only valid switch should be in result");
+        assert_eq!(result.valid[0].id, "valid-sw");
+        assert_eq!(result.failures.len(), 1, "Invalid switch should be in failures");
+        assert_eq!(result.failures[0].switch_id, "invalid-sw");
+        assert!(!result.failures[0].error.is_empty(), "Failure should have error message");
+    }
+
+    #[test]
+    fn test_validate_all_switches_all_valid() {
+        use crate::models::*;
+
+        let switch = SwitchConfig {
+            id: "sw-01".to_string(),
+            hostname: Some("switch-1".to_string()),
+            model: Some(SwitchModel::Aruba2930F),
+            management_ip: Some("192.168.1.1".to_string()),
+            credentials: Some(Credentials {
+                username: "admin".to_string(),
+                password: Some("pass".to_string()),
+                ssh_key_path: None,
+                port: 22,
+                connection_type: ConnectionType::Ssh,
+                serial_device: None,
+                baud_rate: 9600,
+                jump_hosts: None,
+                enable_secret: None,
+            }),
+            vlans: vec![Vlan { id: 10, name: "test".to_string(), description: None, ip_config: VlanIpConfig::None }],
+            ports: vec![],
+            port_mirrors: vec![],
+            snmp: None,
+            validation: None,
+            settings: Settings::default(),
+            vendor_specific: std::collections::HashMap::new(),
+            management_vlan: None,
+        };
+
+        let result = validate_all_switches(vec![switch]);
+
+        assert_eq!(result.valid.len(), 1);
+        assert_eq!(result.failures.len(), 0);
+    }
+
+    #[test]
+    fn test_validate_all_switches_all_invalid() {
+        use crate::models::*;
+
+        // Missing hostname, model, management_ip, credentials
+        let bad_switch = SwitchConfig {
+            id: "bad-sw".to_string(),
+            hostname: None,
+            model: None,
+            management_ip: None,
+            credentials: None,
+            vlans: vec![],
+            ports: vec![],
+            port_mirrors: vec![],
+            snmp: None,
+            validation: None,
+            settings: Settings::default(),
+            vendor_specific: std::collections::HashMap::new(),
+            management_vlan: None,
+        };
+
+        let result = validate_all_switches(vec![bad_switch]);
+
+        assert_eq!(result.valid.len(), 0);
+        assert_eq!(result.failures.len(), 1);
+        assert_eq!(result.failures[0].switch_id, "bad-sw");
     }
 }

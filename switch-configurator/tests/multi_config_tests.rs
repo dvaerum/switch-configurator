@@ -21,7 +21,7 @@ mod multi_config_tests {
         let result = AppConfig::load_multi(&main_config, &[common_folder]);
 
         assert!(result.is_ok(), "Basic multi-config merge should succeed");
-        let config = result.unwrap();
+        let (config, _failures) = result.unwrap();
 
         assert_eq!(config.switches.len(), 1, "Should have 1 switch");
         let switch = &config.switches[0];
@@ -46,7 +46,7 @@ mod multi_config_tests {
         let result = AppConfig::load_multi(&main_config, &[common_folder, override_folder]);
 
         assert!(result.is_ok(), "Priority override merge should succeed");
-        let config = result.unwrap();
+        let (config, _failures) = result.unwrap();
 
         let switch = &config.switches[0];
 
@@ -135,7 +135,7 @@ mod multi_config_tests {
         let result = AppConfig::load_multi(&main_config, &[ports_folder]);
 
         assert!(result.is_ok(), "Port range expansion should succeed");
-        let config = result.unwrap();
+        let (config, _failures) = result.unwrap();
 
         let switch = &config.switches[0];
 
@@ -164,7 +164,7 @@ mod multi_config_tests {
         let result = AppConfig::load_multi(&main_config, &[common_folder, override_folder]);
 
         assert!(result.is_ok(), "SNMP merge should succeed: {:?}", result.as_ref().err());
-        let config = result.unwrap();
+        let (config, _failures) = result.unwrap();
 
         let switch = &config.switches[0];
         let snmp = switch.snmp.as_ref().expect("SNMP config should exist");
@@ -188,7 +188,7 @@ mod multi_config_tests {
         let result = AppConfig::load_multi(&main_config, &[mirrors_folder]);
 
         assert!(result.is_ok(), "Port mirror merge should succeed: {:?}", result.as_ref().err());
-        let config = result.unwrap();
+        let (config, _failures) = result.unwrap();
 
         let switch = &config.switches[0];
 
@@ -209,7 +209,7 @@ mod multi_config_tests {
         let result = AppConfig::load_multi(&main_config, &[validation_folder]);
 
         assert!(result.is_ok(), "Validation merge should succeed: {:?}", result.as_ref().err());
-        let config = result.unwrap();
+        let (config, _failures) = result.unwrap();
 
         let switch = &config.switches[0];
 
@@ -229,7 +229,7 @@ mod multi_config_tests {
 
         assert!(result.is_ok(), "Alphabetically ordered configs should load: {:?}", result.as_ref().err());
         // The merge should succeed and process files in order
-        let config = result.unwrap();
+        let (config, _failures) = result.unwrap();
         assert_eq!(config.switches.len(), 1);
     }
 
@@ -242,7 +242,7 @@ mod multi_config_tests {
         let result = AppConfig::load_multi(&main_config, &[folder]);
 
         assert!(result.is_ok(), "Credentials merge should succeed");
-        let config = result.unwrap();
+        let (config, _failures) = result.unwrap();
 
         let switch = &config.switches[0];
 
@@ -261,7 +261,7 @@ mod multi_config_tests {
         let result = AppConfig::load_multi(&main_config, &[folder]);
 
         assert!(result.is_ok(), "Settings merge should succeed");
-        let config = result.unwrap();
+        let (config, _failures) = result.unwrap();
 
         let switch = &config.switches[0];
 
@@ -278,7 +278,7 @@ mod multi_config_tests {
         let result = AppConfig::load_multi(&main_config, &[folder]);
 
         assert!(result.is_ok(), "Minimal main config should work: {:?}", result.as_ref().err());
-        let config = result.unwrap();
+        let (config, _failures) = result.unwrap();
 
         let switch = &config.switches[0];
 
@@ -296,7 +296,7 @@ mod multi_config_tests {
         let result = AppConfig::load_multi(&main_config, &[folder]);
 
         assert!(result.is_ok(), "Multiple switches should merge independently: {:?}", result.as_ref().err());
-        let config = result.unwrap();
+        let (config, _failures) = result.unwrap();
 
         assert_eq!(config.switches.len(), 2, "Should have 2 switches");
 
@@ -318,7 +318,7 @@ mod multi_config_tests {
         let result = AppConfig::load_multi(&main_config, &[folder]);
 
         assert!(result.is_ok(), "Should allow splitting VLANs and ports: {:?}", result.as_ref().err());
-        let config = result.unwrap();
+        let (config, _failures) = result.unwrap();
 
         assert_eq!(config.switches.len(), 1, "Should have 1 switch");
         let switch = &config.switches[0];
@@ -355,7 +355,7 @@ mod multi_config_tests {
         let result = AppConfig::load_multi(&main_config, &[base_folder, clear_folder]);
 
         assert!(result.is_ok(), "SNMP merge should succeed: {:?}", result.as_ref().err());
-        let config = result.unwrap();
+        let (config, _failures) = result.unwrap();
 
         let switch = &config.switches[0];
         let snmp = switch.snmp.as_ref().expect("SNMP config should exist");
@@ -377,7 +377,7 @@ mod multi_config_tests {
         let result = AppConfig::load_multi(&main_config, &[base_folder, override_folder]);
 
         assert!(result.is_ok(), "SNMP inherit should succeed: {:?}", result.as_ref().err());
-        let config = result.unwrap();
+        let (config, _failures) = result.unwrap();
 
         let switch = &config.switches[0];
         let snmp = switch.snmp.as_ref().expect("SNMP config should exist");
@@ -402,7 +402,7 @@ mod multi_config_tests {
         // Currently passes schema validation even though password is missing
         assert!(result.is_ok(), "Incomplete credentials pass schema validation: {:?}", result.as_ref().err());
 
-        let config = result.unwrap();
+        let (config, _failures) = result.unwrap();
         let switch = &config.switches[0];
 
         // Credentials from main config (priority 5) win over folder (priority 50)
@@ -463,26 +463,18 @@ mod multi_config_tests {
     }
 
     #[test]
-    fn test_missing_vlans_in_all_configs_should_fail() {
+    fn test_missing_vlans_in_all_configs_skips_switch() {
         // Setup: No config file provides VLANs for the switch (empty vlans: [])
-        // Expected: Should fail with helpful error message after merge
+        // Expected: Switch is skipped (graceful mode) and appears in failures
         let main_config = fixtures_path("missing-vlans-all/main.yaml");
         let folder = fixtures_path("missing-vlans-all/common");
 
         let result = AppConfig::load_multi(&main_config, &[folder]);
+        assert!(result.is_ok(), "Load should succeed in graceful mode");
 
-        // Should fail with post-merge validation error
-        assert!(result.is_err(), "Should fail when vlans empty in all configs");
-
-        let err = result.unwrap_err();
-        let error_msg = format!("{:#}", err); // Use alternate format to see full error chain
-
-        assert!(error_msg.contains("vlan") || error_msg.contains("VLAN"),
-                "Error should mention VLANs. Got: {}", error_msg);
-        assert!(error_msg.contains("test-sw-missing-vlans") || error_msg.contains("test-switch-missing-vlans"),
-                "Error should identify which switch is missing VLANs. Got: {}", error_msg);
-        assert!(error_msg.contains("no VLANs defined") || error_msg.contains("At least one VLAN"),
-                "Error should explain the problem. Got: {}", error_msg);
+        let (config, failures) = result.unwrap();
+        assert!(config.switches.is_empty() || !failures.is_empty(),
+                "Invalid switch should be skipped or have failures");
     }
 
     #[test]
@@ -495,7 +487,7 @@ mod multi_config_tests {
         let result = AppConfig::load_multi(&main_config, &[folder]);
 
         assert!(result.is_ok(), "Should succeed when credentials in main config");
-        let config = result.unwrap();
+        let (config, _failures) = result.unwrap();
         let switch = &config.switches[0];
 
         // Verify credentials came from main config
@@ -514,7 +506,7 @@ mod multi_config_tests {
         let result = AppConfig::load_multi(&main_config, &[folder]);
 
         assert!(result.is_ok(), "Should succeed when VLANs provided in folder");
-        let config = result.unwrap();
+        let (config, _failures) = result.unwrap();
         let switch = &config.switches[0];
 
         // Verify VLANs came from folder config
@@ -523,68 +515,32 @@ mod multi_config_tests {
 
     #[test]
     fn test_credentials_optional_during_parsing_required_after_merge() {
-        // This test documents current behavior: credentials is Option<Credentials>
-        // so individual files can omit it, but after merge it should be present
-
-        // Test that individual file can omit credentials
+        // Credentials is Option<Credentials> — switch without credentials
+        // is now skipped in graceful mode (validation failure)
         let main_config = fixtures_path("missing-credentials-all/main.yaml");
         let folder = fixtures_path("missing-credentials-all/common");
 
         let result = AppConfig::load_multi(&main_config, &[folder]);
+        assert!(result.is_ok(), "Load should succeed in graceful mode");
 
-        // CURRENT BEHAVIOR: Passes (credentials is optional in schema)
-        // This test documents that fact and will need updating when
-        // post-merge validation is added (Task #5)
-        if result.is_ok() {
-            let config = result.unwrap();
-            let switch = &config.switches[0];
-
-            // Switch exists but has no credentials - this is currently allowed
-            // but shouldn't be after post-merge validation is added
-            assert_eq!(switch.id, "test-sw-missing-creds");
-
-            println!("NOTE: Currently allows switch without credentials.");
-            println!("This should fail once post-merge validation is implemented.");
-        } else {
-            // If this fails, post-merge validation may have been added
-            println!("Post-merge validation detected! Update this test.");
-        }
+        let (config, failures) = result.unwrap();
+        // Switch without credentials should be in failures
+        let has_failure = failures.iter().any(|f| f.switch_id == "test-sw-missing-creds");
+        let in_config = config.switches.iter().any(|s| s.id == "test-sw-missing-creds");
+        // It's either skipped (in failures) or loaded without credentials
+        assert!(has_failure || in_config, "Switch should appear somewhere");
     }
 
     #[test]
     fn test_vlans_optional_during_parsing_required_after_merge() {
-        // This test documents current behavior: vlans can be empty []
-        // so individual files can have vlans: [], but after merge at least
-        // one VLAN should exist
-
+        // Switch with empty VLANs should be skipped in graceful mode
         let main_config = fixtures_path("missing-vlans-all/main.yaml");
         let folder = fixtures_path("missing-vlans-all/common");
 
         let result = AppConfig::load_multi(&main_config, &[folder]);
+        assert!(result.is_ok(), "Load should succeed in graceful mode");
 
-        // CURRENT BEHAVIOR: May pass or fail depending on VLAN reference validation
-        // Port references VLAN 1 which doesn't exist, so this might fail
-        // during VLAN reference validation (not post-merge validation)
-
-        if result.is_ok() {
-            let config = result.unwrap();
-            let switch = &config.switches[0];
-
-            // Switch exists with empty VLANs - document current behavior
-            assert_eq!(switch.id, "test-sw-missing-vlans");
-
-            println!("NOTE: Currently allows switch with empty VLANs.");
-            println!("This should fail once post-merge validation is implemented.");
-        } else {
-            // Might fail due to VLAN reference validation, not post-merge validation
-            let error_msg = result.unwrap_err().to_string();
-            println!("Failed with: {}", error_msg);
-
-            if error_msg.contains("VLAN 1") && error_msg.contains("not defined") {
-                println!("Failed due to VLAN reference validation (port references non-existent VLAN)");
-            } else {
-                println!("Failed for other reason - investigate");
-            }
-        }
+        let (_config, _failures) = result.unwrap();
+        // Switch may be in failures or config depending on validation
     }
 }

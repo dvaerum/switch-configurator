@@ -739,8 +739,8 @@ pub async fn reload_config(State(store): State<ConfigStore>) -> impl IntoRespons
         AppConfig::load_multi(&config_file, &config_folders)
     };
 
-    let new_config = match reload_result {
-        Ok(config) => config,
+    let (new_config, validation_failures) = match reload_result {
+        Ok(result) => result,
         Err(e) => {
             error!("Failed to reload configuration from files: {}", e);
             store.status.record_error(
@@ -758,6 +758,14 @@ pub async fn reload_config(State(store): State<ConfigStore>) -> impl IntoRespons
                 .into_response();
         }
     };
+
+    // Store validation failures
+    if !validation_failures.is_empty() {
+        for f in &validation_failures {
+            warn!("Switch '{}' skipped: {}", f.switch_id, f.error);
+        }
+    }
+    *store.validation_failures.write().await = validation_failures;
 
     info!("Reloaded configuration with {} switches", new_config.switches.len());
 
@@ -880,8 +888,8 @@ pub async fn reload_switch_config(
         AppConfig::load_multi(&config_file, &config_folders)
     };
 
-    let new_config = match reload_result {
-        Ok(config) => config,
+    let (new_config, validation_failures) = match reload_result {
+        Ok(result) => result,
         Err(e) => {
             error!("Failed to reload configuration: {}", e);
             return (
@@ -893,6 +901,9 @@ pub async fn reload_switch_config(
                 .into_response();
         }
     };
+
+    // Update validation failures
+    *store.validation_failures.write().await = validation_failures;
 
     // Find the specific switch in the new config
     let switch_config = match new_config.switches.iter().find(|s| s.id == id) {
@@ -954,7 +965,15 @@ pub async fn reload_switch_config(
 /// Get detailed service status
 pub async fn status(State(store): State<ConfigStore>) -> impl IntoResponse {
     let service_status = store.status.get_status(store.api_port).await;
-    Json(service_status)
+    let validation_failures = store.validation_failures.read().await;
+
+    // Merge validation failures into the response
+    let mut response = serde_json::to_value(&service_status).unwrap_or_default();
+    if !validation_failures.is_empty() {
+        response["validation_failures"] = serde_json::to_value(&*validation_failures).unwrap_or_default();
+    }
+
+    Json(response)
 }
 
 /// Set (create or overwrite) switch configuration in memory

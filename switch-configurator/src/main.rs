@@ -68,6 +68,10 @@ struct Args {
     /// Unix socket path for the API (in addition to TCP)
     #[arg(long)]
     socket: Option<PathBuf>,
+
+    /// Strict deployment: fail if any switch config has validation errors
+    #[arg(long, default_value = "false")]
+    strict_deployment: bool,
 }
 
 #[tokio::main]
@@ -87,14 +91,26 @@ async fn main() -> Result<()> {
     }
 
     // Load initial configuration (single or multi-config mode)
-    let app_config = if args.config_folder.is_empty() {
-        // Single-file mode (legacy)
+    let (app_config, validation_failures) = if args.config_folder.is_empty() {
         config::AppConfig::load(&args.config_file)?
     } else {
-        // Multi-config mode with merging
         config::AppConfig::load_multi(&args.config_file, &args.config_folder)?
     };
-    info!("Loaded configuration for {} switches", app_config.switches.len());
+
+    if !validation_failures.is_empty() {
+        for f in &validation_failures {
+            warn!("Switch '{}' ({}) skipped due to validation failure: {}",
+                f.switch_id, f.hostname.as_deref().unwrap_or("unknown"), f.error);
+        }
+        if args.strict_deployment {
+            anyhow::bail!(
+                "Strict deployment: {} switch(es) failed validation. Fix all configs or disable strict mode.",
+                validation_failures.len()
+            );
+        }
+    }
+    info!("Loaded configuration for {} switches ({} skipped due to validation failures)",
+        app_config.switches.len(), validation_failures.len());
 
     // Handle debug output flags
     if args.show_merged_config {
@@ -174,6 +190,11 @@ async fn main() -> Result<()> {
     // Service mode: start API and file watcher
     // Create shared ConfigStore for both API and watcher
     let store = config::ConfigStore::new(app_config.clone(), args.port);
+
+    // Store validation failures for dashboard display
+    if !validation_failures.is_empty() {
+        *store.validation_failures.write().await = validation_failures;
+    }
 
     // Initialize switch status tracking
     store.status.initialize_switches(&app_config.switches).await;
