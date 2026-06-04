@@ -6,7 +6,7 @@
 <div class="flex justify-between items-center mb-1">
     <div>
         <h2>{{ hostname }}</h2>
-        <span class="badge badge-warning">Draft Mode</span>
+        <span class="badge badge-draft">Draft Mode</span>
     </div>
     <div class="flex gap-1">
         <a href="/switch/{{ switch_id }}/edit/vlans" class="btn">VLANs</a>
@@ -14,7 +14,7 @@
         <a href="/switch/{{ switch_id }}/edit/mirrors" class="btn btn-primary">Mirrors</a>
         <a href="/switch/{{ switch_id }}/edit/snmp" class="btn">SNMP</a>
         <span style="border-left:1px solid var(--border);margin:0 0.25rem;"></span>
-        <a hx-post="/preview/{{ switch_id }}" hx-target="#diff-panel" class="btn">Preview Changes</a>
+        <a hx-post="/preview/{{ switch_id }}" hx-target="#diff-panel" class="btn btn-outline">Preview Changes</a>
         <a href="/save/{{ switch_id }}" class="btn btn-primary">Save</a>
         <a href="/draft/{{ switch_id }}/discard" class="btn btn-danger">Discard</a>
     </div>
