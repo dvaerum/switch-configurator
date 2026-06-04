@@ -217,6 +217,10 @@ impl SwitchMergeTracker {
     }
 
     /// Convert to a validation error with the given missing fields
+    pub fn source_files(&self) -> Vec<PathBuf> {
+        self.sources.iter().map(|s| s.file_path.clone()).collect()
+    }
+
     pub fn to_validation_error(&self, missing_fields: Vec<String>) -> SwitchValidationError {
         SwitchValidationError {
             switch_id: self.switch_id.clone(),

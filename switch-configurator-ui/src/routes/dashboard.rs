@@ -16,15 +16,47 @@ pub struct SwitchCard {
     pub warnings: Vec<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct ValidationFailureView {
+    pub switch_id: String,
+    pub hostname: String,
+    pub error: String,
+    pub config_sources: Vec<String>,
+}
+
 #[derive(Template)]
 #[template(path = "dashboard.html")]
 struct DashboardTemplate {
     switches: Vec<SwitchCard>,
+    validation_failures: Vec<ValidationFailureView>,
 }
 
 pub async fn index(State(state): State<AppState>) -> impl IntoResponse {
-    let switches = fetch_switch_cards(&state).await;
-    DashboardTemplate { switches }
+    let (switches, validation_failures) = fetch_dashboard_data(&state).await;
+    DashboardTemplate { switches, validation_failures }
+}
+
+async fn fetch_dashboard_data(state: &AppState) -> (Vec<SwitchCard>, Vec<ValidationFailureView>) {
+    let switches = fetch_switch_cards(state).await;
+
+    // Fetch validation failures from status
+    let failures = match state.backend.get("/api/status").await {
+        Ok(json) => {
+            json["validation_failures"].as_array()
+                .map(|arr| arr.iter().map(|f| ValidationFailureView {
+                    switch_id: f["switch_id"].as_str().unwrap_or("").to_string(),
+                    hostname: f["hostname"].as_str().unwrap_or("unknown").to_string(),
+                    error: f["error"].as_str().unwrap_or("").to_string(),
+                    config_sources: f["config_sources"].as_array()
+                        .map(|a| a.iter().filter_map(|s| s.as_str().map(|s| s.to_string())).collect())
+                        .unwrap_or_default(),
+                }).collect())
+                .unwrap_or_default()
+        }
+        Err(_) => vec![],
+    };
+
+    (switches, failures)
 }
 
 async fn fetch_switch_cards(state: &AppState) -> Vec<SwitchCard> {

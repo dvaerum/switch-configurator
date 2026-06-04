@@ -74,6 +74,17 @@ in
       '';
     };
 
+    strictDeployment = mkOption {
+      type = types.bool;
+      default = false;
+      description = ''
+        When true, all switch configs must pass validation or the service
+        refuses to start. When false (default), invalid switches are skipped
+        and valid switches are deployed normally. Skipped switches appear
+        as validation failures in the dashboard.
+      '';
+    };
+
     enableFileWatching = mkOption {
       type = types.bool;
       default = true;
@@ -208,6 +219,7 @@ in
             ${optionalString (cfg.socketPath != null) "--socket ${cfg.socketPath}"} \
             ${if cfg.enableFileWatching then "--watch" else "--watch=false"} \
             ${if cfg.applyOnStartup then "--apply-on-startup" else ""} \
+            ${if cfg.strictDeployment then "--strict-deployment" else ""} \
             --log-level ${cfg.logLevel}
         '';
 
