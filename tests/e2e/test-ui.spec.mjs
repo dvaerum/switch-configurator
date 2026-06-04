@@ -112,7 +112,7 @@ test.describe('Ports Tab', () => {
   test('shows port table with all columns', async ({ page }) => {
     await page.goto(`${UI_URL}/switch/demo-sw-01/ports`);
     await expect(page.locator('th')).toContainText(['Port']);
-    await expect(page.locator('th')).toContainText(['VLAN']);
+    await expect(page.locator('th')).toContainText(['Untagged VLAN']);
     await expect(page.locator('th')).toContainText(['Tagged VLANs']);
     await expect(page.locator('th')).toContainText(['Description']);
     await expect(page.locator('th')).toContainText(['Enabled']);
