@@ -179,7 +179,7 @@ fn parse_switch_view(id: &str, json: &serde_json::Value) -> SwitchView {
                     port_id: p["port_id"].as_str().unwrap_or("").to_string(),
                     mode_display: p["mode"].as_str().unwrap_or("access").to_string(),
                     vlan: p["vlan"].as_u64().unwrap_or(1) as u16,
-                    tagged_display: p["allowed_vlans"]
+                    tagged_display: p["tagged_vlans"]
                         .as_array()
                         .map(|a| {
                             a.iter()

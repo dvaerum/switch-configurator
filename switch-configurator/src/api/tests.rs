@@ -44,7 +44,7 @@ async fn create_test_config_store_async() -> ConfigStore {
                 port_id: "1".to_string(),
                 mode: PortMode::Access,
                 vlan: 10,
-                allowed_vlans: vec![],
+                tagged_vlans: vec![],
                 description: None,
                 enabled: true,
                 poe_enabled: false,
@@ -137,7 +137,7 @@ fn create_test_config_store() -> ConfigStore {
                 port_id: "1".to_string(),
                 mode: PortMode::Access,
                 vlan: 10,
-                allowed_vlans: vec![],
+                tagged_vlans: vec![],
                 description: None,
                 enabled: true,
                 poe_enabled: false,
@@ -1554,7 +1554,7 @@ mod integration_tests {
 
     #[tokio::test]
     async fn test_put_trunk_vlan_filtering() {
-        // Validation parity: Trunk ports with invalid allowed_vlans should be filtered (not rejected)
+        // Validation parity: Trunk ports with invalid tagged_vlans should be filtered (not rejected)
         // This matches the file-based config behavior which filters invalid VLANs and logs warnings
         let store = create_test_config_store();
         let app = api::create_router(store.clone());
@@ -1566,7 +1566,7 @@ mod integration_tests {
             "credentials": {"username": "admin", "password": "secret"},
             "vlans": [{"id": 100, "name": "existing-vlan"}],
             "ports": [
-                {"port_id": "1", "mode": "trunk", "vlan": 100, "allowed_vlans": [100, 200, 300], "enabled": true}
+                {"port_id": "1", "mode": "trunk", "vlan": 100, "tagged_vlans": [100, 200, 300], "enabled": true}
             ]
         });
 
@@ -1587,8 +1587,8 @@ mod integration_tests {
         let port = &sw.ports[0];
 
         // Only VLAN 100 should remain (200 and 300 filtered out)
-        assert_eq!(port.allowed_vlans.len(), 1, "Invalid VLANs should be filtered out");
-        assert_eq!(port.allowed_vlans, vec![100], "Only valid VLAN 100 should remain");
+        assert_eq!(port.tagged_vlans.len(), 1, "Invalid VLANs should be filtered out");
+        assert_eq!(port.tagged_vlans, vec![100], "Only valid VLAN 100 should remain");
     }
 
     #[tokio::test]
@@ -2105,7 +2105,7 @@ mod integration_tests {
                         "port_id": "1",
                         "mode": "access",
                         "vlan": 1,
-                        "allowed_vlans": [],
+                        "tagged_vlans": [],
                         "enabled": true,
                         "poe_enabled": false,
                         "mac_notify": false,

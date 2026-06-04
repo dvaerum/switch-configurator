@@ -18,7 +18,7 @@ pub struct PortMigration {
 pub enum PortMigrationAction {
     /// Move untagged (access) port to VLAN 1
     MoveAccessToVlan1,
-    /// Remove VLAN from trunk port's allowed_vlans list
+    /// Remove VLAN from trunk port's tagged_vlans list
     RemoveVlanFromTrunk { remaining_vlans: Vec<u16> },
 }
 
@@ -160,11 +160,11 @@ fn diff_ports(current: &SwitchState, desired: &SwitchConfig, enforce_port_config
                 let different = !ports_equivalent_for_model(current_port, desired_port, supports_poe);
                 if different {
                     debug!("  Port {} to configure:", desired_port.port_id);
-                    debug!("    Current: mode={:?}, vlan={}, allowed_vlans={:?}, desc={:?}, enabled={}, poe={}, speed_duplex={:?}",
-                        current_port.mode, current_port.vlan, current_port.allowed_vlans,
+                    debug!("    Current: mode={:?}, vlan={}, tagged_vlans={:?}, desc={:?}, enabled={}, poe={}, speed_duplex={:?}",
+                        current_port.inferred_mode(), current_port.vlan, current_port.tagged_vlans,
                         current_port.description, current_port.enabled, current_port.poe_enabled, current_port.speed_duplex);
-                    debug!("    Desired: mode={:?}, vlan={}, allowed_vlans={:?}, desc={:?}, enabled={}, poe={}, speed_duplex={:?}",
-                        desired_port.mode, desired_port.vlan, desired_port.allowed_vlans,
+                    debug!("    Desired: mode={:?}, vlan={}, tagged_vlans={:?}, desc={:?}, enabled={}, poe={}, speed_duplex={:?}",
+                        desired_port.inferred_mode(), desired_port.vlan, desired_port.tagged_vlans,
                         desired_port.description, desired_port.enabled, desired_port.poe_enabled, desired_port.speed_duplex);
                 }
                 different
@@ -221,18 +221,18 @@ fn is_port_in_default_state(port: &Port) -> bool {
     // We're lenient - if the port matches these criteria, don't reset it
     let is_disabled = !port.enabled;
     let is_vlan_1 = port.vlan == 1;
-    let is_access_mode = matches!(port.mode, PortMode::Access);
+    let is_access_mode = matches!(port.inferred_mode(), PortMode::Access);
     let no_description = port.description.is_none() || port.description.as_ref().map_or(true, |d| d.is_empty());
-    let no_allowed_vlans = port.allowed_vlans.is_empty();
+    let no_tagged_vlans = port.tagged_vlans.is_empty();
     let no_mac_notify = !port.mac_notify;
 
     // Consider port in default state if ALL default criteria match
-    is_disabled && is_vlan_1 && is_access_mode && no_description && no_allowed_vlans && no_mac_notify
+    is_disabled && is_vlan_1 && is_access_mode && no_description && no_tagged_vlans && no_mac_notify
 }
 
 /// Check if two ports are functionally equivalent
 /// This handles cases where Access mode with no tagged VLANs is equivalent to
-/// Trunk mode with only the native VLAN in allowed_vlans
+/// Trunk mode with only the native VLAN in tagged_vlans
 fn ports_equivalent(current: &Port, desired: &Port) -> bool {
     // Default: compare all fields including PoE
     ports_equivalent_for_model(current, desired, true)
@@ -260,14 +260,14 @@ fn ports_equivalent_for_model(current: &Port, desired: &Port, supports_poe: bool
         return false;
     }
 
-    // Get tagged VLANs (exclude native VLAN from allowed_vlans)
-    let current_tagged: Vec<u16> = current.allowed_vlans
+    // Get tagged VLANs (exclude native VLAN from tagged_vlans)
+    let current_tagged: Vec<u16> = current.tagged_vlans
         .iter()
         .filter(|&&v| v != current.vlan)
         .copied()
         .collect();
 
-    let desired_tagged: Vec<u16> = desired.allowed_vlans
+    let desired_tagged: Vec<u16> = desired.tagged_vlans
         .iter()
         .filter(|&&v| v != desired.vlan)
         .copied()
@@ -285,7 +285,7 @@ fn ports_equivalent_for_model(current: &Port, desired: &Port, supports_poe: bool
     }
 
     // Otherwise, mode must match
-    current.mode == desired.mode
+    current.inferred_mode() == desired.inferred_mode()
 }
 
 fn diff_mirrors(current: &SwitchState, desired: &SwitchConfig, diff: &mut StateDiff) {
@@ -353,11 +353,11 @@ fn diff_mirrors(current: &SwitchState, desired: &SwitchConfig, diff: &mut StateD
                 // Port exists — check if it's already in baseline state
                 let is_baseline = port.vlan == 1
                     && port.enabled
-                    && matches!(port.mode, PortMode::Access)
-                    && port.allowed_vlans.is_empty();
+                    && matches!(port.inferred_mode(), PortMode::Access)
+                    && port.tagged_vlans.is_empty();
                 if !is_baseline {
                     debug!("  Mirror dest port {} needs baseline config (current: vlan={}, enabled={}, mode={:?})",
-                        dest, port.vlan, port.enabled, port.mode);
+                        dest, port.vlan, port.enabled, port.inferred_mode());
                 }
                 !is_baseline
             }
@@ -579,7 +579,7 @@ pub fn find_ports_to_migrate(current_state: &SwitchState, vlans_to_remove: &[u16
     // Check each port in current state
     for port in &current_state.ports {
         for &vlan_id in vlans_to_remove {
-            match port.mode {
+            match port.inferred_mode() {
                 PortMode::Access => {
                     // If port's access VLAN is being removed, move to VLAN 1
                     if port.vlan == vlan_id {
@@ -596,11 +596,11 @@ pub fn find_ports_to_migrate(current_state: &SwitchState, vlans_to_remove: &[u16
                     }
                 }
                 PortMode::Trunk => {
-                    // If VLAN is in the allowed_vlans list, remove it
-                    if port.allowed_vlans.contains(&vlan_id) {
+                    // If VLAN is in the tagged_vlans list, remove it
+                    if port.tagged_vlans.contains(&vlan_id) {
                         // Calculate remaining VLANs after removing the one being deleted
                         let remaining_vlans: Vec<u16> = port
-                            .allowed_vlans
+                            .tagged_vlans
                             .iter()
                             .filter(|&&v| !vlan_set.contains(&v))
                             .copied()
@@ -831,7 +831,7 @@ mod tests {
                     port_id: "1".to_string(),
                     mode: PortMode::Access,
                     vlan: 1,
-                    allowed_vlans: vec![],
+                    tagged_vlans: vec![],
                     description: None,
                     enabled: true,
                     poe_enabled: false,
@@ -851,7 +851,7 @@ mod tests {
                 port_id: "1".to_string(),
                 mode: PortMode::Access,
                 vlan: 10,
-                allowed_vlans: vec![],
+                tagged_vlans: vec![],
                 description: Some("Updated port".to_string()),
                 enabled: true,
                 poe_enabled: true,
@@ -876,7 +876,7 @@ mod tests {
                     port_id: "1".to_string(),
                     mode: PortMode::Access,
                     vlan: 10,
-                    allowed_vlans: vec![],
+                    tagged_vlans: vec![],
                     description: None,
                     enabled: true,
                     poe_enabled: false,
@@ -887,7 +887,7 @@ mod tests {
                     port_id: "2".to_string(),
                     mode: PortMode::Access,
                     vlan: 20,
-                    allowed_vlans: vec![],
+                    tagged_vlans: vec![],
                     description: None,
                     enabled: true,
                     poe_enabled: false,
@@ -907,7 +907,7 @@ mod tests {
                 port_id: "1".to_string(),
                 mode: PortMode::Access,
                 vlan: 10,
-                allowed_vlans: vec![],
+                tagged_vlans: vec![],
                 description: None,
                 enabled: true,
                 poe_enabled: false,
@@ -936,7 +936,7 @@ mod tests {
                     port_id: "1".to_string(),
                     mode: PortMode::Access,
                     vlan: 10,
-                    allowed_vlans: vec![],
+                    tagged_vlans: vec![],
                     description: None,
                     enabled: true,
                     poe_enabled: false,
@@ -956,7 +956,7 @@ mod tests {
                 port_id: "1".to_string(),
                 mode: PortMode::Trunk,
                 vlan: 10,
-                allowed_vlans: vec![10], // Only native VLAN in allowed list
+                tagged_vlans: vec![10], // Only native VLAN in allowed list
                 description: None,
                 enabled: true,
                 poe_enabled: false,
@@ -1038,7 +1038,7 @@ mod tests {
             port_id: "1".to_string(),
             mode: PortMode::Access,
             vlan: 10,
-            allowed_vlans: vec![],
+            tagged_vlans: vec![],
             description: Some("Port 1".to_string()),
             enabled: true,
             poe_enabled: false,
@@ -1050,7 +1050,7 @@ mod tests {
             port_id: "1".to_string(),
             mode: PortMode::Access,
             vlan: 10,
-            allowed_vlans: vec![],
+            tagged_vlans: vec![],
             description: Some("Port 1 Updated".to_string()),
             enabled: true,
             poe_enabled: false,
@@ -1067,7 +1067,7 @@ mod tests {
             port_id: "1".to_string(),
             mode: PortMode::Trunk,
             vlan: 10,
-            allowed_vlans: vec![10, 20, 30],
+            tagged_vlans: vec![10, 20, 30],
             description: None,
             enabled: true,
             poe_enabled: false,
@@ -1079,7 +1079,7 @@ mod tests {
             port_id: "1".to_string(),
             mode: PortMode::Trunk,
             vlan: 10,
-            allowed_vlans: vec![10, 20, 30],
+            tagged_vlans: vec![10, 20, 30],
             description: None,
             enabled: true,
             poe_enabled: false,
@@ -1096,7 +1096,7 @@ mod tests {
             port_id: "1".to_string(),
             mode: PortMode::Trunk,
             vlan: 10,
-            allowed_vlans: vec![10, 20],
+            tagged_vlans: vec![10, 20],
             description: None,
             enabled: true,
             poe_enabled: false,
@@ -1108,7 +1108,7 @@ mod tests {
             port_id: "1".to_string(),
             mode: PortMode::Trunk,
             vlan: 10,
-            allowed_vlans: vec![10, 30],
+            tagged_vlans: vec![10, 30],
             description: None,
             enabled: true,
             poe_enabled: false,
@@ -1192,7 +1192,7 @@ mod tests {
                     port_id: "1".to_string(),
                     mode: PortMode::Access,
                     vlan: 10,
-                    allowed_vlans: vec![],
+                    tagged_vlans: vec![],
                     description: Some("Test Port".to_string()),
                     enabled: true,
                     poe_enabled: false,
@@ -1212,7 +1212,7 @@ mod tests {
                 port_id: "1".to_string(),
                 mode: PortMode::Access,
                 vlan: 10,
-                allowed_vlans: vec![],
+                tagged_vlans: vec![],
                 description: Some("Test Port".to_string()),
                 enabled: true,
                 poe_enabled: false,
@@ -1238,7 +1238,7 @@ mod tests {
                     port_id: "1".to_string(),
                     mode: PortMode::Access,
                     vlan: 10,
-                    allowed_vlans: vec![],
+                    tagged_vlans: vec![],
                     description: Some("Test Port".to_string()),
                     enabled: true,
                     poe_enabled: false,
@@ -1258,7 +1258,7 @@ mod tests {
                 port_id: "1".to_string(),
                 mode: PortMode::Access,
                 vlan: 10,
-                allowed_vlans: vec![],
+                tagged_vlans: vec![],
                 description: Some("Test Port".to_string()),
                 enabled: true,
                 poe_enabled: false,
@@ -1283,7 +1283,7 @@ mod tests {
                     port_id: "1".to_string(),
                     mode: PortMode::Access,
                     vlan: 10,
-                    allowed_vlans: vec![],
+                    tagged_vlans: vec![],
                     description: None,
                     enabled: true,
                     poe_enabled: false,
@@ -1294,7 +1294,7 @@ mod tests {
                     port_id: "2".to_string(),
                     mode: PortMode::Access,
                     vlan: 10,
-                    allowed_vlans: vec![],
+                    tagged_vlans: vec![],
                     description: None,
                     enabled: true,
                     poe_enabled: false,
@@ -1314,7 +1314,7 @@ mod tests {
                 port_id: "1".to_string(),
                 mode: PortMode::Access,
                 vlan: 10,
-                allowed_vlans: vec![],
+                tagged_vlans: vec![],
                 description: None,
                 enabled: true,
                 poe_enabled: false,
@@ -1325,7 +1325,7 @@ mod tests {
                 port_id: "2".to_string(),
                 mode: PortMode::Access,
                 vlan: 10,
-                allowed_vlans: vec![],
+                tagged_vlans: vec![],
                 description: None,
                 enabled: true,
                 poe_enabled: false,
@@ -1352,7 +1352,7 @@ mod tests {
                     port_id: "1".to_string(),
                     mode: PortMode::Access,
                     vlan: 10,
-                    allowed_vlans: vec![],
+                    tagged_vlans: vec![],
                     description: Some("Old Description".to_string()),
                     enabled: true,
                     poe_enabled: true,
@@ -1372,7 +1372,7 @@ mod tests {
                 port_id: "1".to_string(),
                 mode: PortMode::Access,
                 vlan: 10,
-                allowed_vlans: vec![],
+                tagged_vlans: vec![],
                 description: Some("New Description".to_string()),
                 enabled: true,
                 poe_enabled: false,  // Changed
@@ -1400,7 +1400,7 @@ mod tests {
             port_id: "1".to_string(),
             mode: PortMode::Access,
             vlan: 10,
-            allowed_vlans: vec![],
+            tagged_vlans: vec![],
             description: None,
             enabled: true,
             poe_enabled: false,
@@ -1412,7 +1412,7 @@ mod tests {
             port_id: "1".to_string(),
             mode: PortMode::Access,
             vlan: 10,
-            allowed_vlans: vec![],
+            tagged_vlans: vec![],
             description: None,
             enabled: true,
             poe_enabled: false,
@@ -1430,7 +1430,7 @@ mod tests {
             port_id: "1".to_string(),
             mode: PortMode::Access,
             vlan: 10,
-            allowed_vlans: vec![],
+            tagged_vlans: vec![],
             description: None,
             enabled: true,
             poe_enabled: false,
@@ -1442,7 +1442,7 @@ mod tests {
             port_id: "1".to_string(),
             mode: PortMode::Access,
             vlan: 10,
-            allowed_vlans: vec![],
+            tagged_vlans: vec![],
             description: None,
             enabled: true,
             poe_enabled: false,
@@ -1465,7 +1465,7 @@ mod tests {
                     port_id: "1".to_string(),
                     mode: PortMode::Access,
                     vlan: 10,
-                    allowed_vlans: vec![],
+                    tagged_vlans: vec![],
                     description: None,
                     enabled: true,
                     poe_enabled: false,
@@ -1494,7 +1494,7 @@ mod tests {
                     port_id: "1".to_string(),
                     mode: PortMode::Access,
                     vlan: 10,
-                    allowed_vlans: vec![],
+                    tagged_vlans: vec![],
                     description: None,
                     enabled: true,
                     poe_enabled: false,
@@ -1505,7 +1505,7 @@ mod tests {
                     port_id: "2".to_string(),
                     mode: PortMode::Access,
                     vlan: 20,
-                    allowed_vlans: vec![],
+                    tagged_vlans: vec![],
                     description: None,
                     enabled: true,
                     poe_enabled: false,
@@ -1537,7 +1537,7 @@ mod tests {
                     port_id: "1".to_string(),
                     mode: PortMode::Access,
                     vlan: 10,
-                    allowed_vlans: vec![],
+                    tagged_vlans: vec![],
                     description: None,
                     enabled: true,
                     poe_enabled: false,
@@ -1548,7 +1548,7 @@ mod tests {
                     port_id: "3".to_string(),
                     mode: PortMode::Access,
                     vlan: 10,
-                    allowed_vlans: vec![],
+                    tagged_vlans: vec![],
                     description: None,
                     enabled: true,
                     poe_enabled: false,
@@ -1559,7 +1559,7 @@ mod tests {
                     port_id: "5".to_string(),
                     mode: PortMode::Access,
                     vlan: 10,
-                    allowed_vlans: vec![],
+                    tagged_vlans: vec![],
                     description: None,
                     enabled: true,
                     poe_enabled: false,
@@ -1591,7 +1591,7 @@ mod tests {
                     port_id: "1".to_string(),
                     mode: PortMode::Trunk,
                     vlan: 1,
-                    allowed_vlans: vec![10, 20, 30],
+                    tagged_vlans: vec![10, 20, 30],
                     description: None,
                     enabled: true,
                     poe_enabled: false,
@@ -1632,7 +1632,7 @@ mod tests {
                     port_id: "1".to_string(),
                     mode: PortMode::Trunk,
                     vlan: 1,
-                    allowed_vlans: vec![10, 20],
+                    tagged_vlans: vec![10, 20],
                     description: None,
                     enabled: true,
                     poe_enabled: false,
@@ -1673,7 +1673,7 @@ mod tests {
                     port_id: "1".to_string(),
                     mode: PortMode::Access,
                     vlan: 10,
-                    allowed_vlans: vec![],
+                    tagged_vlans: vec![],
                     description: None,
                     enabled: true,
                     poe_enabled: false,
@@ -1684,7 +1684,7 @@ mod tests {
                     port_id: "2".to_string(),
                     mode: PortMode::Trunk,
                     vlan: 1,
-                    allowed_vlans: vec![10, 20],
+                    tagged_vlans: vec![10, 20],
                     description: None,
                     enabled: true,
                     poe_enabled: false,
@@ -1727,7 +1727,7 @@ mod tests {
                     port_id: "1".to_string(),
                     mode: PortMode::Access,
                     vlan: 10,
-                    allowed_vlans: vec![],
+                    tagged_vlans: vec![],
                     description: None,
                     enabled: true,
                     poe_enabled: false,
@@ -1738,7 +1738,7 @@ mod tests {
                     port_id: "2".to_string(),
                     mode: PortMode::Trunk,
                     vlan: 1,
-                    allowed_vlans: vec![10, 20],
+                    tagged_vlans: vec![10, 20],
                     description: None,
                     enabled: true,
                     poe_enabled: false,
@@ -1767,7 +1767,7 @@ mod tests {
                     port_id: "1".to_string(),
                     mode: PortMode::Access,
                     vlan: 10,
-                    allowed_vlans: vec![],
+                    tagged_vlans: vec![],
                     description: None,
                     enabled: true,
                     poe_enabled: false,
@@ -1778,7 +1778,7 @@ mod tests {
                     port_id: "2".to_string(),
                     mode: PortMode::Access,
                     vlan: 20,
-                    allowed_vlans: vec![],
+                    tagged_vlans: vec![],
                     description: None,
                     enabled: true,
                     poe_enabled: false,
@@ -1789,7 +1789,7 @@ mod tests {
                     port_id: "3".to_string(),
                     mode: PortMode::Access,
                     vlan: 30,
-                    allowed_vlans: vec![],
+                    tagged_vlans: vec![],
                     description: None,
                     enabled: true,
                     poe_enabled: false,
@@ -1820,7 +1820,7 @@ mod tests {
                     port_id: "uplink1".to_string(),
                     mode: PortMode::Trunk,
                     vlan: 1,
-                    allowed_vlans: vec![10, 20, 30, 40, 50],
+                    tagged_vlans: vec![10, 20, 30, 40, 50],
                     description: None,
                     enabled: true,
                     poe_enabled: false,
@@ -1865,7 +1865,7 @@ mod tests {
                     port_id: "1".to_string(),
                     mode: PortMode::Access,
                     vlan: 10,
-                    allowed_vlans: vec![],
+                    tagged_vlans: vec![],
                     description: Some("Server Port".to_string()),
                     enabled: true,
                     poe_enabled: false,  // Parser sets false for non-PoE switch
@@ -1887,7 +1887,7 @@ mod tests {
                 port_id: "1".to_string(),
                 mode: PortMode::Access,
                 vlan: 10,
-                allowed_vlans: vec![],
+                tagged_vlans: vec![],
                 description: Some("Server Port".to_string()),
                 enabled: true,
                 poe_enabled: true,   // User incorrectly specified true
@@ -1913,7 +1913,7 @@ mod tests {
                     port_id: "1".to_string(),
                     mode: PortMode::Access,
                     vlan: 10,
-                    allowed_vlans: vec![],
+                    tagged_vlans: vec![],
                     description: None,
                     enabled: true,
                     poe_enabled: true,  // PoE enabled on switch
@@ -1934,7 +1934,7 @@ mod tests {
                 port_id: "1".to_string(),
                 mode: PortMode::Access,
                 vlan: 10,
-                allowed_vlans: vec![],
+                tagged_vlans: vec![],
                 description: None,
                 enabled: true,
                 poe_enabled: false,  // User wants PoE disabled
@@ -1957,7 +1957,7 @@ mod tests {
             port_id: "1".to_string(),
             mode: PortMode::Access,
             vlan: 10,
-            allowed_vlans: vec![],
+            tagged_vlans: vec![],
             description: None,
             enabled: true,
             poe_enabled: false,  // Current state
@@ -1969,7 +1969,7 @@ mod tests {
             port_id: "1".to_string(),
             mode: PortMode::Access,
             vlan: 10,
-            allowed_vlans: vec![],
+            tagged_vlans: vec![],
             description: None,
             enabled: true,
             poe_enabled: true,   // Different poe_enabled
@@ -1996,7 +1996,7 @@ mod tests {
                     port_id: "1".to_string(),
                     mode: PortMode::Access,
                     vlan: 10,
-                    allowed_vlans: vec![],
+                    tagged_vlans: vec![],
                     description: Some("Old Description".to_string()),
                     enabled: true,
                     poe_enabled: false,
@@ -2017,7 +2017,7 @@ mod tests {
                 port_id: "1".to_string(),
                 mode: PortMode::Access,
                 vlan: 20,  // Different VLAN
-                allowed_vlans: vec![],
+                tagged_vlans: vec![],
                 description: Some("New Description".to_string()),  // Different description
                 enabled: true,
                 poe_enabled: true,   // Different PoE (should be ignored)
@@ -2358,7 +2358,7 @@ mod tests {
                     port_id: "22".to_string(),
                     mode: PortMode::Access,
                     vlan: 10,  // Not VLAN 1
-                    allowed_vlans: vec![],
+                    tagged_vlans: vec![],
                     description: None,
                     enabled: true,
                     poe_enabled: false,
@@ -2398,7 +2398,7 @@ mod tests {
                     port_id: "22".to_string(),
                     mode: PortMode::Access,
                     vlan: 1,
-                    allowed_vlans: vec![],
+                    tagged_vlans: vec![],
                     description: None,
                     enabled: true,
                     poe_enabled: false,
@@ -2472,7 +2472,7 @@ mod tests {
                     port_id: "22".to_string(),
                     mode: PortMode::Trunk,
                     vlan: 10,
-                    allowed_vlans: vec![10, 20],
+                    tagged_vlans: vec![10, 20],
                     description: Some("mirror dest".to_string()),
                     enabled: true,
                     poe_enabled: false,
@@ -2552,7 +2552,7 @@ mod tests {
                     port_id: "13".to_string(),
                     mode: PortMode::Access,
                     vlan: 1001,
-                    allowed_vlans: vec![2088],  // Leftover tagged VLAN
+                    tagged_vlans: vec![2088],  // Leftover tagged VLAN
                     description: Some("Zone 1".to_string()),
                     enabled: true,
                     poe_enabled: false,
@@ -2572,7 +2572,7 @@ mod tests {
                 port_id: "13".to_string(),
                 mode: PortMode::Access,
                 vlan: 1001,
-                allowed_vlans: vec![],  // No tagged VLANs desired
+                tagged_vlans: vec![],  // No tagged VLANs desired
                 description: Some("Zone 1".to_string()),
                 enabled: true,
                 poe_enabled: false,

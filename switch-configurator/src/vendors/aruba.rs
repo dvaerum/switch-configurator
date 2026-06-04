@@ -125,7 +125,7 @@ impl ArubaSwitch {
                 }
             }
 
-            match port.mode {
+            match port.inferred_mode() {
                 PortMode::Access => {
                     commands.push(format!("untagged vlan {}", port.vlan));
 
@@ -133,7 +133,7 @@ impl ArubaSwitch {
                     // On Aruba, setting untagged vlan does NOT automatically remove tagged VLANs.
                     if let Some(ref current_state) = self.current_state {
                         if let Some(current_port) = current_state.ports.iter().find(|p| p.port_id == port.port_id) {
-                            for &vlan in &current_port.allowed_vlans {
+                            for &vlan in &current_port.tagged_vlans {
                                 if vlan != current_port.vlan {
                                     commands.push(format!("no tagged vlan {}", vlan));
                                 }
@@ -149,13 +149,13 @@ impl ArubaSwitch {
                     if let Some(ref current_state) = self.current_state {
                         if let Some(current_port) = current_state.ports.iter().find(|p| p.port_id == port.port_id) {
                             // Find VLANs that are currently tagged but should be removed
-                            let current_tagged: Vec<u16> = current_port.allowed_vlans
+                            let current_tagged: Vec<u16> = current_port.tagged_vlans
                                 .iter()
                                 .filter(|&&v| v != current_port.vlan)  // Exclude native VLAN
                                 .copied()
                                 .collect();
 
-                            let desired_tagged: Vec<u16> = port.allowed_vlans
+                            let desired_tagged: Vec<u16> = port.tagged_vlans
                                 .iter()
                                 .filter(|&&v| v != port.vlan)  // Exclude native VLAN
                                 .copied()
@@ -171,7 +171,7 @@ impl ArubaSwitch {
                     }
 
                     // Add desired tagged VLANs (exclude the native VLAN)
-                    let tagged_vlans: Vec<String> = port.allowed_vlans
+                    let tagged_vlans: Vec<String> = port.tagged_vlans
                         .iter()
                         .filter(|&&v| v != port.vlan)  // Exclude the native VLAN
                         .map(|v| v.to_string())
@@ -1549,15 +1549,15 @@ impl SwitchVendor for ArubaSwitch {
                 PortMode::Trunk
             };
 
-            // For trunk ports, allowed_vlans should include both the native VLAN and tagged VLANs
-            let mut allowed_vlans = vlan_info.tagged_vlans.clone();
+            // For trunk ports, tagged_vlans should include both the native VLAN and tagged VLANs
+            let mut tagged_vlans = vlan_info.tagged_vlans.clone();
             if mode == PortMode::Trunk {
-                // Add native VLAN to allowed_vlans if not already present
-                if !allowed_vlans.contains(&untagged_vlan) {
-                    allowed_vlans.push(untagged_vlan);
+                // Add native VLAN to tagged_vlans if not already present
+                if !tagged_vlans.contains(&untagged_vlan) {
+                    tagged_vlans.push(untagged_vlan);
                 }
                 // Sort for consistent comparison
-                allowed_vlans.sort_unstable();
+                tagged_vlans.sort_unstable();
             }
 
             // Track monitor-enabled ports (mirror sources)
@@ -1569,7 +1569,7 @@ impl SwitchVendor for ArubaSwitch {
                 port_id,
                 mode,
                 vlan: untagged_vlan,
-                allowed_vlans,
+                tagged_vlans,
                 description,
                 enabled: vlan_info.enabled,
                 poe_enabled: vlan_info.poe_enabled,
@@ -2192,12 +2192,12 @@ impl ArubaSwitch {
                 PortMode::Trunk
             };
 
-            let mut allowed_vlans = vlan_info.tagged_vlans.clone();
+            let mut tagged_vlans = vlan_info.tagged_vlans.clone();
             if mode == PortMode::Trunk {
-                if !allowed_vlans.contains(&untagged_vlan) {
-                    allowed_vlans.push(untagged_vlan);
+                if !tagged_vlans.contains(&untagged_vlan) {
+                    tagged_vlans.push(untagged_vlan);
                 }
-                allowed_vlans.sort_unstable();
+                tagged_vlans.sort_unstable();
             }
 
             if vlan_info.has_monitor {
@@ -2208,7 +2208,7 @@ impl ArubaSwitch {
                 port_id,
                 mode,
                 vlan: untagged_vlan,
-                allowed_vlans,
+                tagged_vlans,
                 description,
                 enabled: vlan_info.enabled,
                 poe_enabled: vlan_info.poe_enabled,
@@ -2248,7 +2248,7 @@ impl ArubaSwitch {
             // "no tagged vlan" without VLAN ID is invalid on Aruba, so we must remove each one.
             if let Some(ref current_state) = self.current_state {
                 if let Some(current_port) = current_state.ports.iter().find(|p| p.port_id == *port_id) {
-                    for &vlan in &current_port.allowed_vlans {
+                    for &vlan in &current_port.tagged_vlans {
                         if vlan != current_port.vlan {
                             commands.push(format!("no tagged vlan {}", vlan));
                         }
@@ -2468,7 +2468,7 @@ mod tests {
                 port_id: "1".to_string(),
                 mode: PortMode::Access,
                 vlan: 10,
-                allowed_vlans: vec![],
+                tagged_vlans: vec![],
                 description: Some("User port".to_string()),
                 enabled: true,
                 poe_enabled: true,
@@ -2496,7 +2496,7 @@ mod tests {
                 port_id: "24".to_string(),
                 mode: PortMode::Trunk,
                 vlan: 1,
-                allowed_vlans: vec![1, 10, 20, 30],
+                tagged_vlans: vec![1, 10, 20, 30],
                 description: Some("Uplink".to_string()),
                 enabled: true,
                 poe_enabled: false,
@@ -2524,7 +2524,7 @@ mod tests {
                 port_id: "5".to_string(),
                 mode: PortMode::Access,
                 vlan: 1,
-                allowed_vlans: vec![],
+                tagged_vlans: vec![],
                 description: None,
                 enabled: false,
                 poe_enabled: false,
@@ -2667,7 +2667,7 @@ mod tests {
                 port_id: "1".to_string(),
                 mode: PortMode::Access,
                 vlan: 10,
-                allowed_vlans: vec![],
+                tagged_vlans: vec![],
                 description: None,
                 enabled: true,
                 poe_enabled: false,
@@ -2697,7 +2697,7 @@ mod tests {
                 port_id: "1".to_string(),
                 mode: PortMode::Access,
                 vlan: 10,
-                allowed_vlans: vec![],
+                tagged_vlans: vec![],
                 description: None,
                 enabled: true,
                 poe_enabled: true,  // PoE enabled
@@ -2725,7 +2725,7 @@ mod tests {
                 port_id: "1".to_string(),
                 mode: PortMode::Access,
                 vlan: 10,
-                allowed_vlans: vec![],
+                tagged_vlans: vec![],
                 description: None,
                 enabled: true,
                 poe_enabled: false,  // PoE disabled
@@ -2834,7 +2834,7 @@ management_vlan: None,
                 port_id: "2".to_string(),
                 mode: PortMode::Access,
                 vlan: 10,
-                allowed_vlans: vec![],
+                tagged_vlans: vec![],
                 description: None,
                 enabled: true,
                 poe_enabled: false,
@@ -2863,7 +2863,7 @@ management_vlan: None,
                 port_id: "2".to_string(),
                 mode: PortMode::Access,
                 vlan: 10,
-                allowed_vlans: vec![],
+                tagged_vlans: vec![],
                 description: None,
                 enabled: true,
                 poe_enabled: false,
@@ -2938,7 +2938,7 @@ management_vlan: None,
                 port_id: "5".to_string(),
                 mode: PortMode::Access,
                 vlan: 1,
-                allowed_vlans: vec![],
+                tagged_vlans: vec![],
                 description: None,
                 enabled: true,
                 poe_enabled: false,
@@ -2964,7 +2964,7 @@ management_vlan: None,
                 port_id: "6".to_string(),
                 mode: PortMode::Access,
                 vlan: 1,
-                allowed_vlans: vec![],
+                tagged_vlans: vec![],
                 description: None,
                 enabled: true,
                 poe_enabled: false,
@@ -3019,7 +3019,7 @@ management_vlan: None,
                 port_id: "1".to_string(),
                 mode: PortMode::Access,
                 vlan: 10,
-                allowed_vlans: vec![],
+                tagged_vlans: vec![],
                 description: Some("Test port with all features".to_string()),
                 enabled: true,
                 poe_enabled: true,   // Bug #1
@@ -3247,7 +3247,7 @@ snmp-server community "private" operator unrestricted
                 port_id: "5".to_string(),
                 mode: PortMode::Access,
                 vlan: 20,
-                allowed_vlans: vec![],
+                tagged_vlans: vec![],
                 description: Some("Device with MAC tracking".to_string()),
                 enabled: true,
                 poe_enabled: true,
@@ -3281,7 +3281,7 @@ snmp-server community "private" operator unrestricted
                 port_id: "8".to_string(),
                 mode: PortMode::Access,
                 vlan: 20,
-                allowed_vlans: vec![],
+                tagged_vlans: vec![],
                 description: Some("Security camera - no tracking".to_string()),
                 enabled: true,
                 poe_enabled: true,
@@ -3315,7 +3315,7 @@ snmp-server community "private" operator unrestricted
                 port_id: "1".to_string(),
                 mode: PortMode::Access,
                 vlan: 20,
-                allowed_vlans: vec![],
+                tagged_vlans: vec![],
                 description: Some("Monitored device".to_string()),
                 enabled: true,
                 poe_enabled: true,
@@ -3326,7 +3326,7 @@ snmp-server community "private" operator unrestricted
                 port_id: "2".to_string(),
                 mode: PortMode::Access,
                 vlan: 20,
-                allowed_vlans: vec![],
+                tagged_vlans: vec![],
                 description: Some("Unmonitored device".to_string()),
                 enabled: true,
                 poe_enabled: true,
@@ -3337,7 +3337,7 @@ snmp-server community "private" operator unrestricted
                 port_id: "3".to_string(),
                 mode: PortMode::Access,
                 vlan: 20,
-                allowed_vlans: vec![],
+                tagged_vlans: vec![],
                 description: Some("Another monitored device".to_string()),
                 enabled: true,
                 poe_enabled: true,
@@ -3411,7 +3411,7 @@ snmp-server community "private" operator unrestricted
                 port_id: i.to_string(),
                 mode: PortMode::Access,
                 vlan: 20,
-                allowed_vlans: vec![],
+                tagged_vlans: vec![],
                 description: Some(format!("Monitored port {}", i)),
                 enabled: true,
                 poe_enabled: true,
@@ -3425,7 +3425,7 @@ snmp-server community "private" operator unrestricted
                 port_id: i.to_string(),
                 mode: PortMode::Access,
                 vlan: 20,
-                allowed_vlans: vec![],
+                tagged_vlans: vec![],
                 description: Some(format!("Unmonitored port {}", i)),
                 enabled: true,
                 poe_enabled: true,
@@ -3722,7 +3722,7 @@ snmp-server host 192.168.1.1 community "public"
                 port_id: "33".to_string(),
                 mode: PortMode::Access,
                 vlan: 1,
-                allowed_vlans: vec![],
+                tagged_vlans: vec![],
                 description: None,
                 enabled: true,
                 poe_enabled: false,
@@ -3733,7 +3733,7 @@ snmp-server host 192.168.1.1 community "public"
                 port_id: "34".to_string(),
                 mode: PortMode::Access,
                 vlan: 1,
-                allowed_vlans: vec![],
+                tagged_vlans: vec![],
                 description: None,
                 enabled: true,
                 poe_enabled: false,
@@ -3744,7 +3744,7 @@ snmp-server host 192.168.1.1 community "public"
                 port_id: "35".to_string(),
                 mode: PortMode::Access,
                 vlan: 1,
-                allowed_vlans: vec![],
+                tagged_vlans: vec![],
                 description: None,
                 enabled: true,
                 poe_enabled: false,
@@ -3755,7 +3755,7 @@ snmp-server host 192.168.1.1 community "public"
                 port_id: "36".to_string(),
                 mode: PortMode::Access,
                 vlan: 1,
-                allowed_vlans: vec![],
+                tagged_vlans: vec![],
                 description: None,
                 enabled: true,
                 poe_enabled: false,
@@ -4013,7 +4013,7 @@ vlan 1
                     port_id: "5".to_string(),
                     mode: PortMode::Access,
                     vlan: 1,
-                    allowed_vlans: vec![],
+                    tagged_vlans: vec![],
                     description: Some("Old Port Name".to_string()),  // Currently has a name
                     enabled: true,
                     poe_enabled: false,
@@ -4034,7 +4034,7 @@ vlan 1
                 port_id: "5".to_string(),
                 mode: PortMode::Access,
                 vlan: 1,
-                allowed_vlans: vec![],
+                tagged_vlans: vec![],
                 description: None,  // No name specified
                 enabled: true,
                 poe_enabled: false,
@@ -4078,7 +4078,7 @@ vlan 1
                     port_id: "12".to_string(),
                     mode: PortMode::Access,
                     vlan: 1,
-                    allowed_vlans: vec![],
+                    tagged_vlans: vec![],
                     description: Some("Old Name".to_string()),
                     enabled: true,
                     poe_enabled: false,
@@ -4099,7 +4099,7 @@ vlan 1
                 port_id: "12".to_string(),
                 mode: PortMode::Access,
                 vlan: 1,
-                allowed_vlans: vec![],
+                tagged_vlans: vec![],
                 description: Some("New Name".to_string()),
                 enabled: true,
                 poe_enabled: false,
@@ -4144,7 +4144,7 @@ vlan 1
                     port_id: "8".to_string(),
                     mode: PortMode::Access,
                     vlan: 1,
-                    allowed_vlans: vec![],
+                    tagged_vlans: vec![],
                     description: Some("Same Name".to_string()),
                     enabled: true,
                     poe_enabled: false,
@@ -4165,7 +4165,7 @@ vlan 1
                 port_id: "8".to_string(),
                 mode: PortMode::Access,
                 vlan: 1,
-                allowed_vlans: vec![],
+                tagged_vlans: vec![],
                 description: Some("Same Name".to_string()),
                 enabled: true,
                 poe_enabled: false,
@@ -4195,7 +4195,7 @@ vlan 1
                 port_id: i.to_string(),
                 mode: PortMode::Access,
                 vlan: 1,
-                allowed_vlans: vec![],
+                tagged_vlans: vec![],
                 description: Some(format!("Port {} Current Name", i)),
                 enabled: true,
                 poe_enabled: false,
@@ -4228,7 +4228,7 @@ vlan 1
                 port_id: i.to_string(),
                 mode: PortMode::Access,
                 vlan: 1,
-                allowed_vlans: vec![],
+                tagged_vlans: vec![],
                 description: Some(format!("Port {} New Name", i)),
                 enabled: true,
                 poe_enabled: false,
@@ -4241,7 +4241,7 @@ vlan 1
                 port_id: i.to_string(),
                 mode: PortMode::Access,
                 vlan: 1,
-                allowed_vlans: vec![],
+                tagged_vlans: vec![],
                 description: None,  // No name
                 enabled: true,
                 poe_enabled: false,
@@ -4641,7 +4641,7 @@ interface 5
                 port_id: "1".to_string(),
                 mode: PortMode::Access,
                 vlan: 10,
-                allowed_vlans: vec![],
+                tagged_vlans: vec![],
                 description: Some("Test port".to_string()),
                 enabled: true,
                 poe_enabled: true,  // Even if config says true, non-PoE switch can't support it
@@ -4677,7 +4677,7 @@ interface 5
                 port_id: "5".to_string(),
                 mode: PortMode::Access,
                 vlan: 20,
-                allowed_vlans: vec![],
+                tagged_vlans: vec![],
                 description: None,
                 enabled: true,
                 poe_enabled: false,  // Explicitly disabled
@@ -4703,7 +4703,7 @@ interface 5
                 port_id: "1".to_string(),
                 mode: PortMode::Access,
                 vlan: 10,
-                allowed_vlans: vec![],
+                tagged_vlans: vec![],
                 description: Some("PoE port".to_string()),
                 enabled: true,
                 poe_enabled: true,
@@ -4729,7 +4729,7 @@ interface 5
                 port_id: "2".to_string(),
                 mode: PortMode::Access,
                 vlan: 10,
-                allowed_vlans: vec![],
+                tagged_vlans: vec![],
                 description: None,
                 enabled: true,
                 poe_enabled: false,  // PoE disabled
@@ -4973,7 +4973,7 @@ vlan 1020
                 port_id: "15".to_string(),
                 mode: PortMode::Access,
                 vlan: 1020,
-                allowed_vlans: vec![],
+                tagged_vlans: vec![],
                 description: Some("Source 1".to_string()),
                 enabled: true,
                 poe_enabled: false,
@@ -4984,7 +4984,7 @@ vlan 1020
                 port_id: "16".to_string(),
                 mode: PortMode::Access,
                 vlan: 1020,
-                allowed_vlans: vec![],
+                tagged_vlans: vec![],
                 description: Some("Source 2".to_string()),
                 enabled: true,
                 poe_enabled: false,
@@ -5091,7 +5091,7 @@ vlan 1020
                     port_id: "1".to_string(),
                     mode: PortMode::Access,
                     vlan: 10,
-                    allowed_vlans: vec![],
+                    tagged_vlans: vec![],
                     description: None,
                     enabled: true,
                     poe_enabled: false,
@@ -5193,7 +5193,7 @@ vlan 1
                 port_id: "1".to_string(),
                 mode: PortMode::Access,
                 vlan: 10,
-                allowed_vlans: vec![],
+                tagged_vlans: vec![],
                 description: Some("Port with poe true".to_string()),
                 enabled: true,
                 poe_enabled: true,
@@ -5204,7 +5204,7 @@ vlan 1
                 port_id: "2".to_string(),
                 mode: PortMode::Access,
                 vlan: 10,
-                allowed_vlans: vec![],
+                tagged_vlans: vec![],
                 description: Some("Port with poe false".to_string()),
                 enabled: true,
                 poe_enabled: false,
@@ -5215,7 +5215,7 @@ vlan 1
                 port_id: "24".to_string(),
                 mode: PortMode::Trunk,
                 vlan: 1,
-                allowed_vlans: vec![1, 10, 20],
+                tagged_vlans: vec![1, 10, 20],
                 description: None,
                 enabled: true,
                 poe_enabled: true,
@@ -5493,10 +5493,10 @@ interface 48
                    "Port 47 should be trunk mode (has tagged VLANs)");
         assert_eq!(p47.description, Some("Uplink to Core".to_string()));
         assert_eq!(p47.speed_duplex, SpeedDuplex::ThousandFull);
-        assert!(p47.allowed_vlans.contains(&100),
-                "Port 47 allowed_vlans should contain VLAN 100");
-        assert!(p47.allowed_vlans.contains(&200),
-                "Port 47 allowed_vlans should contain VLAN 200");
+        assert!(p47.tagged_vlans.contains(&100),
+                "Port 47 tagged_vlans should contain VLAN 100");
+        assert!(p47.tagged_vlans.contains(&200),
+                "Port 47 tagged_vlans should contain VLAN 200");
 
         // ---- Verify mirror configuration ----
         assert_eq!(state.port_mirrors.len(), 1,
@@ -5714,7 +5714,7 @@ interface 48
                     port_id: "13".to_string(),
                     mode: PortMode::Access,
                     vlan: 1020,
-                    allowed_vlans: vec![2088],  // Leftover tagged VLAN
+                    tagged_vlans: vec![2088],  // Leftover tagged VLAN
                     description: None,
                     enabled: true,
                     poe_enabled: false,
@@ -5733,7 +5733,7 @@ interface 48
                 port_id: "13".to_string(),
                 mode: PortMode::Access,
                 vlan: 1001,
-                allowed_vlans: vec![],
+                tagged_vlans: vec![],
                 description: Some("Zone 1".to_string()),
                 enabled: true,
                 poe_enabled: false,
@@ -5760,7 +5760,7 @@ interface 48
                 port_id: "1".to_string(),
                 mode: PortMode::Access,
                 vlan: 10,
-                allowed_vlans: vec![],
+                tagged_vlans: vec![],
                 description: None,
                 enabled: true,
                 poe_enabled: false,
@@ -5814,7 +5814,7 @@ interface 48
                     port_id: "14".to_string(),
                     mode: PortMode::Access,
                     vlan: 1020,
-                    allowed_vlans: vec![2088],
+                    tagged_vlans: vec![2088],
                     description: None,
                     enabled: true,
                     poe_enabled: false,
@@ -5839,7 +5839,7 @@ interface 48
                 port_id: "14".to_string(),
                 mode: PortMode::Access,
                 vlan: 1,
-                allowed_vlans: vec![],
+                tagged_vlans: vec![],
                 description: None,
                 enabled: false,
                 poe_enabled: false,
@@ -5875,7 +5875,7 @@ interface 48
                     port_id: "1".to_string(),
                     mode: PortMode::Access,
                     vlan: 42,
-                    allowed_vlans: vec![],
+                    tagged_vlans: vec![],
                     description: Some("Test".to_string()),
                     enabled: true,
                     poe_enabled: false,

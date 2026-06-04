@@ -94,7 +94,7 @@ impl FortiswitchSwitch {
                 commands.push(format!("set description \"{}\"", desc));
             }
 
-            match port.mode {
+            match port.inferred_mode() {
                 PortMode::Access => {
                     // Access port: native VLAN is untagged, only that VLAN allowed
                     commands.push(format!("set native-vlan {}", port.vlan));
@@ -104,9 +104,9 @@ impl FortiswitchSwitch {
                 PortMode::Trunk => {
                     // Trunk port: native VLAN + multiple allowed VLANs
                     commands.push(format!("set native-vlan {}", port.vlan));
-                    if !port.allowed_vlans.is_empty() {
+                    if !port.tagged_vlans.is_empty() {
                         let vlans: Vec<String> =
-                            port.allowed_vlans.iter().map(|v| v.to_string()).collect();
+                            port.tagged_vlans.iter().map(|v| v.to_string()).collect();
                         commands.push(format!("set allowed-vlans {}", vlans.join(" ")));
                     }
                     // Native VLAN is untagged
@@ -1615,7 +1615,7 @@ mod tests {
             port_id: "1".to_string(),
             mode: PortMode::Access,
             vlan: 10,
-            allowed_vlans: vec![],
+            tagged_vlans: vec![],
             description: Some("Test Port".to_string()),
             enabled: true,
             poe_enabled: false,
@@ -1647,7 +1647,7 @@ mod tests {
             port_id: "24".to_string(),
             mode: PortMode::Trunk,
             vlan: 1,
-            allowed_vlans: vec![1, 10, 20, 30],
+            tagged_vlans: vec![1, 10, 20, 30],
             description: Some("Uplink".to_string()),
             enabled: true,
             poe_enabled: false,
@@ -1679,7 +1679,7 @@ mod tests {
             port_id: "8".to_string(),
             mode: PortMode::Access,
             vlan: 1,
-            allowed_vlans: vec![],
+            tagged_vlans: vec![],
             description: Some("Disabled Port".to_string()),
             enabled: false,
             poe_enabled: false,
@@ -1699,7 +1699,7 @@ mod tests {
             port_id: "2".to_string(),
             mode: PortMode::Access,
             vlan: 20,
-            allowed_vlans: vec![],
+            tagged_vlans: vec![],
             description: Some("PoE Port".to_string()),
             enabled: true,
             poe_enabled: true,
@@ -1720,7 +1720,7 @@ mod tests {
                 port_id: "1".to_string(),
                 mode: PortMode::Access,
                 vlan: 1,
-                allowed_vlans: vec![],
+                tagged_vlans: vec![],
                 description: None,
                 enabled: true,
                 poe_enabled: false,
@@ -1731,7 +1731,7 @@ mod tests {
                 port_id: "2".to_string(),
                 mode: PortMode::Access,
                 vlan: 1,
-                allowed_vlans: vec![],
+                tagged_vlans: vec![],
                 description: None,
                 enabled: true,
                 poe_enabled: false,
@@ -1742,7 +1742,7 @@ mod tests {
                 port_id: "3".to_string(),
                 mode: PortMode::Access,
                 vlan: 1,
-                allowed_vlans: vec![],
+                tagged_vlans: vec![],
                 description: None,
                 enabled: true,
                 poe_enabled: false,
@@ -2024,7 +2024,7 @@ mod tests {
             port_id: "1".to_string(),
             mode: PortMode::Access,
             vlan: 10,
-            allowed_vlans: vec![],
+            tagged_vlans: vec![],
             description: None,
             enabled: true,
             poe_enabled: false,
@@ -2060,7 +2060,7 @@ mod tests {
             port_id: "1".to_string(),
             mode: PortMode::Access,
             vlan: 9999, // Invalid: > 4094
-            allowed_vlans: vec![],
+            tagged_vlans: vec![],
             description: None,
             enabled: true,
             poe_enabled: false,
@@ -2099,7 +2099,7 @@ mod tests {
                 port_id: "1".to_string(),
                 mode: PortMode::Access,
                 vlan: 10,
-                allowed_vlans: vec![],
+                tagged_vlans: vec![],
                 description: Some("Management Port".to_string()),
                 enabled: true,
                 poe_enabled: false,
@@ -2110,7 +2110,7 @@ mod tests {
                 port_id: "24".to_string(),
                 mode: PortMode::Trunk,
                 vlan: 1,
-                allowed_vlans: vec![1, 10],
+                tagged_vlans: vec![1, 10],
                 description: Some("Uplink".to_string()),
                 enabled: true,
                 poe_enabled: false,
@@ -2647,7 +2647,7 @@ mod tests {
             port_id: "5".to_string(),
             mode: PortMode::Access,
             vlan: 10,
-            allowed_vlans: vec![],
+            tagged_vlans: vec![],
             description: Some("Test Port".to_string()),
             enabled: true,
             poe_enabled: false,
