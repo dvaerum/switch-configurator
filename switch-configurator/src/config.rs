@@ -993,7 +993,7 @@ fn validate_has_vlans(switch: &SwitchConfig) -> Result<()> {
 }
 
 /// Validate that all VLANs referenced in port configurations exist
-/// Filters out non-existent VLANs from allowed_vlans lists and logs warnings
+/// Filters out non-existent VLANs from tagged_vlans lists and logs warnings
 /// Also validates VLAN name lengths against switch model limits
 fn validate_vlan_references(switch: &mut SwitchConfig) -> Result<()> {
     use std::collections::HashSet;
@@ -1048,8 +1048,8 @@ fn validate_vlan_references(switch: &mut SwitchConfig) -> Result<()> {
 
     // Check each port's VLAN references and speed_duplex compatibility
     for port in &mut switch.ports {
-        debug!("Checking port {}: vlan={}, allowed_vlans={:?}, speed_duplex={:?}",
-               port.port_id, port.vlan, port.allowed_vlans, port.speed_duplex);
+        debug!("Checking port {}: vlan={}, tagged_vlans={:?}, speed_duplex={:?}",
+               port.port_id, port.vlan, port.tagged_vlans, port.speed_duplex);
 
         // Check native/untagged VLAN
         if !defined_vlans.contains(&port.vlan) {
@@ -1072,7 +1072,7 @@ fn validate_vlan_references(switch: &mut SwitchConfig) -> Result<()> {
         }
 
         // Check and filter allowed VLANs (for trunk ports)
-        let original_allowed = port.allowed_vlans.clone();
+        let original_allowed = port.tagged_vlans.clone();
         let valid_vlans: Vec<u16> = original_allowed.iter()
             .filter(|&&vlan_id| defined_vlans.contains(&vlan_id))
             .copied()
@@ -1082,7 +1082,7 @@ fn validate_vlan_references(switch: &mut SwitchConfig) -> Result<()> {
         for &vlan_id in &original_allowed {
             if !defined_vlans.contains(&vlan_id) {
                 warn!(
-                    "Switch '{}' Port {}: Filtering out non-existent VLAN {} from allowed_vlans. \
+                    "Switch '{}' Port {}: Filtering out non-existent VLAN {} from tagged_vlans. \
                     This VLAN is not defined in the switch configuration and would cause the switch \
                     to reject the configuration. The valid VLANs {:?} will still be applied.",
                     hostname, port.port_id, vlan_id, valid_vlans
@@ -1090,8 +1090,8 @@ fn validate_vlan_references(switch: &mut SwitchConfig) -> Result<()> {
             }
         }
 
-        // Update the port's allowed_vlans to only include valid ones
-        port.allowed_vlans = valid_vlans;
+        // Update the port's tagged_vlans to only include valid ones
+        port.tagged_vlans = valid_vlans;
     }
 
     // Check port mirror source ports exist in port list and destination ports are not in port list
@@ -1449,7 +1449,7 @@ ports:
   - port_id: "24"
     mode: trunk
     vlan: 1
-    allowed_vlans: [10, 20]
+    tagged_vlans: [10, 20]
     enabled: true
 port_mirrors: []
 "#;
@@ -1785,7 +1785,7 @@ switches:
                     port_id: "1".to_string(),
                     mode: PortMode::Access,
                     vlan: 10,
-                    allowed_vlans: vec![],
+                    tagged_vlans: vec![],
                     description: None,
                     enabled: true,
                     poe_enabled: false,
@@ -1796,7 +1796,7 @@ switches:
                     port_id: "2".to_string(),
                     mode: PortMode::Trunk,
                     vlan: 10,
-                    allowed_vlans: vec![10, 20],
+                    tagged_vlans: vec![10, 20],
                     description: None,
                     enabled: true,
                     poe_enabled: false,
@@ -1850,7 +1850,7 @@ switches:
                     port_id: "1".to_string(),
                     mode: PortMode::Access,
                     vlan: 999, // Non-existent VLAN!
-                    allowed_vlans: vec![],
+                    tagged_vlans: vec![],
                     description: None,
                     enabled: true,
                     poe_enabled: false,
@@ -1913,7 +1913,7 @@ switches:
                     port_id: "2".to_string(),
                     mode: PortMode::Trunk,
                     vlan: 10,
-                    allowed_vlans: vec![10, 20, 2099], // 2099 doesn't exist!
+                    tagged_vlans: vec![10, 20, 2099], // 2099 doesn't exist!
                     description: None,
                     enabled: true,
                     poe_enabled: false,
@@ -1933,9 +1933,9 @@ switches:
         let result = validate_vlan_references(&mut switch);
         assert!(result.is_ok());
 
-        // Verify that VLAN 2099 was filtered out from allowed_vlans
+        // Verify that VLAN 2099 was filtered out from tagged_vlans
         let port2 = switch.ports.iter().find(|p| p.port_id == "2").unwrap();
-        assert_eq!(port2.allowed_vlans, vec![10, 20],
+        assert_eq!(port2.tagged_vlans, vec![10, 20],
             "Invalid VLAN 2099 should be filtered out, leaving only valid VLANs 10 and 20");
     }
 
@@ -1972,7 +1972,7 @@ switches:
                     port_id: "1".to_string(),
                     mode: PortMode::Access,
                     vlan: 10,
-                    allowed_vlans: vec![],
+                    tagged_vlans: vec![],
                     description: None,
                     enabled: true,
                     poe_enabled: false,
@@ -2033,7 +2033,7 @@ switches:
                     port_id: "1".to_string(),
                     mode: PortMode::Access,
                     vlan: 500, // Invalid native VLAN
-                    allowed_vlans: vec![],
+                    tagged_vlans: vec![],
                     description: None,
                     enabled: true,
                     poe_enabled: false,
@@ -2044,7 +2044,7 @@ switches:
                     port_id: "2".to_string(),
                     mode: PortMode::Trunk,
                     vlan: 600, // Invalid native VLAN
-                    allowed_vlans: vec![10, 700, 800], // 700 and 800 invalid
+                    tagged_vlans: vec![10, 700, 800], // 700 and 800 invalid
                     description: None,
                     enabled: true,
                     poe_enabled: false,
@@ -2061,13 +2061,13 @@ switches:
         };
 
         // Should error because multiple ports have invalid native VLANs
-        // Note: allowed_vlans will be filtered, but native VLAN errors still cause failure
+        // Note: tagged_vlans will be filtered, but native VLAN errors still cause failure
         let result = validate_vlan_references(&mut switch);
         assert!(result.is_err());
 
-        // Even though validation failed, allowed_vlans should have been filtered
+        // Even though validation failed, tagged_vlans should have been filtered
         let port2 = switch.ports.iter().find(|p| p.port_id == "2").unwrap();
-        assert_eq!(port2.allowed_vlans, vec![10],
+        assert_eq!(port2.tagged_vlans, vec![10],
             "Invalid VLANs 700 and 800 should be filtered out, leaving only valid VLAN 10");
     }
 
@@ -2075,7 +2075,7 @@ switches:
     fn test_validate_vlan_filtering_complete_workflow() {
         use crate::models::{Port, PortMode, SwitchConfig, SwitchModel, Vlan, ConnectionType, Credentials};
 
-        // Create a config with mixed valid/invalid VLANs in allowed_vlans
+        // Create a config with mixed valid/invalid VLANs in tagged_vlans
         let mut switch = SwitchConfig {
             id: "test-sw-01".to_string(),
             hostname: Some("test-switch".to_string()),
@@ -2118,7 +2118,7 @@ switches:
                     mode: PortMode::Trunk,
                     vlan: 10,
                     // Mix of valid (10, 20, 30) and invalid (999, 888, 777) VLANs
-                    allowed_vlans: vec![10, 999, 20, 888, 30, 777],
+                    tagged_vlans: vec![10, 999, 20, 888, 30, 777],
                     description: Some("Trunk with mixed VLANs".to_string()),
                     enabled: true,
                     poe_enabled: false,
@@ -2135,15 +2135,15 @@ switches:
         };
 
         // Before validation: port has 6 VLANs (3 valid, 3 invalid)
-        assert_eq!(switch.ports[0].allowed_vlans.len(), 6);
+        assert_eq!(switch.ports[0].tagged_vlans.len(), 6);
 
         // Run validation
         let result = validate_vlan_references(&mut switch);
         assert!(result.is_ok());
 
         // After validation: port should only have 3 valid VLANs
-        assert_eq!(switch.ports[0].allowed_vlans.len(), 3);
-        assert_eq!(switch.ports[0].allowed_vlans, vec![10, 20, 30],
+        assert_eq!(switch.ports[0].tagged_vlans.len(), 3);
+        assert_eq!(switch.ports[0].tagged_vlans, vec![10, 20, 30],
             "Only valid VLANs should remain; 999, 888, and 777 should be filtered out");
 
         // Verify native VLAN is unchanged
@@ -2178,7 +2178,7 @@ switches:
       - port_id: "5"
         mode: trunk
         vlan: 10
-        allowed_vlans: [10, 100, 20, 200, 30, 999]
+        tagged_vlans: [10, 100, 20, 200, 30, 999]
         enabled: true
 settings:
   enforce_port_config: false
@@ -2201,9 +2201,9 @@ settings:
 
         // CRITICAL: Verify that invalid VLANs (100, 200, 999) were filtered out
         // and only valid VLANs (10, 20, 30) remain
-        assert_eq!(port.allowed_vlans.len(), 3,
+        assert_eq!(port.tagged_vlans.len(), 3,
             "Should have 3 valid VLANs after filtering out 100, 200, and 999");
-        assert_eq!(port.allowed_vlans, vec![10, 20, 30],
+        assert_eq!(port.tagged_vlans, vec![10, 20, 30],
             "Only valid VLANs should remain after filtering");
 
         // Verify native VLAN is unchanged
@@ -2281,7 +2281,7 @@ switches:
       - port_id: "2"
         mode: trunk
         vlan: 10
-        allowed_vlans: [10, 20]
+        tagged_vlans: [10, 20]
         enabled: true
     port_mirrors: []
 settings:
@@ -2540,7 +2540,7 @@ settings:
                 enabled: true,
                 mode: PortMode::Access,
                 vlan: 100,
-                allowed_vlans: vec![],
+                tagged_vlans: vec![],
                 poe_enabled: false,
                 speed_duplex: crate::models::SpeedDuplex::Auto,
                 mac_notify: false,
@@ -2616,7 +2616,7 @@ settings:
                 enabled: true,
                 mode: PortMode::Access,
                 vlan: 10,
-                allowed_vlans: vec![],
+                tagged_vlans: vec![],
                 poe_enabled: false,
                 speed_duplex: crate::models::SpeedDuplex::Auto,
                 mac_notify: false,
@@ -2666,7 +2666,7 @@ settings:
                 enabled: true,
                 mode: PortMode::Access,
                 vlan: 100,
-                allowed_vlans: vec![],
+                tagged_vlans: vec![],
                 poe_enabled: false,
                 speed_duplex: crate::models::SpeedDuplex::Auto,
                 mac_notify: false,
@@ -2837,7 +2837,7 @@ switches:
                     port_id: "1".to_string(),
                     mode: PortMode::Access,
                     vlan: 10,
-                    allowed_vlans: vec![],
+                    tagged_vlans: vec![],
                     description: None,
                     enabled: true,
                     poe_enabled: false,
@@ -2848,7 +2848,7 @@ switches:
                     port_id: "22".to_string(),
                     mode: PortMode::Access,
                     vlan: 10,
-                    allowed_vlans: vec![],
+                    tagged_vlans: vec![],
                     description: None,
                     enabled: true,
                     poe_enabled: false,
@@ -2910,7 +2910,7 @@ switches:
                     port_id: "1".to_string(),
                     mode: PortMode::Access,
                     vlan: 10,
-                    allowed_vlans: vec![],
+                    tagged_vlans: vec![],
                     description: None,
                     enabled: true,
                     poe_enabled: false,
@@ -2964,7 +2964,7 @@ switches:
             vlans: vec![Vlan { id: 10, name: "test".to_string(), description: None, ip_config: VlanIpConfig::None }],
             ports: vec![Port {
                 port_id: "1".to_string(), mode: PortMode::Access, vlan: 10,
-                allowed_vlans: vec![], description: None, enabled: true,
+                tagged_vlans: vec![], description: None, enabled: true,
                 poe_enabled: false, mac_notify: false, speed_duplex: SpeedDuplex::Auto,
             }],
             port_mirrors: vec![],
@@ -2995,7 +2995,7 @@ switches:
             vlans: vec![Vlan { id: 10, name: "test".to_string(), description: None, ip_config: VlanIpConfig::None }],
             ports: vec![Port {
                 port_id: "1".to_string(), mode: PortMode::Access, vlan: 999, // References non-existent VLAN
-                allowed_vlans: vec![], description: None, enabled: true,
+                tagged_vlans: vec![], description: None, enabled: true,
                 poe_enabled: false, mac_notify: false, speed_duplex: SpeedDuplex::Auto,
             }],
             port_mirrors: vec![],

@@ -51,7 +51,7 @@ impl CiscoSwitch {
                 commands.push(format!("description {}", desc));
             }
 
-            match port.mode {
+            match port.inferred_mode() {
                 PortMode::Access => {
                     commands.push("switchport mode access".to_string());
                     commands.push(format!("switchport access vlan {}", port.vlan));
@@ -59,9 +59,9 @@ impl CiscoSwitch {
                 PortMode::Trunk => {
                     commands.push("switchport mode trunk".to_string());
                     commands.push(format!("switchport trunk native vlan {}", port.vlan));
-                    if !port.allowed_vlans.is_empty() {
+                    if !port.tagged_vlans.is_empty() {
                         let vlans: Vec<String> =
-                            port.allowed_vlans.iter().map(|v| v.to_string()).collect();
+                            port.tagged_vlans.iter().map(|v| v.to_string()).collect();
                         commands.push(format!("switchport trunk allowed vlan {}", vlans.join(",")));
                     } else {
                         commands.push("switchport trunk allowed vlan all".to_string());
@@ -1009,7 +1009,7 @@ impl SwitchVendor for CiscoSwitch {
             // For access mode: check the access VLAN
             // For trunk mode: check the native VLAN
             if !defined_vlans.contains(&port.vlan) {
-                let vlan_type = match port.mode {
+                let vlan_type = match port.inferred_mode() {
                     crate::models::PortMode::Access => "access",
                     crate::models::PortMode::Trunk => "native/untagged",
                 };
@@ -1020,8 +1020,8 @@ impl SwitchVendor for CiscoSwitch {
             }
 
             // For trunk ports, also check that allowed VLANs exist
-            if port.mode == crate::models::PortMode::Trunk {
-                for allowed_vlan in &port.allowed_vlans {
+            if port.inferred_mode() == crate::models::PortMode::Trunk {
+                for allowed_vlan in &port.tagged_vlans {
                     if !defined_vlans.contains(allowed_vlan) {
                         return Err(VendorError::ValidationError(format!(
                             "Port {} references non-existent VLAN {} in allowed VLANs list",
@@ -1446,7 +1446,7 @@ mod tests {
                 port_id: "GigabitEthernet1/0/1".to_string(),
                 mode: PortMode::Access,
                 vlan: 100,
-                allowed_vlans: vec![],
+                tagged_vlans: vec![],
                 description: Some("Test port".to_string()),
                 enabled: true,
                 poe_enabled: true,
@@ -1482,7 +1482,7 @@ mod tests {
                 port_id: "GigabitEthernet1/0/24".to_string(),
                 mode: PortMode::Trunk,
                 vlan: 1,
-                allowed_vlans: vec![10, 20, 30],
+                tagged_vlans: vec![10, 20, 30],
                 description: Some("Trunk port".to_string()),
                 enabled: true,
                 poe_enabled: false,
@@ -1511,7 +1511,7 @@ mod tests {
                 port_id: "GigabitEthernet1/0/3".to_string(),
                 mode: PortMode::Access,
                 vlan: 100,
-                allowed_vlans: vec![],
+                tagged_vlans: vec![],
                 description: Some("PoE disabled port".to_string()),
                 enabled: true,
                 poe_enabled: false,
@@ -1537,7 +1537,7 @@ mod tests {
                 port_id: "GigabitEthernet1/0/1".to_string(),
                 mode: PortMode::Access,
                 vlan: 100,
-                allowed_vlans: vec![],
+                tagged_vlans: vec![],
                 description: None,
                 enabled: true,
                 poe_enabled: false,
@@ -1564,7 +1564,7 @@ mod tests {
                 port_id: "GigabitEthernet1/0/1".to_string(),
                 mode: PortMode::Access,
                 vlan: 100,
-                allowed_vlans: vec![],
+                tagged_vlans: vec![],
                 description: None,
                 enabled: true,
                 poe_enabled: false,
@@ -1590,7 +1590,7 @@ mod tests {
                 port_id: "GigabitEthernet1/0/1".to_string(),
                 mode: PortMode::Access,
                 vlan: 100,
-                allowed_vlans: vec![],
+                tagged_vlans: vec![],
                 description: None,
                 enabled: false,
                 poe_enabled: false,
@@ -1785,7 +1785,7 @@ mod tests {
                 port_id: "GigabitEthernet1/0/1".to_string(),
                 mode: PortMode::Access,
                 vlan: 100,
-                allowed_vlans: vec![],
+                tagged_vlans: vec![],
                 description: None,
                 enabled: true,
                 poe_enabled: false,
@@ -1811,7 +1811,7 @@ mod tests {
                 port_id: "GigabitEthernet1/0/1".to_string(),
                 mode: PortMode::Access,
                 vlan: 100,
-                allowed_vlans: vec![],
+                tagged_vlans: vec![],
                 description: None,
                 enabled: true,
                 poe_enabled: false,
@@ -1847,7 +1847,7 @@ mod tests {
                 port_id: "GigabitEthernet1/0/24".to_string(),
                 mode: PortMode::Trunk,
                 vlan: 1,  // Native VLAN 1
-                allowed_vlans: vec![100],
+                tagged_vlans: vec![100],
                 description: None,
                 enabled: true,
                 poe_enabled: false,
@@ -1891,7 +1891,7 @@ mod tests {
                 port_id: "GigabitEthernet1/0/24".to_string(),
                 mode: PortMode::Trunk,
                 vlan: 1,
-                allowed_vlans: vec![100],
+                tagged_vlans: vec![100],
                 description: None,
                 enabled: true,
                 poe_enabled: false,
@@ -1927,7 +1927,7 @@ mod tests {
                 port_id: "GigabitEthernet1/0/1".to_string(),
                 mode: PortMode::Access,
                 vlan: 10,
-                allowed_vlans: vec![],
+                tagged_vlans: vec![],
                 description: Some("Management port with PoE".to_string()),
                 enabled: true,
                 poe_enabled: true,
@@ -1938,7 +1938,7 @@ mod tests {
                 port_id: "GigabitEthernet1/0/2".to_string(),
                 mode: PortMode::Access,
                 vlan: 20,
-                allowed_vlans: vec![],
+                tagged_vlans: vec![],
                 description: Some("Production port with PoE".to_string()),
                 enabled: true,
                 poe_enabled: true,
@@ -1949,7 +1949,7 @@ mod tests {
                 port_id: "GigabitEthernet1/0/3".to_string(),
                 mode: PortMode::Access,
                 vlan: 30,
-                allowed_vlans: vec![],
+                tagged_vlans: vec![],
                 description: Some("Guest port without PoE".to_string()),
                 enabled: true,
                 poe_enabled: false,
@@ -1960,7 +1960,7 @@ mod tests {
                 port_id: "GigabitEthernet1/0/24".to_string(),
                 mode: PortMode::Trunk,
                 vlan: 1,
-                allowed_vlans: vec![10, 20, 30],
+                tagged_vlans: vec![10, 20, 30],
                 description: Some("Uplink trunk port".to_string()),
                 enabled: true,
                 poe_enabled: false,
@@ -2010,7 +2010,7 @@ mod tests {
                 port_id: "GigabitEthernet1/0/24".to_string(),
                 mode: PortMode::Trunk,
                 vlan: 1,  // References VLAN 1 but VLAN 1 not defined
-                allowed_vlans: vec![300, 400, 500],
+                tagged_vlans: vec![300, 400, 500],
                 description: Some("Trunk port".to_string()),
                 enabled: true,
                 poe_enabled: false,
@@ -2039,7 +2039,7 @@ mod tests {
                 port_id: "GigabitEthernet1/0/1".to_string(),
                 mode: PortMode::Access,
                 vlan: 500,
-                allowed_vlans: vec![],
+                tagged_vlans: vec![],
                 description: Some("PoE enabled port 1".to_string()),
                 enabled: true,
                 poe_enabled: true,
@@ -2050,7 +2050,7 @@ mod tests {
                 port_id: "GigabitEthernet1/0/3".to_string(),
                 mode: PortMode::Access,
                 vlan: 500,
-                allowed_vlans: vec![],
+                tagged_vlans: vec![],
                 description: Some("PoE disabled port".to_string()),
                 enabled: true,
                 poe_enabled: false,
@@ -2313,7 +2313,7 @@ mod tests {
             port_id: "GigabitEthernet1/0/1".to_string(),
             mode: PortMode::Access,
             vlan: 100,
-            allowed_vlans: vec![],
+            tagged_vlans: vec![],
             description: None,
             enabled: true,
             poe_enabled: false,
@@ -2333,7 +2333,7 @@ mod tests {
             port_id: "GigabitEthernet1/0/1".to_string(),
             mode: PortMode::Access,
             vlan: 100,
-            allowed_vlans: vec![],
+            tagged_vlans: vec![],
             description: None,
             enabled: true,
             poe_enabled: false,
@@ -2353,7 +2353,7 @@ mod tests {
             port_id: "GigabitEthernet1/0/1".to_string(),
             mode: PortMode::Access,
             vlan: 100,
-            allowed_vlans: vec![],
+            tagged_vlans: vec![],
             description: None,
             enabled: true,
             poe_enabled: false,
@@ -2373,7 +2373,7 @@ mod tests {
             port_id: "GigabitEthernet1/0/1".to_string(),
             mode: PortMode::Access,
             vlan: 100,
-            allowed_vlans: vec![],
+            tagged_vlans: vec![],
             description: None,
             enabled: true,
             poe_enabled: false,
@@ -2393,7 +2393,7 @@ mod tests {
             port_id: "GigabitEthernet1/0/1".to_string(),
             mode: PortMode::Access,
             vlan: 100,
-            allowed_vlans: vec![],
+            tagged_vlans: vec![],
             description: None,
             enabled: true,
             poe_enabled: false,
@@ -2413,7 +2413,7 @@ mod tests {
             port_id: "GigabitEthernet1/0/1".to_string(),
             mode: PortMode::Access,
             vlan: 100,
-            allowed_vlans: vec![],
+            tagged_vlans: vec![],
             description: None,
             enabled: true,
             poe_enabled: false,
@@ -2433,7 +2433,7 @@ mod tests {
             port_id: "GigabitEthernet1/0/1".to_string(),
             mode: PortMode::Access,
             vlan: 100,
-            allowed_vlans: vec![],
+            tagged_vlans: vec![],
             description: None,
             enabled: true,
             poe_enabled: false,
@@ -2522,7 +2522,7 @@ mod tests {
             port_id: "GigabitEthernet1/0/1".to_string(),
             mode: PortMode::Access,
             vlan: 10,
-            allowed_vlans: vec![],
+            tagged_vlans: vec![],
             description: None,
             enabled: true,
             poe_enabled: false,

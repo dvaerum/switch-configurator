@@ -615,9 +615,10 @@ pub struct Vlan {
 }
 
 /// Port access mode
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum PortMode {
+    #[default]
     Access,
     Trunk,
 }
@@ -710,16 +711,20 @@ pub struct Port {
     /// Port identifier (e.g., "1/0/1", "GigabitEthernet1/0/1")
     pub port_id: String,
 
-    /// Port mode (access or trunk)
+    /// Port mode — deprecated, now inferred from tagged_vlans.
+    /// Kept for backward compatibility with existing configs.
+    #[serde(default)]
     pub mode: PortMode,
 
-    /// VLAN ID for access mode, or native VLAN for trunk mode
+    /// Untagged VLAN (IEEE 802.1Q). Frames sent without VLAN tag.
     #[validate(range(min = 1, max = 4094))]
     pub vlan: u16,
 
-    /// Allowed VLANs for trunk mode
-    #[serde(default)]
-    pub allowed_vlans: Vec<u16>,
+    /// Tagged VLANs (IEEE 802.1Q). Frames sent with VLAN tag.
+    /// When non-empty, port operates as trunk. When empty, port is access.
+    /// Legacy alias: "allowed_vlans" is accepted for backward compatibility.
+    #[serde(default, alias = "allowed_vlans")]
+    pub tagged_vlans: Vec<u16>,
 
     /// Port description
     #[serde(default)]
@@ -740,6 +745,19 @@ pub struct Port {
     /// Speed and duplex configuration
     #[serde(default)]
     pub speed_duplex: SpeedDuplex,
+}
+
+impl Port {
+    /// Infer port mode from tagged_vlans (IEEE 802.1Q).
+    /// Non-empty tagged_vlans → Trunk, empty → Access.
+    /// This replaces the explicit `mode` field which is now deprecated.
+    pub fn inferred_mode(&self) -> PortMode {
+        if self.tagged_vlans.is_empty() {
+            PortMode::Access
+        } else {
+            PortMode::Trunk
+        }
+    }
 }
 
 fn default_true() -> bool {
@@ -1353,7 +1371,7 @@ mod tests {
             port_id: "1".to_string(),
             mode: PortMode::Access,
             vlan: 10,
-            allowed_vlans: vec![],
+            tagged_vlans: vec![],
             description: None,
             enabled: true,
             poe_enabled: false,
@@ -1365,7 +1383,7 @@ mod tests {
             port_id: "2".to_string(),
             mode: PortMode::Access,
             vlan: 10,
-            allowed_vlans: vec![],
+            tagged_vlans: vec![],
             description: None,
             enabled: true,
             poe_enabled: false,
@@ -1400,7 +1418,7 @@ mod tests {
             port_id: "1".to_string(),
             mode: PortMode::Access,
             vlan: 10,
-            allowed_vlans: vec![],
+            tagged_vlans: vec![],
             description: Some("Test".to_string()),
             enabled: true,
             poe_enabled: false,
@@ -1666,5 +1684,92 @@ mod tests {
         let json = serde_json::to_string(&diff).expect("SnmpStateDiff should serialize to JSON");
         assert!(json.contains("communities_to_add"));
         assert!(json.contains("traps_to_enable"));
+    }
+
+    // ============================================================================
+    // IEEE 802.1Q: inferred mode and tagged_vlans
+    // ============================================================================
+
+    #[test]
+    fn test_inferred_mode_access_when_no_tagged_vlans() {
+        let port = Port {
+            port_id: "1".to_string(),
+            mode: PortMode::Access,
+            vlan: 10,
+            tagged_vlans: vec![],
+            description: None,
+            enabled: true,
+            poe_enabled: false,
+            mac_notify: false,
+            speed_duplex: SpeedDuplex::Auto,
+        };
+        assert_eq!(port.inferred_mode(), PortMode::Access);
+    }
+
+    #[test]
+    fn test_inferred_mode_trunk_when_tagged_vlans_present() {
+        let port = Port {
+            port_id: "24".to_string(),
+            mode: PortMode::Access, // explicit mode ignored
+            vlan: 1,
+            tagged_vlans: vec![10, 20],
+            description: None,
+            enabled: true,
+            poe_enabled: false,
+            mac_notify: false,
+            speed_duplex: SpeedDuplex::Auto,
+        };
+        assert_eq!(port.inferred_mode(), PortMode::Trunk);
+    }
+
+    #[test]
+    fn test_tagged_vlans_alias_from_allowed_vlans() {
+        // YAML with old "allowed_vlans" field should parse into tagged_vlans
+        let yaml = r#"
+            port_id: "1"
+            vlan: 10
+            allowed_vlans: [20, 30]
+        "#;
+        let port: Port = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(port.tagged_vlans, vec![20, 30]);
+        assert_eq!(port.inferred_mode(), PortMode::Trunk);
+    }
+
+    #[test]
+    fn test_tagged_vlans_primary_field() {
+        // YAML with new "tagged_vlans" field
+        let yaml = r#"
+            port_id: "1"
+            vlan: 10
+            tagged_vlans: [20, 30]
+        "#;
+        let port: Port = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(port.tagged_vlans, vec![20, 30]);
+        assert_eq!(port.inferred_mode(), PortMode::Trunk);
+    }
+
+    #[test]
+    fn test_mode_field_ignored_inferred_from_tagged_vlans() {
+        // YAML says mode: access but has tagged_vlans → inferred as trunk
+        let yaml = r#"
+            port_id: "1"
+            mode: access
+            vlan: 1
+            tagged_vlans: [10, 20]
+        "#;
+        let port: Port = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(port.inferred_mode(), PortMode::Trunk,
+            "Mode should be inferred from tagged_vlans, not from explicit mode field");
+    }
+
+    #[test]
+    fn test_port_without_mode_field_defaults_to_access() {
+        // YAML without mode field — should default and infer access
+        let yaml = r#"
+            port_id: "1"
+            vlan: 10
+        "#;
+        let port: Port = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(port.inferred_mode(), PortMode::Access);
     }
 }

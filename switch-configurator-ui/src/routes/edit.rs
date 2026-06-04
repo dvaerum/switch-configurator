@@ -183,7 +183,7 @@ pub struct EditablePort {
     pub port_id: String,
     pub mode: String,
     pub vlan: u16,
-    pub allowed_vlans: String,
+    pub tagged_vlans: String,
     pub description: String,
     pub enabled: bool,
     pub poe_enabled: bool,
@@ -222,7 +222,7 @@ pub struct PortForm {
     pub mode: String,
     pub vlan: u16,
     #[serde(default)]
-    pub allowed_vlans: String,
+    pub tagged_vlans: String,
     #[serde(default)]
     pub description: String,
     #[serde(default)]
@@ -615,7 +615,7 @@ fn parse_port_mode(s: &str) -> PortMode {
     }
 }
 
-fn parse_allowed_vlans(s: &str) -> Vec<u16> {
+fn parse_tagged_vlans(s: &str) -> Vec<u16> {
     s.split(',')
         .filter_map(|v| v.trim().parse::<u16>().ok())
         .collect()
@@ -626,7 +626,7 @@ fn form_to_port(form: &PortForm) -> Port {
         port_id: form.port_id.clone(),
         mode: parse_port_mode(&form.mode),
         vlan: form.vlan,
-        allowed_vlans: parse_allowed_vlans(&form.allowed_vlans),
+        tagged_vlans: parse_tagged_vlans(&form.tagged_vlans),
         description: if form.description.is_empty() { None } else { Some(form.description.clone()) },
         enabled: form.enabled.is_some(),
         poe_enabled: form.poe_enabled.is_some(),
@@ -653,7 +653,7 @@ fn port_to_editable(p: &Port) -> EditablePort {
         port_id: p.port_id.clone(),
         mode: format!("{:?}", p.mode).to_lowercase(),
         vlan: p.vlan,
-        allowed_vlans: p.allowed_vlans.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(","),
+        tagged_vlans: p.tagged_vlans.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(","),
         description: p.description.clone().unwrap_or_default(),
         enabled: p.enabled,
         poe_enabled: p.poe_enabled,
