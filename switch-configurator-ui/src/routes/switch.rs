@@ -153,7 +153,7 @@ async fn fetch_switch_view(state: &AppState, id: &str) -> SwitchView {
 }
 
 fn parse_switch_view(id: &str, json: &serde_json::Value) -> SwitchView {
-    let vlans = json["vlans"]
+    let mut vlans: Vec<VlanView> = json["vlans"]
         .as_array()
         .map(|arr| {
             arr.iter()
@@ -169,8 +169,9 @@ fn parse_switch_view(id: &str, json: &serde_json::Value) -> SwitchView {
                 .collect()
         })
         .unwrap_or_default();
+    vlans.sort_by_key(|v| v.id);
 
-    let ports = json["ports"]
+    let mut ports: Vec<PortView> = json["ports"]
         .as_array()
         .map(|arr| {
             arr.iter()
@@ -195,6 +196,7 @@ fn parse_switch_view(id: &str, json: &serde_json::Value) -> SwitchView {
                 .collect()
         })
         .unwrap_or_default();
+    ports.sort_by(|a, b| natural_port_sort(&a.port_id, &b.port_id));
 
     let mirrors = json["port_mirrors"]
         .as_array()
@@ -294,4 +296,21 @@ fn empty_switch(id: &str) -> SwitchView {
         mirrors: vec![],
         snmp: None,
     }
+}
+
+/// Natural sort for port IDs — handles pure numbers ("1", "24"),
+/// slash-separated ("1/0/1"), and prefixed ("GigabitEthernet1/0/1").
+fn natural_port_sort(a: &str, b: &str) -> std::cmp::Ordering {
+    // Extract trailing numeric segments for comparison
+    let a_nums = extract_port_numbers(a);
+    let b_nums = extract_port_numbers(b);
+    a_nums.cmp(&b_nums)
+}
+
+fn extract_port_numbers(port_id: &str) -> Vec<u32> {
+    port_id
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.parse::<u32>().unwrap_or(u32::MAX))
+        .collect()
 }
