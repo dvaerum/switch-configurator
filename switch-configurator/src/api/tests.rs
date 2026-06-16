@@ -2274,6 +2274,103 @@ mod integration_tests {
     }
 
     #[tokio::test]
+    async fn test_save_overlay_rejects_invalid_vlan_reference() {
+        let store = create_test_config_store();
+
+        let config_dir = tempfile::tempdir().unwrap();
+        store.status.set_config_metadata(crate::status::ConfigMetadata {
+            config_file: std::path::PathBuf::from("/tmp/main.yaml"),
+            config_folders: vec![config_dir.path().to_path_buf()],
+            last_loaded: chrono::Utc::now(),
+            switches_count: 1,
+        }).await;
+
+        let app = crate::api::create_router(store);
+
+        // Port references VLAN 999 which is not in the vlans list
+        let body = serde_json::json!({
+            "filename": "bad-overlay.yaml",
+            "merge_priority": 200,
+            "config": {
+                "switches": [{
+                    "id": "test-sw-01",
+                    "vlans": [{"id": 10, "name": "test"}],
+                    "ports": [{
+                        "port_id": "1",
+                        "vlan": 999,
+                        "tagged_vlans": [],
+                        "enabled": true
+                    }]
+                }]
+            }
+        });
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/switches/test-sw-01/save-overlay")
+            .header("Content-Type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST,
+                   "Save with invalid VLAN reference should be rejected");
+
+        // File should NOT have been created
+        let file_path = config_dir.path().join("bad-overlay.yaml");
+        assert!(!file_path.exists(), "Invalid config should not be written to disk");
+    }
+
+    #[tokio::test]
+    async fn test_save_overlay_rejects_invalid_tagged_vlan_reference() {
+        let store = create_test_config_store();
+
+        let config_dir = tempfile::tempdir().unwrap();
+        store.status.set_config_metadata(crate::status::ConfigMetadata {
+            config_file: std::path::PathBuf::from("/tmp/main.yaml"),
+            config_folders: vec![config_dir.path().to_path_buf()],
+            last_loaded: chrono::Utc::now(),
+            switches_count: 1,
+        }).await;
+
+        let app = crate::api::create_router(store);
+
+        // Port has tagged VLAN 3 which doesn't exist in vlans list
+        let body = serde_json::json!({
+            "filename": "bad-tagged.yaml",
+            "merge_priority": 200,
+            "config": {
+                "switches": [{
+                    "id": "test-sw-01",
+                    "vlans": [{"id": 1, "name": "default"}, {"id": 10, "name": "mgmt"}],
+                    "ports": [{
+                        "port_id": "7",
+                        "vlan": 1,
+                        "tagged_vlans": [3],
+                        "enabled": true
+                    }]
+                }]
+            }
+        });
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/switches/test-sw-01/save-overlay")
+            .header("Content-Type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST,
+                   "Save with invalid tagged VLAN reference should be rejected");
+
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+        assert!(json["error"].as_str().unwrap().contains("VLAN 3"),
+                "Error should mention the invalid VLAN. Got: {}", json["error"]);
+    }
+
+    #[tokio::test]
     async fn test_config_sources_returns_files() {
         let store = create_test_config_store();
 

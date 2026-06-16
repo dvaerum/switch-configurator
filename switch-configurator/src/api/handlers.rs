@@ -478,6 +478,40 @@ pub async fn save_overlay(
         ));
     }
 
+    // Validate port VLAN references before saving — overlay configs are partial,
+    // so we only check that ports reference VLANs defined within this overlay.
+    for switch in &body.config.switches {
+        let defined_vlan_ids: std::collections::HashSet<u16> = switch.vlans.iter().map(|v| v.id).collect();
+        for port in &switch.ports {
+            if !defined_vlan_ids.is_empty() && !defined_vlan_ids.contains(&port.vlan) {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "error": format!(
+                            "Port {} references VLAN {} which is not defined in this config. \
+                             Add VLAN {} to the vlans list first.",
+                            port.port_id, port.vlan, port.vlan
+                        )
+                    })),
+                ));
+            }
+            for &tagged in &port.tagged_vlans {
+                if !defined_vlan_ids.is_empty() && !defined_vlan_ids.contains(&tagged) {
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({
+                            "error": format!(
+                                "Port {} has tagged VLAN {} which is not defined in this config. \
+                                 Add VLAN {} to the vlans list first.",
+                                port.port_id, tagged, tagged
+                            )
+                        })),
+                    ));
+                }
+            }
+        }
+    }
+
     // Get config folder path from metadata
     let config_paths = store.status.get_config_paths().await;
     let config_folder = config_paths
