@@ -2447,6 +2447,134 @@ mod integration_tests {
     }
 
     #[tokio::test]
+    async fn test_save_overlay_rejects_duplicate_port_ids() {
+        let store = create_test_config_store();
+        let config_dir = tempfile::tempdir().unwrap();
+        store.status.set_config_metadata(crate::status::ConfigMetadata {
+            config_file: std::path::PathBuf::from("/tmp/main.yaml"),
+            config_folders: vec![config_dir.path().to_path_buf()],
+            last_loaded: chrono::Utc::now(),
+            switches_count: 1,
+        }).await;
+
+        let app = crate::api::create_router(store);
+
+        let body = serde_json::json!({
+            "filename": "dup-port.yaml",
+            "merge_priority": 200,
+            "config": {
+                "switches": [{
+                    "id": "test-sw-01",
+                    "vlans": [{"id": 10, "name": "test"}],
+                    "ports": [
+                        {"port_id": "1", "vlan": 10, "enabled": true},
+                        {"port_id": "1", "vlan": 10, "enabled": false}
+                    ]
+                }]
+            }
+        });
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/switches/test-sw-01/save-overlay")
+            .header("Content-Type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST,
+                   "Duplicate port IDs should be rejected");
+    }
+
+    #[tokio::test]
+    async fn test_save_overlay_expands_port_ranges() {
+        let store = create_test_config_store();
+        let config_dir = tempfile::tempdir().unwrap();
+        store.status.set_config_metadata(crate::status::ConfigMetadata {
+            config_file: std::path::PathBuf::from("/tmp/main.yaml"),
+            config_folders: vec![config_dir.path().to_path_buf()],
+            last_loaded: chrono::Utc::now(),
+            switches_count: 1,
+        }).await;
+
+        let app = crate::api::create_router(store);
+
+        // Port range "1-3" should be expanded and saved
+        let body = serde_json::json!({
+            "filename": "range-test.yaml",
+            "merge_priority": 200,
+            "config": {
+                "switches": [{
+                    "id": "test-sw-01",
+                    "vlans": [{"id": 10, "name": "test"}],
+                    "ports": [
+                        {"port_id": "1-3", "vlan": 10, "enabled": true}
+                    ]
+                }]
+            }
+        });
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/switches/test-sw-01/save-overlay")
+            .header("Content-Type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED,
+                   "Port range should be accepted and expanded");
+
+        // Verify the file was created
+        let file_path = config_dir.path().join("range-test.yaml");
+        assert!(file_path.exists(), "File should be created");
+    }
+
+    #[tokio::test]
+    async fn test_save_overlay_rejects_mirror_dest_in_ports() {
+        let store = create_test_config_store();
+        let config_dir = tempfile::tempdir().unwrap();
+        store.status.set_config_metadata(crate::status::ConfigMetadata {
+            config_file: std::path::PathBuf::from("/tmp/main.yaml"),
+            config_folders: vec![config_dir.path().to_path_buf()],
+            last_loaded: chrono::Utc::now(),
+            switches_count: 1,
+        }).await;
+
+        let app = crate::api::create_router(store);
+
+        // Port 22 is both in ports list AND mirror destination — should be rejected
+        let body = serde_json::json!({
+            "filename": "mirror-conflict.yaml",
+            "merge_priority": 200,
+            "config": {
+                "switches": [{
+                    "id": "test-sw-01",
+                    "vlans": [{"id": 10, "name": "test"}],
+                    "ports": [
+                        {"port_id": "1", "vlan": 10, "enabled": true},
+                        {"port_id": "22", "vlan": 10, "enabled": true}
+                    ],
+                    "port_mirrors": [
+                        {"session_id": "1", "source_ports": ["1"], "destination_port": "22", "direction": "both"}
+                    ]
+                }]
+            }
+        });
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/switches/test-sw-01/save-overlay")
+            .header("Content-Type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST,
+                   "Mirror dest port in ports list should be rejected");
+    }
+
+    #[tokio::test]
     async fn test_config_sources_returns_files() {
         let store = create_test_config_store();
 
