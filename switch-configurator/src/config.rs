@@ -1205,6 +1205,84 @@ pub fn validate_switch_config(switch: &mut SwitchConfig) -> Result<()> {
     Ok(())
 }
 
+/// Validate a switch config for overlay saving. Skips identity field checks
+/// (hostname, model, etc.) since overlays are partial. Runs:
+/// - Port range expansion
+/// - VLAN reference validation (ports must reference defined VLANs)
+/// - VLAN ID range check
+/// - Duplicate port/VLAN ID check
+pub fn validate_overlay_config(switch: &mut SwitchConfig) -> Result<()> {
+    // Expand port ranges (e.g., "1-5" → individual ports)
+    expand_port_ranges(switch)
+        .with_context(|| format!("Port range expansion failed for switch '{}'", switch.id))?;
+
+    // Check for duplicate VLAN IDs
+    let mut seen_vlans = std::collections::HashSet::new();
+    for vlan in &switch.vlans {
+        if !seen_vlans.insert(vlan.id) {
+            anyhow::bail!("Duplicate VLAN ID {} in switch '{}'", vlan.id, switch.id);
+        }
+        if vlan.id < 1 || vlan.id > 4094 {
+            anyhow::bail!("VLAN ID {} is out of range (1-4094) in switch '{}'", vlan.id, switch.id);
+        }
+    }
+
+    // Check for duplicate port IDs
+    let mut seen_ports = std::collections::HashSet::new();
+    for port in &switch.ports {
+        if !seen_ports.insert(port.port_id.clone()) {
+            anyhow::bail!("Duplicate port ID '{}' in switch '{}'", port.port_id, switch.id);
+        }
+    }
+
+    // Strict check: all port VLAN references must exist in the vlans list
+    // (validate_vlan_references silently filters invalid tagged_vlans, but for
+    // overlay saving we want to reject — the user should fix their config)
+    if !switch.vlans.is_empty() {
+        let defined_vlan_ids: std::collections::HashSet<u16> = switch.vlans.iter().map(|v| v.id).collect();
+        for port in &switch.ports {
+            if !defined_vlan_ids.contains(&port.vlan) {
+                anyhow::bail!(
+                    "Port {} references VLAN {} which is not defined. Add VLAN {} to the vlans list first.",
+                    port.port_id, port.vlan, port.vlan
+                );
+            }
+            for &tagged in &port.tagged_vlans {
+                if !defined_vlan_ids.contains(&tagged) {
+                    anyhow::bail!(
+                        "Port {} has tagged VLAN {} which is not defined. Add VLAN {} to the vlans list first.",
+                        port.port_id, tagged, tagged
+                    );
+                }
+            }
+        }
+    }
+
+    // Also run standard VLAN reference validation for other checks (mirror ports etc.)
+    if !switch.vlans.is_empty() {
+        let had_hostname = switch.hostname.is_some();
+        let had_model = switch.model.is_some();
+        if !had_hostname {
+            switch.hostname = Some(switch.id.clone());
+        }
+        if !had_model {
+            switch.model = Some(crate::models::SwitchModel::Aruba2930F);
+        }
+        let result = validate_vlan_references(switch).with_context(|| {
+            format!("VLAN reference validation failed for switch '{}'", switch.id)
+        });
+        if !had_hostname {
+            switch.hostname = None;
+        }
+        if !had_model {
+            switch.model = None;
+        }
+        result?;
+    }
+
+    Ok(())
+}
+
 /// Parse a port ID string that may contain ranges and/or comma-separated values
 /// Examples:
 /// - "1" → ["1"]

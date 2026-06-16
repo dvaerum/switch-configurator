@@ -2371,6 +2371,81 @@ mod integration_tests {
     }
 
     #[tokio::test]
+    async fn test_save_overlay_rejects_duplicate_vlan_ids() {
+        let store = create_test_config_store();
+        let config_dir = tempfile::tempdir().unwrap();
+        store.status.set_config_metadata(crate::status::ConfigMetadata {
+            config_file: std::path::PathBuf::from("/tmp/main.yaml"),
+            config_folders: vec![config_dir.path().to_path_buf()],
+            last_loaded: chrono::Utc::now(),
+            switches_count: 1,
+        }).await;
+
+        let app = crate::api::create_router(store);
+
+        let body = serde_json::json!({
+            "filename": "dup-vlan.yaml",
+            "merge_priority": 200,
+            "config": {
+                "switches": [{
+                    "id": "test-sw-01",
+                    "vlans": [
+                        {"id": 10, "name": "first"},
+                        {"id": 10, "name": "duplicate"}
+                    ]
+                }]
+            }
+        });
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/switches/test-sw-01/save-overlay")
+            .header("Content-Type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST,
+                   "Duplicate VLAN IDs should be rejected");
+    }
+
+    #[tokio::test]
+    async fn test_save_overlay_rejects_vlan_out_of_range() {
+        let store = create_test_config_store();
+        let config_dir = tempfile::tempdir().unwrap();
+        store.status.set_config_metadata(crate::status::ConfigMetadata {
+            config_file: std::path::PathBuf::from("/tmp/main.yaml"),
+            config_folders: vec![config_dir.path().to_path_buf()],
+            last_loaded: chrono::Utc::now(),
+            switches_count: 1,
+        }).await;
+
+        let app = crate::api::create_router(store);
+
+        let body = serde_json::json!({
+            "filename": "bad-vlan-range.yaml",
+            "merge_priority": 200,
+            "config": {
+                "switches": [{
+                    "id": "test-sw-01",
+                    "vlans": [{"id": 5000, "name": "out-of-range"}]
+                }]
+            }
+        });
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/switches/test-sw-01/save-overlay")
+            .header("Content-Type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST,
+                   "VLAN ID out of range should be rejected");
+    }
+
+    #[tokio::test]
     async fn test_config_sources_returns_files() {
         let store = create_test_config_store();
 
