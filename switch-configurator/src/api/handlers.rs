@@ -453,7 +453,7 @@ pub async fn preview_diff(
 pub async fn save_overlay(
     State(store): State<ConfigStore>,
     Path(id): Path<String>,
-    Json(body): Json<SaveOverlayRequest>,
+    Json(mut body): Json<SaveOverlayRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
     // Validate filename: no path traversal, must end in .yaml or .yml
     let filename = &body.filename;
@@ -478,37 +478,15 @@ pub async fn save_overlay(
         ));
     }
 
-    // Validate port VLAN references before saving — overlay configs are partial,
-    // so we only check that ports reference VLANs defined within this overlay.
-    for switch in &body.config.switches {
-        let defined_vlan_ids: std::collections::HashSet<u16> = switch.vlans.iter().map(|v| v.id).collect();
-        for port in &switch.ports {
-            if !defined_vlan_ids.is_empty() && !defined_vlan_ids.contains(&port.vlan) {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({
-                        "error": format!(
-                            "Port {} references VLAN {} which is not defined in this config. \
-                             Add VLAN {} to the vlans list first.",
-                            port.port_id, port.vlan, port.vlan
-                        )
-                    })),
-                ));
-            }
-            for &tagged in &port.tagged_vlans {
-                if !defined_vlan_ids.is_empty() && !defined_vlan_ids.contains(&tagged) {
-                    return Err((
-                        StatusCode::BAD_REQUEST,
-                        Json(json!({
-                            "error": format!(
-                                "Port {} has tagged VLAN {} which is not defined in this config. \
-                                 Add VLAN {} to the vlans list first.",
-                                port.port_id, tagged, tagged
-                            )
-                        })),
-                    ));
-                }
-            }
+    // Validate the overlay config before saving — checks VLAN references,
+    // duplicate IDs, VLAN range, port ranges. Skips identity field checks
+    // since overlays are partial configs.
+    for switch in &mut body.config.switches {
+        if let Err(e) = crate::config::validate_overlay_config(switch) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": format!("Validation failed: {}", e)})),
+            ));
         }
     }
 
