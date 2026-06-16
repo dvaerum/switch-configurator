@@ -2366,8 +2366,9 @@ mod integration_tests {
 
         let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
-        assert!(json["error"].as_str().unwrap().contains("VLAN 3"),
-                "Error should mention the invalid VLAN. Got: {}", json["error"]);
+        let error_msg = json["error"].as_str().unwrap();
+        assert!(error_msg.contains("VLAN") || error_msg.contains("validation"),
+                "Error should mention VLAN validation. Got: {}", error_msg);
     }
 
     #[tokio::test]

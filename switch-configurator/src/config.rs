@@ -1025,9 +1025,19 @@ fn validate_has_vlans(switch: &SwitchConfig) -> Result<()> {
 }
 
 /// Validate that all VLANs referenced in port configurations exist
-/// Filters out non-existent VLANs from tagged_vlans lists and logs warnings
-/// Also validates VLAN name lengths against switch model limits
+/// Strict validation: rejects any port referencing non-existent VLANs.
+/// Used by overlay save to catch errors before writing config files.
+fn validate_vlan_references_strict(switch: &mut SwitchConfig) -> Result<()> {
+    validate_vlan_references_inner(switch, true)
+}
+
+/// Lenient validation: filters out invalid tagged VLANs with warnings.
+/// Used during config load to be graceful about minor issues.
 fn validate_vlan_references(switch: &mut SwitchConfig) -> Result<()> {
+    validate_vlan_references_inner(switch, false)
+}
+
+fn validate_vlan_references_inner(switch: &mut SwitchConfig, strict: bool) -> Result<()> {
     use std::collections::HashSet;
     use tracing::{debug, error, warn};
 
@@ -1103,27 +1113,34 @@ fn validate_vlan_references(switch: &mut SwitchConfig) -> Result<()> {
             has_errors = true;
         }
 
-        // Check and filter allowed VLANs (for trunk ports)
-        let original_allowed = port.tagged_vlans.clone();
-        let valid_vlans: Vec<u16> = original_allowed.iter()
-            .filter(|&&vlan_id| defined_vlans.contains(&vlan_id))
-            .copied()
-            .collect();
-
-        // Log warnings for filtered VLANs
-        for &vlan_id in &original_allowed {
+        // Check tagged VLANs — strict mode rejects, lenient mode filters
+        for &vlan_id in &port.tagged_vlans {
             if !defined_vlans.contains(&vlan_id) {
-                warn!(
-                    "Switch '{}' Port {}: Filtering out non-existent VLAN {} from tagged_vlans. \
-                    This VLAN is not defined in the switch configuration and would cause the switch \
-                    to reject the configuration. The valid VLANs {:?} will still be applied.",
-                    hostname, port.port_id, vlan_id, valid_vlans
-                );
+                if strict {
+                    error!(
+                        "Port {} has tagged VLAN {} which is not defined. Add VLAN {} to the vlans list first.",
+                        port.port_id, vlan_id, vlan_id
+                    );
+                    has_errors = true;
+                } else {
+                    warn!(
+                        "Switch '{}' Port {}: Filtering out non-existent VLAN {} from tagged_vlans. \
+                        This VLAN is not defined in the switch configuration and would cause the switch \
+                        to reject the configuration.",
+                        hostname, port.port_id, vlan_id
+                    );
+                }
             }
         }
 
-        // Update the port's tagged_vlans to only include valid ones
-        port.tagged_vlans = valid_vlans;
+        if !strict {
+            // Lenient mode: filter out invalid tagged VLANs
+            let valid_vlans: Vec<u16> = port.tagged_vlans.iter()
+                .filter(|&&v| defined_vlans.contains(&v))
+                .copied()
+                .collect();
+            port.tagged_vlans = valid_vlans;
+        }
     }
 
     // Check port mirror source ports exist in port list and destination ports are not in port list
@@ -1235,30 +1252,9 @@ pub fn validate_overlay_config(switch: &mut SwitchConfig) -> Result<()> {
         }
     }
 
-    // Strict check: all port VLAN references must exist in the vlans list
-    // (validate_vlan_references silently filters invalid tagged_vlans, but for
-    // overlay saving we want to reject — the user should fix their config)
-    if !switch.vlans.is_empty() {
-        let defined_vlan_ids: std::collections::HashSet<u16> = switch.vlans.iter().map(|v| v.id).collect();
-        for port in &switch.ports {
-            if !defined_vlan_ids.contains(&port.vlan) {
-                anyhow::bail!(
-                    "Port {} references VLAN {} which is not defined. Add VLAN {} to the vlans list first.",
-                    port.port_id, port.vlan, port.vlan
-                );
-            }
-            for &tagged in &port.tagged_vlans {
-                if !defined_vlan_ids.contains(&tagged) {
-                    anyhow::bail!(
-                        "Port {} has tagged VLAN {} which is not defined. Add VLAN {} to the vlans list first.",
-                        port.port_id, tagged, tagged
-                    );
-                }
-            }
-        }
-    }
-
-    // Also run standard VLAN reference validation for other checks (mirror ports etc.)
+    // Validate VLAN references strictly — reject any invalid references.
+    // Uses the same validate_vlan_references function as config load, but
+    // wrapped to temporarily set required fields and run in strict mode.
     if !switch.vlans.is_empty() {
         let had_hostname = switch.hostname.is_some();
         let had_model = switch.model.is_some();
@@ -1268,16 +1264,16 @@ pub fn validate_overlay_config(switch: &mut SwitchConfig) -> Result<()> {
         if !had_model {
             switch.model = Some(crate::models::SwitchModel::Aruba2930F);
         }
-        let result = validate_vlan_references(switch).with_context(|| {
-            format!("VLAN reference validation failed for switch '{}'", switch.id)
-        });
+        let result = validate_vlan_references_strict(switch);
         if !had_hostname {
             switch.hostname = None;
         }
         if !had_model {
             switch.model = None;
         }
-        result?;
+        result.with_context(|| {
+            format!("VLAN reference validation failed for switch '{}'", switch.id)
+        })?;
     }
 
     Ok(())
