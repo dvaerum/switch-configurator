@@ -292,6 +292,22 @@ impl SwitchModel {
 
     /// Check if switch supports VLAN descriptions
     /// Aruba switches only support VLAN names, not descriptions
+    /// VLANs that always exist on this switch model and cannot be removed.
+    /// These are implicitly valid for port references even if not defined in config.
+    pub fn implicit_vlans(&self) -> Vec<u16> {
+        match self {
+            // All current vendors have VLAN 1 as the default that cannot be removed
+            Self::Aruba2530_24G_POE
+            | Self::Aruba2530_8G_POE
+            | Self::Aruba2530_48G_2SFP
+            | Self::Aruba2540_24G
+            | Self::Aruba2540_48G_4SFP
+            | Self::Aruba2930F
+            | Self::CiscoCatalyst9300_24P_UPOE
+            | Self::Fortiswitch124F_FPOE => vec![1],
+        }
+    }
+
     pub fn supports_vlan_description(&self) -> bool {
         matches!(
             self,

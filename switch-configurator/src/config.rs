@@ -1082,9 +1082,13 @@ fn validate_vlan_references_inner(switch: &mut SwitchConfig, strict: bool) -> Re
         }
     }
 
-    // Collect all defined VLAN IDs
-    let defined_vlans: HashSet<u16> = switch.vlans.iter().map(|v| v.id).collect();
-    debug!("Defined VLANs: {:?}", defined_vlans);
+    // Collect all defined VLAN IDs plus implicit VLANs for the switch model
+    // (e.g., VLAN 1 always exists on Aruba/Cisco/FortiSwitch and cannot be removed)
+    let mut defined_vlans: HashSet<u16> = switch.vlans.iter().map(|v| v.id).collect();
+    for &implicit_vlan in &model.implicit_vlans() {
+        defined_vlans.insert(implicit_vlan);
+    }
+    debug!("Defined VLANs (incl. implicit): {:?}", defined_vlans);
 
     let mut has_errors = false;
 
@@ -1252,28 +1256,51 @@ pub fn validate_overlay_config(switch: &mut SwitchConfig) -> Result<()> {
         }
     }
 
-    // Validate VLAN references strictly — reject any invalid references.
-    // Uses the same validate_vlan_references function as config load, but
-    // wrapped to temporarily set required fields and run in strict mode.
+    // Validate port VLAN references strictly — reject any invalid references.
+    // Uses the model's implicit_vlans() if model is set, otherwise only
+    // checks against explicitly defined VLANs.
     if !switch.vlans.is_empty() {
-        let had_hostname = switch.hostname.is_some();
-        let had_model = switch.model.is_some();
-        if !had_hostname {
-            switch.hostname = Some(switch.id.clone());
+        let mut valid_vlans: std::collections::HashSet<u16> = switch.vlans.iter().map(|v| v.id).collect();
+        // Add implicit VLANs from the model (e.g., VLAN 1 on all current vendors).
+        // When model is not set, default to VLAN 1 since all supported vendors have it.
+        match &switch.model {
+            Some(model) => {
+                for &v in &model.implicit_vlans() {
+                    valid_vlans.insert(v);
+                }
+            }
+            None => {
+                valid_vlans.insert(1);
+            }
         }
-        if !had_model {
-            switch.model = Some(crate::models::SwitchModel::Aruba2930F);
+        for port in &switch.ports {
+            if !valid_vlans.contains(&port.vlan) {
+                anyhow::bail!(
+                    "Port {} references VLAN {} which is not defined. Add VLAN {} to the vlans list first.",
+                    port.port_id, port.vlan, port.vlan
+                );
+            }
+            for &tagged in &port.tagged_vlans {
+                if !valid_vlans.contains(&tagged) {
+                    anyhow::bail!(
+                        "Port {} has tagged VLAN {} which is not defined. Add VLAN {} to the vlans list first.",
+                        port.port_id, tagged, tagged
+                    );
+                }
+            }
         }
-        let result = validate_vlan_references_strict(switch);
-        if !had_hostname {
-            switch.hostname = None;
+
+        // Check mirror destination ports not in ports list
+        let defined_port_ids: std::collections::HashSet<String> = switch.ports.iter().map(|p| p.port_id.clone()).collect();
+        for mirror in &switch.port_mirrors {
+            if defined_port_ids.contains(&mirror.destination_port) {
+                anyhow::bail!(
+                    "Mirror session {} destination port {} is also in the ports list. \
+                     Mirror destination ports are special-purpose and must not be configured as regular ports.",
+                    mirror.session_id, mirror.destination_port
+                );
+            }
         }
-        if !had_model {
-            switch.model = None;
-        }
-        result.with_context(|| {
-            format!("VLAN reference validation failed for switch '{}'", switch.id)
-        })?;
     }
 
     Ok(())
