@@ -2575,6 +2575,52 @@ mod integration_tests {
     }
 
     #[tokio::test]
+    async fn test_save_overlay_allows_vlan_1_implicitly() {
+        // VLAN 1 is the default VLAN on all switches and cannot be removed.
+        // Ports referencing VLAN 1 should be valid even if VLAN 1 is not
+        // explicitly defined in the vlans list.
+        let store = create_test_config_store();
+        let config_dir = tempfile::tempdir().unwrap();
+        store.status.set_config_metadata(crate::status::ConfigMetadata {
+            config_file: std::path::PathBuf::from("/tmp/main.yaml"),
+            config_folders: vec![config_dir.path().to_path_buf()],
+            last_loaded: chrono::Utc::now(),
+            switches_count: 1,
+        }).await;
+
+        let app = crate::api::create_router(store);
+
+        // VLAN 1 not in vlans list, but port references it — should be allowed
+        let body = serde_json::json!({
+            "filename": "vlan1-implicit.yaml",
+            "merge_priority": 200,
+            "config": {
+                "switches": [{
+                    "id": "test-sw-01",
+                    "vlans": [{"id": 10, "name": "test"}],
+                    "ports": [{
+                        "port_id": "1",
+                        "vlan": 1,
+                        "tagged_vlans": [],
+                        "enabled": true
+                    }]
+                }]
+            }
+        });
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/switches/test-sw-01/save-overlay")
+            .header("Content-Type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED,
+                   "Port referencing VLAN 1 should be allowed even without VLAN 1 in vlans list");
+    }
+
+    #[tokio::test]
     async fn test_config_sources_returns_files() {
         let store = create_test_config_store();
 
