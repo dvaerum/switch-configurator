@@ -166,29 +166,9 @@ async fn main() -> Result<()> {
         return run_one_off(app_config, runtime_config).await;
     }
 
-    // Service mode: apply configuration on startup if requested
-    if args.apply_on_startup {
-        info!("Applying configuration on startup...");
-        info!("========================================");
-
-        // Apply configuration once using the same logic as one-off mode
-        match apply_configuration_once(&app_config, &runtime_config).await {
-            Ok(summary) => {
-                info!("✓ Startup configuration applied successfully");
-                info!("  Successful: {}, Failed: {}", summary.0, summary.1);
-            }
-            Err(e) => {
-                warn!("Failed to apply configuration on startup: {}", e);
-                warn!("Continuing to start service...");
-            }
-        }
-
-        info!("========================================");
-        info!("");
-    }
-
-    // Service mode: start API and file watcher
-    // Create shared ConfigStore for both API and watcher
+    // Service mode: create the shared ConfigStore (and its status tracker) for both
+    // API and watcher. This must happen BEFORE the optional startup apply so that the
+    // apply records its result into the tracker and the dashboard reflects it.
     let store = config::ConfigStore::new(app_config.clone(), args.port);
 
     // Store validation failures for dashboard display
@@ -206,6 +186,29 @@ async fn main() -> Result<()> {
         last_loaded: chrono::Utc::now(),
         switches_count: app_config.switches.len(),
     }).await;
+
+    // Service mode: apply configuration on startup if requested
+    if args.apply_on_startup {
+        info!("Applying configuration on startup...");
+        info!("========================================");
+
+        // Apply configuration once using the same logic as one-off mode.
+        // Pass the status tracker so the per-switch outcome shows on the dashboard
+        // instead of staying at "Not applied" until the next file change.
+        match apply_configuration_once(&app_config, &runtime_config, Some(&store.status)).await {
+            Ok(summary) => {
+                info!("✓ Startup configuration applied successfully");
+                info!("  Successful: {}, Failed: {}", summary.0, summary.1);
+            }
+            Err(e) => {
+                warn!("Failed to apply configuration on startup: {}", e);
+                warn!("Continuing to start service...");
+            }
+        }
+
+        info!("========================================");
+        info!("");
+    }
 
     // Start API server
     let api_handle = tokio::spawn(api::server::start(store.clone(), args.socket.clone()));
@@ -243,8 +246,8 @@ async fn main() -> Result<()> {
 async fn apply_configuration_once(
     app_config: &config::AppConfig,
     runtime_config: &config::RuntimeConfig,
+    status: Option<&status::StatusTracker>,
 ) -> Result<(usize, usize)> {
-    use crate::vendors::create_vendor_with_runtime;
     use tracing::{error, warn};
 
     info!("========================================");
@@ -287,122 +290,19 @@ async fn apply_configuration_once(
         info!("Management IP: {}", switch_config.management_ip());
         info!("========================================");
 
-        let mut vendor = match create_vendor_with_runtime(switch_config, &runtime_config, switch_config.settings.enforce_port_config) {
-            Ok(v) => v,
-            Err(e) => {
-                error!("Failed to create vendor implementation: {}", e);
-                failure_count += 1;
-                continue;
-            }
-        };
-
-        // Connect
-        info!("Connecting to {}...", switch_config.hostname());
-        if let Err(e) = vendor.connect().await {
-            error!("Failed to connect: {}", e);
-            failure_count += 1;
-            continue;
-        }
-        info!("✓ Connected successfully");
-
-        // Apply configuration
-        match vendor.apply_configuration().await {
-            Ok(results) => {
-                if results.is_empty() {
-                    info!("✓ No changes needed - switch already in desired state");
-                    success_count += 1;
-                } else {
-                    info!("✓ Applied {} configuration change(s)", results.len());
-                    for result in results {
-                        info!("  - {}", result.message);
-                    }
-
-                    // Run validation tests if configured
-                    let validation_passed = if let Some(validation_config) = &switch_config.validation {
-                        if validation_config.enabled && !runtime_config.dry_run {
-                            info!("Running validation tests...");
-                            match vendor.run_validation_tests(validation_config).await {
-                                Ok(validation_result) => {
-                                    if validation_result.passed {
-                                        info!("✓ Validation passed: {}/{} tests successful",
-                                            validation_result.tests_passed,
-                                            validation_result.tests_run);
-                                        true
-                                    } else {
-                                        warn!("✗ Validation failed: {}/{} tests failed",
-                                            validation_result.tests_failed,
-                                            validation_result.tests_run);
-
-                                        for failure in &validation_result.failures {
-                                            warn!("  - {}: {}", failure.test_name, failure.error);
-                                        }
-
-                                        // Handle validation failure based on configuration
-                                        match validation_config.on_failure {
-                                            validation::FailureAction::Rollback => {
-                                                warn!("Rolling back configuration...");
-                                                if let Err(e) = vendor.rollback_configuration(validation_config.rollback_method).await {
-                                                    error!("Failed to rollback configuration: {}", e);
-                                                } else {
-                                                    info!("✓ Configuration rolled back");
-                                                }
-                                                false
-                                            }
-                                            validation::FailureAction::SaveAnyway => {
-                                                warn!("Validation failed but saving configuration anyway (as configured)");
-                                                true
-                                            }
-                                            validation::FailureAction::Manual => {
-                                                warn!("Validation failed - manual intervention required");
-                                                warn!("Configuration NOT saved - running config differs from startup config");
-                                                false
-                                            }
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    error!("Failed to run validation tests: {}", e);
-                                    false
-                                }
-                            }
-                        } else {
-                            // Validation disabled or dry-run mode
-                            true
-                        }
-                    } else {
-                        // No validation configured
-                        true
-                    };
-
-                    // Save configuration only if validation passed (or no validation configured)
-                    if validation_passed && !runtime_config.dry_run {
-                        info!("Saving configuration...");
-                        if let Err(e) = vendor.save_configuration().await {
-                            warn!("Failed to save configuration: {}", e);
-                            failure_count += 1;
-                        } else {
-                            info!("✓ Configuration saved");
-                            success_count += 1;
-                        }
-                    } else if !validation_passed {
-                        failure_count += 1;
-                    } else {
-                        // Dry-run mode
-                        success_count += 1;
-                    }
+        match configure_switch_once(switch_config, runtime_config).await {
+            Ok(()) => {
+                success_count += 1;
+                if let Some(status) = status {
+                    status.record_apply_success(&switch_config.id).await;
                 }
             }
-            Err(e) => {
-                error!("Failed to apply configuration: {}", e);
+            Err(reason) => {
                 failure_count += 1;
+                if let Some(status) = status {
+                    status.record_apply_failure(&switch_config.id, &reason).await;
+                }
             }
-        }
-
-        // Disconnect
-        if let Err(e) = vendor.disconnect().await {
-            warn!("Failed to disconnect cleanly: {}", e);
-        } else {
-            info!("✓ Disconnected");
         }
     }
 
@@ -417,12 +317,143 @@ async fn apply_configuration_once(
     Ok((success_count, failure_count))
 }
 
+/// Apply configuration to a single switch (connect, apply, validate, save, disconnect).
+///
+/// Returns `Ok(())` when the switch ends in the desired state (including no-change and
+/// dry-run), or `Err(reason)` describing the failure. The caller is responsible for
+/// counting outcomes and recording them in the status tracker.
+async fn configure_switch_once(
+    switch_config: &crate::models::SwitchConfig,
+    runtime_config: &config::RuntimeConfig,
+) -> std::result::Result<(), String> {
+    use crate::vendors::create_vendor_with_runtime;
+    use tracing::{error, warn};
+
+    let mut vendor = match create_vendor_with_runtime(switch_config, &runtime_config, switch_config.settings.enforce_port_config) {
+        Ok(v) => v,
+        Err(e) => {
+            error!("Failed to create vendor implementation: {}", e);
+            return Err(format!("Failed to create vendor implementation: {}", e));
+        }
+    };
+
+    // Connect
+    info!("Connecting to {}...", switch_config.hostname());
+    if let Err(e) = vendor.connect().await {
+        error!("Failed to connect: {}", e);
+        return Err(format!("Failed to connect: {}", e));
+    }
+    info!("✓ Connected successfully");
+
+    // Apply configuration
+    let outcome: std::result::Result<(), String> = match vendor.apply_configuration().await {
+        Ok(results) => {
+            if results.is_empty() {
+                info!("✓ No changes needed - switch already in desired state");
+                Ok(())
+            } else {
+                info!("✓ Applied {} configuration change(s)", results.len());
+                for result in results {
+                    info!("  - {}", result.message);
+                }
+
+                // Run validation tests if configured
+                let validation_passed = if let Some(validation_config) = &switch_config.validation {
+                    if validation_config.enabled && !runtime_config.dry_run {
+                        info!("Running validation tests...");
+                        match vendor.run_validation_tests(validation_config).await {
+                            Ok(validation_result) => {
+                                if validation_result.passed {
+                                    info!("✓ Validation passed: {}/{} tests successful",
+                                        validation_result.tests_passed,
+                                        validation_result.tests_run);
+                                    true
+                                } else {
+                                    warn!("✗ Validation failed: {}/{} tests failed",
+                                        validation_result.tests_failed,
+                                        validation_result.tests_run);
+
+                                    for failure in &validation_result.failures {
+                                        warn!("  - {}: {}", failure.test_name, failure.error);
+                                    }
+
+                                    // Handle validation failure based on configuration
+                                    match validation_config.on_failure {
+                                        validation::FailureAction::Rollback => {
+                                            warn!("Rolling back configuration...");
+                                            if let Err(e) = vendor.rollback_configuration(validation_config.rollback_method).await {
+                                                error!("Failed to rollback configuration: {}", e);
+                                            } else {
+                                                info!("✓ Configuration rolled back");
+                                            }
+                                            false
+                                        }
+                                        validation::FailureAction::SaveAnyway => {
+                                            warn!("Validation failed but saving configuration anyway (as configured)");
+                                            true
+                                        }
+                                        validation::FailureAction::Manual => {
+                                            warn!("Validation failed - manual intervention required");
+                                            warn!("Configuration NOT saved - running config differs from startup config");
+                                            false
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                error!("Failed to run validation tests: {}", e);
+                                false
+                            }
+                        }
+                    } else {
+                        // Validation disabled or dry-run mode
+                        true
+                    }
+                } else {
+                    // No validation configured
+                    true
+                };
+
+                // Save configuration only if validation passed (or no validation configured)
+                if validation_passed && !runtime_config.dry_run {
+                    info!("Saving configuration...");
+                    if let Err(e) = vendor.save_configuration().await {
+                        warn!("Failed to save configuration: {}", e);
+                        Err(format!("Failed to save configuration: {}", e))
+                    } else {
+                        info!("✓ Configuration saved");
+                        Ok(())
+                    }
+                } else if !validation_passed {
+                    Err("Validation failed".to_string())
+                } else {
+                    // Dry-run mode
+                    Ok(())
+                }
+            }
+        }
+        Err(e) => {
+            error!("Failed to apply configuration: {}", e);
+            Err(format!("Failed to apply configuration: {}", e))
+        }
+    };
+
+    // Disconnect
+    if let Err(e) = vendor.disconnect().await {
+        warn!("Failed to disconnect cleanly: {}", e);
+    } else {
+        info!("✓ Disconnected");
+    }
+
+    outcome
+}
+
 /// Run in one-off mode: apply configuration once and exit
 async fn run_one_off(
     app_config: config::AppConfig,
     runtime_config: config::RuntimeConfig,
 ) -> Result<()> {
-    let (_success_count, failure_count) = apply_configuration_once(&app_config, &runtime_config).await?;
+    let (_success_count, failure_count) = apply_configuration_once(&app_config, &runtime_config, None).await?;
 
     if failure_count > 0 {
         anyhow::bail!("{} switch(es) failed configuration", failure_count);
