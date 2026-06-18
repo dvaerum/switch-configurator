@@ -196,7 +196,7 @@ impl StatusTracker {
             let credentials = switch.credentials.as_ref().expect("credentials validated");
 
             inner.switch_status.insert(
-                hostname.clone(),
+                switch.id.clone(),
                 SwitchStatus {
                     id: switch.id.clone(),
                     hostname: hostname.clone(),
@@ -215,9 +215,9 @@ impl StatusTracker {
     }
 
     /// Record a successful configuration application
-    pub async fn record_apply_success(&self, hostname: &str) {
+    pub async fn record_apply_success(&self, switch_id: &str) {
         let mut inner = self.inner.write().await;
-        if let Some(status) = inner.switch_status.get_mut(hostname) {
+        if let Some(status) = inner.switch_status.get_mut(switch_id) {
             status.last_applied = Some(Utc::now());
             status.last_result = Some("success".to_string());
             status.apply_count += 1;
@@ -226,9 +226,9 @@ impl StatusTracker {
     }
 
     /// Record a failed configuration application
-    pub async fn record_apply_failure(&self, hostname: &str, error: &str) {
+    pub async fn record_apply_failure(&self, switch_id: &str, error: &str) {
         let mut inner = self.inner.write().await;
-        if let Some(status) = inner.switch_status.get_mut(hostname) {
+        if let Some(status) = inner.switch_status.get_mut(switch_id) {
             status.last_applied = Some(Utc::now());
             status.last_result = Some(format!("failed: {}", error));
             status.apply_count += 1;
@@ -237,9 +237,9 @@ impl StatusTracker {
     }
 
     /// Record warnings from a configuration cycle (replaces previous warnings)
-    pub async fn record_warnings(&self, hostname: &str, warnings: Vec<String>) {
+    pub async fn record_warnings(&self, switch_id: &str, warnings: Vec<String>) {
         let mut inner = self.inner.write().await;
-        if let Some(status) = inner.switch_status.get_mut(hostname) {
+        if let Some(status) = inner.switch_status.get_mut(switch_id) {
             status.warnings = warnings;
         }
     }

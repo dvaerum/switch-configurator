@@ -784,9 +784,9 @@ interface 1
 
         tracker.initialize_switches(&switches).await;
 
-        // Record a warning
+        // Record a warning (keyed by switch id, matching the watcher/API callers)
         let warnings = vec!["Hardware product number mismatch: J9779A vs J9773A".to_string()];
-        tracker.record_warnings("test-switch", warnings.clone()).await;
+        tracker.record_warnings("test-sw", warnings.clone()).await;
 
         // Verify via get_status
         let status = tracker.get_status(4000).await;
@@ -795,14 +795,14 @@ interface 1
         assert!(sw.warnings[0].contains("J9779A"));
 
         // Record new warnings (should replace, not append)
-        tracker.record_warnings("test-switch", vec!["New warning".to_string()]).await;
+        tracker.record_warnings("test-sw", vec!["New warning".to_string()]).await;
         let status2 = tracker.get_status(4000).await;
         let sw2 = status2.switches.iter().find(|s| s.hostname == "test-switch").unwrap();
         assert_eq!(sw2.warnings.len(), 1);
         assert!(sw2.warnings[0].contains("New warning"));
 
         // Clear warnings
-        tracker.record_warnings("test-switch", vec![]).await;
+        tracker.record_warnings("test-sw", vec![]).await;
         let status3 = tracker.get_status(4000).await;
         let sw3 = status3.switches.iter().find(|s| s.hostname == "test-switch").unwrap();
         assert!(sw3.warnings.is_empty());

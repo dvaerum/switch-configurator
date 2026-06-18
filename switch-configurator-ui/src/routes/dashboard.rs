@@ -72,6 +72,13 @@ async fn fetch_switch_cards(state: &AppState) -> Vec<SwitchCard> {
     // Fetch status for warnings and last_result
     let status_json = state.backend.get("/api/status").await.ok();
 
+    // Switch IDs currently being applied (rendered as "Configuring")
+    let configuring: std::collections::HashSet<String> = status_json
+        .as_ref()
+        .and_then(|s| s["currently_configuring"].as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+
     let switches = switches_json["switches"]
         .as_array()
         .cloned()
@@ -88,7 +95,19 @@ async fn fetch_switch_cards(state: &AppState) -> Vec<SwitchCard> {
                 .and_then(|s| s["switches"].as_array())
                 .and_then(|arr| arr.iter().find(|s| s["id"].as_str() == Some(&id)))
                 .map(|s| {
-                    let status = s["last_result"].as_str().map(|s| s.to_string());
+                    // Normalize the raw last_result into the badge states the template
+                    // matches. `record_apply_failure` stores "failed: <error>", so match
+                    // on a prefix rather than the exact string, and let an in-progress
+                    // apply win over a stale last_result.
+                    let status = if configuring.contains(&id) {
+                        Some("configuring".to_string())
+                    } else {
+                        match s["last_result"].as_str() {
+                            Some(r) if r.starts_with("success") => Some("success".to_string()),
+                            Some(r) if r.starts_with("failed") => Some("failed".to_string()),
+                            _ => None,
+                        }
+                    };
                     let warnings = s["warnings"]
                         .as_array()
                         .map(|a| {
