@@ -24,24 +24,24 @@
                 <td class="text-muted">{{ port.speed_display }}</td>
                 <td>
                     {% if port.poe_supported %}
-                        <span id="poe-reset-{{ port.port_id }}">
                         {% if port.poe_enabled %}
-                            <button class="btn text-sm"
-                                    hx-post="/switch/{{ switch.id }}/poe-reset/{{ port.port_id }}"
-                                    hx-target="#poe-reset-{{ port.port_id }}"
-                                    hx-swap="innerHTML"
-                                    hx-confirm="Reset PoE on port {{ port.port_id }}? This will power-cycle the port for 3 seconds."
-                                    style="background:var(--warning);color:white;">
-                                Reset PoE
-                            </button>
+                            <span class="flex items-center" style="gap:0.5rem;">
+                                <button class="btn text-sm"
+                                        data-switch="{{ switch.id }}"
+                                        data-port="{{ port.port_id }}"
+                                        onclick="poeReset(this)"
+                                        style="background:var(--warning);color:white;">
+                                    Reset PoE
+                                </button>
+                                <span class="poe-status text-sm"></span>
+                            </span>
                         {% else %}
                             <button class="btn text-sm" disabled
-                                    style="background:var(--muted);color:var(--text-muted);cursor:not-allowed;"
+                                    style="background:var(--border);color:var(--text-muted);cursor:not-allowed;"
                                     title="PoE is disabled on this port">
                                 Reset PoE
                             </button>
                         {% endif %}
-                        </span>
                     {% else %}
                         -
                     {% endif %}

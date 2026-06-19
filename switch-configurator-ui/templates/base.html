@@ -17,5 +17,68 @@
     <main>
         {% block content %}{% endblock %}
     </main>
+    <script>
+    // PoE reset with live, backend-driven progress.
+    // Opens the SSE stream first so no early stage is missed, then starts the
+    // reset. Every status line below comes from a backend `poe-reset` event —
+    // the 3/2/1 countdown is the switch-side timer, not a client-side guess.
+    function poeReset(btn) {
+        var switchId = btn.dataset.switch;
+        var portId = btn.dataset.port;
+        if (!confirm('Reset PoE on port ' + portId + '? This will power-cycle the port for ~3 seconds.')) {
+            return;
+        }
+        var statusEl = btn.parentElement.querySelector('.poe-status');
+        var setStatus = function (txt, color) {
+            statusEl.textContent = txt;
+            statusEl.style.color = color || 'var(--text-muted)';
+        };
+        btn.disabled = true;
+        setStatus('⏳ Starting…', 'var(--text-muted)');
+
+        var es = new EventSource('/events');
+        var finished = false;
+        var done = function () {
+            if (finished) return;
+            finished = true;
+            es.close();
+            btn.disabled = false;
+        };
+
+        es.addEventListener('poe-reset', function (ev) {
+            var payload;
+            try { payload = JSON.parse(ev.data).data; } catch (e) { return; }
+            if (payload.switch_id !== switchId || payload.port_id !== portId) return;
+            switch (payload.stage) {
+                case 'connecting': setStatus('🔌 Connecting…'); break;
+                case 'disabling':  setStatus('⚡ Powering off…', 'var(--danger)'); break;
+                case 'waiting':    setStatus('⏱ Back on in ' + payload.detail + '…', 'var(--warning)'); break;
+                case 'enabling':   setStatus('🔌 Powering on…'); break;
+                case 'done':       setStatus('✓ Reset OK', 'var(--success)'); done(); break;
+                case 'failed':     setStatus('✗ ' + (payload.detail || 'Failed'), 'var(--danger)'); done(); break;
+            }
+        });
+
+        // Start the reset only once the event stream is live.
+        es.onopen = function () {
+            fetch('/switch/' + switchId + '/poe-reset/' + encodeURIComponent(portId), { method: 'POST' })
+                .then(function (r) {
+                    if (r.status !== 202) {
+                        return r.json().then(function (j) {
+                            setStatus('✗ ' + (j.error || 'Failed to start'), 'var(--danger)');
+                            done();
+                        });
+                    }
+                })
+                .catch(function (e) {
+                    setStatus('✗ ' + e, 'var(--danger)');
+                    done();
+                });
+        };
+
+        // Safety net: if the stream stalls, re-enable the button.
+        setTimeout(done, 30000);
+    }
+    </script>
 </body>
 </html>
