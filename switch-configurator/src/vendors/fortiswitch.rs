@@ -972,6 +972,13 @@ impl SwitchVendor for FortiswitchSwitch {
         preview
     }
 
+    async fn execute_raw_commands(&mut self, commands: &[String]) -> Result<Vec<String>, VendorError> {
+        let client = self.client.as_mut()
+            .ok_or_else(|| VendorError::SshError("Not connected".to_string()))?;
+        client.execute_commands(commands).await
+            .map_err(|e| VendorError::CommandError(e.to_string()))
+    }
+
     fn get_warnings(&self) -> Vec<String> {
         self.current_state
             .as_ref()

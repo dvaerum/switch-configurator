@@ -206,7 +206,8 @@ pub async fn edit_ports(
         None => return Redirect::to(&format!("/switch/{}", id)).into_response(),
     };
 
-    let ports: Vec<EditablePort> = draft.edited.ports.iter().map(|p| port_to_editable(p)).collect();
+    let mut ports: Vec<EditablePort> = draft.edited.ports.iter().map(|p| port_to_editable(p)).collect();
+    ports.sort_by(|a, b| natural_sort(&a.port_id, &b.port_id));
 
     EditPortsTemplate {
         switch_id: id,
@@ -660,7 +661,15 @@ fn port_to_editable(p: &Port) -> EditablePort {
 }
 
 fn natural_sort(a: &str, b: &str) -> std::cmp::Ordering {
-    let a_num: u32 = a.parse().unwrap_or(u32::MAX);
-    let b_num: u32 = b.parse().unwrap_or(u32::MAX);
-    a_num.cmp(&b_num)
+    let a_nums: Vec<u32> = a
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.parse::<u32>().unwrap_or(u32::MAX))
+        .collect();
+    let b_nums: Vec<u32> = b
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.parse::<u32>().unwrap_or(u32::MAX))
+        .collect();
+    a_nums.cmp(&b_nums)
 }

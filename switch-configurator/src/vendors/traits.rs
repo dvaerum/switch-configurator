@@ -80,6 +80,9 @@ pub trait SwitchVendor: Send + Sync {
     /// Used for preview/dry-run in the web UI.
     fn generate_commands_for_diff(&self, diff: &StateDiff) -> crate::models::CommandPreview;
 
+    /// Execute raw CLI commands on the switch (for operational actions like PoE reset)
+    async fn execute_raw_commands(&mut self, commands: &[String]) -> Result<Vec<String>, VendorError>;
+
     /// Get warnings accumulated during the last configuration cycle
     /// (e.g., hardware model mismatch, deprecated features, etc.)
     fn get_warnings(&self) -> Vec<String> {
