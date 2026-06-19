@@ -372,6 +372,28 @@ impl ArubaSwitch {
         self.config.model().port_supports_poe(port_id)
     }
 
+    pub fn poe_disable_commands(&self, port_id: &str) -> Vec<String> {
+        let interface = self.normalize_port_id(port_id);
+        vec![
+            "configure terminal".to_string(),
+            format!("interface {}", interface),
+            "no power-over-ethernet".to_string(),
+            "exit".to_string(),
+            "exit".to_string(),
+        ]
+    }
+
+    pub fn poe_enable_commands(&self, port_id: &str) -> Vec<String> {
+        let interface = self.normalize_port_id(port_id);
+        vec![
+            "configure terminal".to_string(),
+            format!("interface {}", interface),
+            "power-over-ethernet".to_string(),
+            "exit".to_string(),
+            "exit".to_string(),
+        ]
+    }
+
     fn generate_remove_vlan_commands(&self, vlan_ids: &[u16]) -> Vec<String> {
         let mut commands = vec!["configure terminal".to_string()];
 
@@ -1849,6 +1871,13 @@ impl SwitchVendor for ArubaSwitch {
         }
 
         preview
+    }
+
+    async fn execute_raw_commands(&mut self, commands: &[String]) -> Result<Vec<String>, VendorError> {
+        let client = self.client.as_mut()
+            .ok_or_else(|| VendorError::SshError("Not connected".to_string()))?;
+        client.execute_commands(commands).await
+            .map_err(|e| VendorError::CommandError(e.to_string()))
     }
 
     fn get_warnings(&self) -> Vec<String> {
@@ -5902,5 +5931,38 @@ interface 48
         assert!(!preview.port_commands.is_empty(), "Should have port commands");
         assert!(preview.port_commands.iter().any(|c| c.contains("interface 1")),
                 "Port commands should reference interface 1, got: {:?}", preview.port_commands);
+    }
+
+    #[test]
+    fn test_poe_disable_commands() {
+        let switch = create_test_switch();
+        let cmds = switch.poe_disable_commands("5");
+        assert_eq!(cmds, vec![
+            "configure terminal",
+            "interface 5",
+            "no power-over-ethernet",
+            "exit",
+            "exit",
+        ]);
+    }
+
+    #[test]
+    fn test_poe_enable_commands() {
+        let switch = create_test_switch();
+        let cmds = switch.poe_enable_commands("5");
+        assert_eq!(cmds, vec![
+            "configure terminal",
+            "interface 5",
+            "power-over-ethernet",
+            "exit",
+            "exit",
+        ]);
+    }
+
+    #[test]
+    fn test_poe_commands_normalize_port_id() {
+        let switch = create_test_switch();
+        let cmds = switch.poe_disable_commands("GigabitEthernet1/0/5");
+        assert_eq!(cmds[1], "interface 5");
     }
 }

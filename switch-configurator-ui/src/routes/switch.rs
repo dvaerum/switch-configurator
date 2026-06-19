@@ -19,6 +19,7 @@ pub struct PortView {
     pub description: Option<String>,
     pub enabled: bool,
     pub poe_enabled: bool,
+    pub poe_supported: bool,
     pub speed_display: String,
 }
 
@@ -153,6 +154,11 @@ async fn fetch_switch_view(state: &AppState, id: &str) -> SwitchView {
 }
 
 fn parse_switch_view(id: &str, json: &serde_json::Value) -> SwitchView {
+    use switch_configurator::models::SwitchModel;
+    let model: Option<SwitchModel> = json["model"]
+        .as_str()
+        .and_then(|s| serde_json::from_value(serde_json::Value::String(s.to_string())).ok());
+
     let mut vlans: Vec<VlanView> = json["vlans"]
         .as_array()
         .map(|arr| {
@@ -175,23 +181,31 @@ fn parse_switch_view(id: &str, json: &serde_json::Value) -> SwitchView {
         .as_array()
         .map(|arr| {
             arr.iter()
-                .map(|p| PortView {
-                    port_id: p["port_id"].as_str().unwrap_or("").to_string(),
-                    vlan: p["vlan"].as_u64().unwrap_or(1) as u16,
-                    tagged_display: p["tagged_vlans"]
-                        .as_array()
-                        .map(|a| {
-                            a.iter()
-                                .filter_map(|v| v.as_u64())
-                                .map(|v| v.to_string())
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        })
-                        .unwrap_or_default(),
-                    description: p["description"].as_str().map(|s| s.to_string()),
-                    enabled: p["enabled"].as_bool().unwrap_or(false),
-                    poe_enabled: p["poe_enabled"].as_bool().unwrap_or(false),
-                    speed_display: p["speed_duplex"].as_str().unwrap_or("auto").to_string(),
+                .map(|p| {
+                    let port_id = p["port_id"].as_str().unwrap_or("").to_string();
+                    let poe_supported = model
+                        .as_ref()
+                        .map(|m| m.port_supports_poe(&port_id))
+                        .unwrap_or(false);
+                    PortView {
+                        port_id,
+                        vlan: p["vlan"].as_u64().unwrap_or(1) as u16,
+                        tagged_display: p["tagged_vlans"]
+                            .as_array()
+                            .map(|a| {
+                                a.iter()
+                                    .filter_map(|v| v.as_u64())
+                                    .map(|v| v.to_string())
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            })
+                            .unwrap_or_default(),
+                        description: p["description"].as_str().map(|s| s.to_string()),
+                        enabled: p["enabled"].as_bool().unwrap_or(false),
+                        poe_enabled: p["poe_enabled"].as_bool().unwrap_or(false),
+                        poe_supported,
+                        speed_display: p["speed_duplex"].as_str().unwrap_or("auto").to_string(),
+                    }
                 })
                 .collect()
         })
@@ -313,4 +327,32 @@ fn extract_port_numbers(port_id: &str) -> Vec<u32> {
         .filter(|s| !s.is_empty())
         .map(|s| s.parse::<u32>().unwrap_or(u32::MAX))
         .collect()
+}
+
+pub async fn poe_reset(
+    State(state): State<AppState>,
+    Path((id, port_id)): Path<(String, String)>,
+) -> impl IntoResponse {
+    let path = format!("/switches/{}/poe-reset/{}", id, port_id);
+    match state.backend.post(&path, &serde_json::json!({})).await {
+        Ok((status, body)) => {
+            if status < 300 {
+                axum::response::Html(
+                    r#"<span class="badge" style="background:var(--success);color:white;">Reset OK</span>"#.to_string()
+                ).into_response()
+            } else {
+                let error = body["error"].as_str().unwrap_or("Unknown error");
+                axum::response::Html(format!(
+                    r#"<span class="badge" style="background:var(--danger);color:white;" title="{}">Failed</span>"#,
+                    error
+                )).into_response()
+            }
+        }
+        Err(e) => {
+            axum::response::Html(format!(
+                r#"<span class="badge" style="background:var(--danger);color:white;" title="{}">Error</span>"#,
+                e
+            )).into_response()
+        }
+    }
 }

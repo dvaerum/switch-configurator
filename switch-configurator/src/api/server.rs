@@ -109,6 +109,7 @@ pub fn create_router(store: ConfigStore) -> Router {
         .route("/switches/:id/save-overlay", post(handlers::save_overlay))
         .route("/switches/:id/config-sources", get(handlers::config_sources))
         .route("/switches/:id/overlay/:filename", get(handlers::read_overlay).delete(handlers::delete_overlay))
+        .route("/switches/:id/poe-reset/:port_id", post(handlers::poe_reset))
         // GET retrieves running config from switch hardware via SSH
         .route("/switches/:id/config", get(handlers::get_config))
         // PUT creates/replaces in-memory config, PATCH updates, DELETE removes

@@ -69,6 +69,8 @@ pub fn create_router(state: AppState) -> Router {
         .route("/preview/:id/yaml", get(diff::yaml_diff))
         .route("/save/:id", get(save::save_dialog))
         .route("/save/:id/confirm", post(save::save_overlay))
+        // PoE reset
+        .route("/switch/:id/poe-reset/:port_id", post(switch::poe_reset))
         // Overlay management (broken config)
         .route("/overlay/:switch_id/:filename/view", get(dashboard::view_overlay))
         .route("/overlay/:switch_id/:filename/delete", post(dashboard::delete_overlay))

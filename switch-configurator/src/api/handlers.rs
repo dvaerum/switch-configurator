@@ -1,7 +1,7 @@
 use crate::config::{validate_switch_config, AppConfig, ConfigStore, SseEvent};
 use tokio_stream::StreamExt;
 use crate::models::{
-    Credentials, Port, PortMirror, SnmpConfig, SwitchConfig, SwitchModel, Vlan,
+    Credentials, Port, PortMirror, SnmpConfig, SwitchConfig, SwitchModel, Vendor, Vlan,
 };
 use crate::vendors;
 use axum::{
@@ -1361,4 +1361,141 @@ pub async fn delete_switch_config(
         )
             .into_response()
     }
+}
+
+pub async fn poe_reset(
+    State(store): State<ConfigStore>,
+    Path((id, port_id)): Path<(String, String)>,
+) -> impl IntoResponse {
+    let config = store.config.read().await;
+    let switch_config = match config.switches.iter().find(|s| s.id == id) {
+        Some(cfg) => cfg.clone(),
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": format!("Switch '{}' not found", id)})),
+            )
+                .into_response();
+        }
+    };
+    drop(config);
+
+    let model = switch_config.model();
+
+    if !model.supports_poe() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("Switch model {:?} does not support PoE", model)})),
+        )
+            .into_response();
+    }
+
+    if !model.port_supports_poe(&port_id) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("Port {} does not support PoE on {:?}", port_id, model)})),
+        )
+            .into_response();
+    }
+
+    if model.vendor() != Vendor::Aruba {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("PoE reset not yet supported for {:?} switches", model.vendor())})),
+        )
+            .into_response();
+    }
+
+    if store.status.is_switch_busy(&id).await {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({"error": format!("Switch '{}' is busy", id), "switch_id": id})),
+        )
+            .into_response();
+    }
+
+    store.status.set_currently_configuring(id.clone()).await;
+
+    let result = poe_reset_impl(&switch_config, &port_id).await;
+
+    store.status.clear_currently_configuring(&id).await;
+
+    match result {
+        Ok(response) => (StatusCode::OK, Json(response)).into_response(),
+        Err(error_msg) => {
+            error!("PoE reset failed for {}:{}: {}", id, port_id, error_msg);
+            store
+                .status
+                .record_error(
+                    "PoeReset".to_string(),
+                    error_msg.clone(),
+                    Some(id.clone()),
+                    "poe_reset".to_string(),
+                )
+                .await;
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": error_msg, "switch_id": id, "port_id": port_id})),
+            )
+                .into_response()
+        }
+    }
+}
+
+async fn poe_reset_impl(
+    switch_config: &SwitchConfig,
+    port_id: &str,
+) -> Result<serde_json::Value, String> {
+    let mut vendor = vendors::create_vendor_with_runtime(
+        switch_config,
+        &crate::config::RuntimeConfig::default(),
+        switch_config.settings.enforce_port_config,
+    )
+    .map_err(|e| format!("Failed to create vendor: {}", e))?;
+
+    vendor
+        .connect()
+        .await
+        .map_err(|e| format!("Connection failed: {}", e))?;
+
+    let aruba = vendors::aruba::ArubaSwitch::new(
+        switch_config.clone(),
+        crate::config::RuntimeConfig::default(),
+        false,
+    );
+    let disable_cmds = aruba.poe_disable_commands(port_id);
+    let enable_cmds = aruba.poe_enable_commands(port_id);
+
+    if let Err(e) = vendor.execute_raw_commands(&disable_cmds).await {
+        let _ = vendor.disconnect().await;
+        return Err(format!("Failed to disable PoE: {}", e));
+    }
+
+    info!("PoE disabled on port {}, waiting 3 seconds...", port_id);
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+    if let Err(e) = vendor.execute_raw_commands(&enable_cmds).await {
+        warn!(
+            "First PoE re-enable attempt failed for port {}: {}. Retrying...",
+            port_id, e
+        );
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        if let Err(e2) = vendor.execute_raw_commands(&enable_cmds).await {
+            let _ = vendor.disconnect().await;
+            return Err(format!(
+                "PoE was DISABLED on port {} but re-enable FAILED after retry: {}. Manual intervention required.",
+                port_id, e2
+            ));
+        }
+    }
+
+    info!("PoE re-enabled on port {}", port_id);
+    let _ = vendor.disconnect().await;
+
+    Ok(json!({
+        "switch_id": switch_config.id,
+        "port_id": port_id,
+        "success": true,
+        "message": format!("PoE reset completed for port {}", port_id),
+    }))
 }

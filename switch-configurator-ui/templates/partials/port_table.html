@@ -9,6 +9,7 @@
                 <th>Enabled</th>
                 <th>PoE</th>
                 <th>Speed</th>
+                <th>Actions</th>
             </tr>
         </thead>
         <tbody>
@@ -21,10 +22,34 @@
                 <td>{% if port.enabled %}Yes{% else %}No{% endif %}</td>
                 <td>{% if port.poe_enabled %}Yes{% else %}-{% endif %}</td>
                 <td class="text-muted">{{ port.speed_display }}</td>
+                <td>
+                    {% if port.poe_supported %}
+                        <span id="poe-reset-{{ port.port_id }}">
+                        {% if port.poe_enabled %}
+                            <button class="btn text-sm"
+                                    hx-post="/switch/{{ switch.id }}/poe-reset/{{ port.port_id }}"
+                                    hx-target="#poe-reset-{{ port.port_id }}"
+                                    hx-swap="innerHTML"
+                                    hx-confirm="Reset PoE on port {{ port.port_id }}? This will power-cycle the port for 3 seconds."
+                                    style="background:var(--warning);color:white;">
+                                Reset PoE
+                            </button>
+                        {% else %}
+                            <button class="btn text-sm" disabled
+                                    style="background:var(--muted);color:var(--text-muted);cursor:not-allowed;"
+                                    title="PoE is disabled on this port">
+                                Reset PoE
+                            </button>
+                        {% endif %}
+                        </span>
+                    {% else %}
+                        -
+                    {% endif %}
+                </td>
             </tr>
             {% endfor %}
             {% if switch.ports.is_empty() %}
-            <tr><td colspan="7" class="text-muted" style="text-align:center;">No ports configured</td></tr>
+            <tr><td colspan="8" class="text-muted" style="text-align:center;">No ports configured</td></tr>
             {% endif %}
         </tbody>
     </table>

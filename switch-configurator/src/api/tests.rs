@@ -188,8 +188,46 @@ fn create_test_config_store() -> ConfigStore {
 
     };
 
+    let switch3 = SwitchConfig {
+        id: "test-sw-03".to_string(),
+        hostname: Some("test-switch-3".to_string()),
+        model: Some(SwitchModel::Aruba2540_24G),
+        management_ip: Some("192.168.1.3".to_string()),
+        credentials: Some(Credentials {
+            username: "admin".to_string(),
+            password: Some("password".to_string()),
+            ssh_key_path: None,
+            port: 22,
+            connection_type: ConnectionType::Ssh,
+            serial_device: None,
+            baud_rate: 9600,
+            jump_hosts: None,
+            enable_secret: None,
+        }),
+        vlans: vec![],
+        ports: vec![
+            Port {
+                port_id: "1".to_string(),
+                mode: PortMode::Access,
+                vlan: 10,
+                tagged_vlans: vec![],
+                description: None,
+                enabled: true,
+                poe_enabled: false,
+                mac_notify: false,
+                speed_duplex: SpeedDuplex::Auto,
+            },
+        ],
+        port_mirrors: vec![],
+        snmp: None,
+        validation: None,
+        settings: Settings::default(),
+        vendor_specific: std::collections::HashMap::new(),
+        management_vlan: None,
+    };
+
     let app_config = AppConfig {
-        switches: vec![switch1, switch2],
+        switches: vec![switch1, switch2, switch3],
     };
 
     ConfigStore::new(app_config, 4002)
@@ -223,11 +261,11 @@ async fn test_list_switches() {
         .unwrap();
     let json: Value = serde_json::from_slice(&body).unwrap();
 
-    assert_eq!(json["count"], 2);
+    assert_eq!(json["count"], 3);
     assert!(json["switches"].is_array());
 
     let switches = json["switches"].as_array().unwrap();
-    assert_eq!(switches.len(), 2);
+    assert_eq!(switches.len(), 3);
 
     // Check first switch - verify both id and hostname are present
     assert_eq!(switches[0]["id"], "test-sw-01");
@@ -814,7 +852,7 @@ mod integration_tests {
             .unwrap();
         let json: Value = serde_json::from_slice(&body).unwrap();
 
-        assert_eq!(json["count"], 2);
+        assert_eq!(json["count"], 3);
     }
 
     #[tokio::test]
@@ -1039,7 +1077,7 @@ mod integration_tests {
 
         // Verify switch was created
         let config = store.config.read().await;
-        assert_eq!(config.switches.len(), 3);
+        assert_eq!(config.switches.len(), 4);
         let new_sw = config.switches.iter().find(|s| s.id == "new-switch-01");
         assert!(new_sw.is_some());
         assert_eq!(new_sw.unwrap().hostname, Some("new-switch".to_string()));
@@ -1077,7 +1115,7 @@ mod integration_tests {
 
         // Verify switch was replaced
         let config = store.config.read().await;
-        assert_eq!(config.switches.len(), 2); // Still 2 switches
+        assert_eq!(config.switches.len(), 3); // Still 3 switches
         let sw = config.switches.iter().find(|s| s.id == "test-sw-01").unwrap();
         assert_eq!(sw.hostname, Some("updated-hostname".to_string()));
         assert_eq!(sw.vlans.len(), 1);
@@ -1281,10 +1319,10 @@ mod integration_tests {
         let store = create_test_config_store();
         let app = api::create_router(store.clone());
 
-        // Verify we start with 2 switches
+        // Verify we start with 3 switches
         {
             let config = store.config.read().await;
-            assert_eq!(config.switches.len(), 2);
+            assert_eq!(config.switches.len(), 3);
         }
 
         let request = Request::builder()
@@ -1298,7 +1336,7 @@ mod integration_tests {
 
         // Verify switch was deleted
         let config = store.config.read().await;
-        assert_eq!(config.switches.len(), 1);
+        assert_eq!(config.switches.len(), 2);
         assert!(config.switches.iter().all(|s| s.id != "test-sw-01"));
     }
 
@@ -2801,5 +2839,87 @@ mod integration_tests {
 
         let response = app.oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_poe_reset_switch_not_found() {
+        let store = create_test_config_store();
+        let response = poe_reset(
+            axum::extract::State(store),
+            axum::extract::Path(("nonexistent".to_string(), "1".to_string())),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_poe_reset_non_poe_switch() {
+        let store = create_test_config_store();
+        let response = poe_reset(
+            axum::extract::State(store),
+            axum::extract::Path(("test-sw-03".to_string(), "1".to_string())),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&body).unwrap();
+        assert!(json["error"].as_str().unwrap().contains("does not support PoE"));
+    }
+
+    #[tokio::test]
+    async fn test_poe_reset_non_poe_port() {
+        // Port 49 on Aruba2930F is SFP (no PoE)
+        let store = create_test_config_store();
+        let response = poe_reset(
+            axum::extract::State(store),
+            axum::extract::Path(("test-sw-01".to_string(), "49".to_string())),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&body).unwrap();
+        assert!(json["error"].as_str().unwrap().contains("does not support PoE"));
+    }
+
+    #[tokio::test]
+    async fn test_poe_reset_switch_busy() {
+        let store = create_test_config_store();
+        store.status.set_currently_configuring("test-sw-01".to_string()).await;
+
+        let response = poe_reset(
+            axum::extract::State(store.clone()),
+            axum::extract::Path(("test-sw-01".to_string(), "1".to_string())),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn test_poe_reset_unsupported_vendor() {
+        // test-sw-02 is Cisco — not yet supported
+        let store = create_test_config_store();
+        let response = poe_reset(
+            axum::extract::State(store),
+            axum::extract::Path(("test-sw-02".to_string(), "1".to_string())),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&body).unwrap();
+        assert!(json["error"].as_str().unwrap().contains("not yet supported"));
     }
 }

@@ -28,6 +28,7 @@ mock! {
         async fn run_validation_tests(&mut self, validation_config: &ValidationConfig) -> Result<ValidationResult, VendorError>;
         async fn rollback_configuration(&mut self, method: RollbackMethod) -> Result<(), VendorError>;
         fn generate_commands_for_diff(&self, diff: &StateDiff) -> crate::models::CommandPreview;
+        async fn execute_raw_commands(&mut self, commands: &[String]) -> Result<Vec<String>, VendorError>;
         fn get_warnings(&self) -> Vec<String>;
     }
 }
