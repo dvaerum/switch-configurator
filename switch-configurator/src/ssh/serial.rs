@@ -295,57 +295,73 @@ impl SerialClient {
         } else {
             // Unknown state - this can happen on Aruba switches when the previous user logged out,
             // or when the switch is stuck in config mode / "-- MORE --" / "Press any key" state.
-            // Send Ctrl-C to break out, then Enter.
-            debug!("Unknown state, sending Ctrl-C + enter... (attempt 1)");
-            self.send_raw("\x03").await?;
-            tokio::time::sleep(Duration::from_millis(200)).await;
-            self.send_raw("\r").await?;
-            tokio::time::sleep(Duration::from_millis(800)).await;
+            // Also handles "Session Terminated, login timed out" where a stale session expired.
+            let mut logged_in = false;
 
-            state_check = self.check_current_state(Duration::from_secs(2)).await?;
-            debug!("State check after first retry: {}", state_check);
+            for attempt in 1..=3 {
+                debug!("Unknown state, recovery attempt {}/3...", attempt);
 
-            // If still nothing, try one more time with space (for "-- MORE --") and enter
-            if !state_check.contains("login:") && !state_check.contains("Username:")
-                && !state_check.contains('#') && !state_check.contains('>') {
-                debug!("Still unknown state, sending space + Ctrl-C + enter... (attempt 2)");
-                self.send_raw(" ").await?;
-                tokio::time::sleep(Duration::from_millis(200)).await;
-                self.send_raw("\x03").await?;
-                tokio::time::sleep(Duration::from_millis(200)).await;
-                self.send_raw("\r").await?;
-                tokio::time::sleep(Duration::from_secs(1)).await;
-
-                state_check = self.check_current_state(Duration::from_secs(2)).await?;
-                debug!("State check after second retry: {}", state_check);
-
-                // Check if we now have a login prompt
-                if state_check.contains("login:") || state_check.contains("Username:") {
-                    debug!("Login prompt appeared after retries, logging in...");
-
-                    // Send username
-                    self.send_raw(&format!("{}\r", username)).await?;
-                    tokio::time::sleep(Duration::from_millis(500)).await;
-
-                    // Send password
-                    self.send_raw(&format!("{}\r", password)).await?;
-
-                    // Wait for command prompt after login
+                if attempt == 1 {
+                    // Ctrl-C + Enter to break out of stuck state
+                    self.send_raw("\x03").await?;
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    self.send_raw("\r").await?;
+                    tokio::time::sleep(Duration::from_millis(800)).await;
+                } else if attempt == 2 {
+                    // Space (for "-- MORE --") + Ctrl-C + Enter
+                    self.send_raw(" ").await?;
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    self.send_raw("\x03").await?;
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    self.send_raw("\r").await?;
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                } else {
+                    // Final attempt: longer wait then Enter (for post-banner login prompts)
+                    self.send_raw("\r").await?;
                     tokio::time::sleep(Duration::from_secs(2)).await;
                 }
-            } else if state_check.contains("login:") || state_check.contains("Username:") {
-                // Login prompt appeared after first retry
-                debug!("Login prompt appeared after first retry, logging in...");
 
-                // Send username
-                self.send_raw(&format!("{}\r", username)).await?;
-                tokio::time::sleep(Duration::from_millis(500)).await;
+                state_check = self.check_current_state(Duration::from_secs(3)).await?;
+                debug!("State check after attempt {}: {}", attempt, state_check);
 
-                // Send password
-                self.send_raw(&format!("{}\r", password)).await?;
+                // Check if "Session Terminated" appeared — the switch dropped a stale session.
+                // After this, it usually shows the login banner then eventually a login prompt.
+                // We need to clear this output and wait for the actual login prompt.
+                let ansi_stripped = regex::Regex::new(r"\x1b\[[0-9;?]*[A-Za-z]")
+                    .unwrap()
+                    .replace_all(&state_check, "");
+                if ansi_stripped.contains("Session Terminated") || ansi_stripped.contains("session terminated") {
+                    warn!("Stale serial session detected ('Session Terminated'), waiting for fresh login prompt...");
+                    // Clear residual banner text, send Enter to trigger fresh login prompt
+                    self.clear_buffer().await?;
+                    self.send_raw("\r").await?;
+                    tokio::time::sleep(Duration::from_secs(3)).await;
+                    state_check = self.check_current_state(Duration::from_secs(5)).await?;
+                    debug!("State after session-terminated recovery: {}", state_check);
+                }
 
-                // Wait for command prompt after login
-                tokio::time::sleep(Duration::from_secs(2)).await;
+                if state_check.contains("login:") || state_check.contains("Username:") {
+                    debug!("Login prompt appeared on attempt {}, logging in...", attempt);
+                    self.send_raw(&format!("{}\r", username)).await?;
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    self.send_raw(&format!("{}\r", password)).await?;
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    logged_in = true;
+                    break;
+                } else if state_check.contains('#') || state_check.contains('>') {
+                    debug!("Command prompt appeared on attempt {}, already logged in", attempt);
+                    logged_in = true;
+                    break;
+                }
+            }
+
+            if !logged_in {
+                anyhow::bail!(
+                    "Failed to detect login prompt or command prompt after 3 recovery attempts. \
+                     Last state: {:?}. The serial session may be stuck — try power-cycling the \
+                     console connection or rebooting the switch.",
+                    state_check.chars().take(200).collect::<String>()
+                );
             }
         }
 
@@ -368,8 +384,14 @@ impl SerialClient {
         self.send_raw("\r").await?;
         tokio::time::sleep(Duration::from_millis(300)).await;
 
-        let prompt = self.check_current_state(Duration::from_secs(2)).await?;
-        let prompt_trimmed = prompt.trim();
+        let prompt_raw = self.check_current_state(Duration::from_secs(2)).await?;
+        let ansi_regex = regex::Regex::new(r"\x1b\[[0-9;?]*[A-Za-z]").unwrap();
+        let prompt_clean = ansi_regex.replace_all(&prompt_raw, "");
+        let prompt_trimmed = prompt_clean.lines()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("")
+            .trim();
 
         // Check if we're in user mode (prompt ends with >)
         // Examples: "Switch>", "Router>", "hostname>"
@@ -429,12 +451,31 @@ impl SerialClient {
             .unwrap()
             .replace_all(&response, "");
 
-        if clean_response.trim().is_empty() {
+        let clean_trimmed = clean_response.trim();
+
+        if clean_trimmed.is_empty() {
             anyhow::bail!(
                 "Serial device not responding. \
                  Possible causes: (1) Device locked by another process (e.g., picocom, minicom, screen), \
                  (2) Switch powered off or not connected, (3) Wrong baud rate (configured: {})",
                 self.baud_rate
+            );
+        }
+
+        // Verify we have a command prompt (# or >), not just stale banner or "Password:" text
+        if !clean_trimmed.contains('#') && !clean_trimmed.contains('>') {
+            // Check if we're stuck at a login/password prompt — session wasn't established
+            if clean_trimmed.contains("Password:") || clean_trimmed.contains("login:")
+                || clean_trimmed.contains("Username:") {
+                anyhow::bail!(
+                    "Serial session not authenticated. Got a login/password prompt instead of a \
+                     command prompt. The login sequence may have failed."
+                );
+            }
+            warn!(
+                "Serial connectivity check: no command prompt detected in response. \
+                 Response: {:?}",
+                &clean_trimmed[..clean_trimmed.len().min(200)]
             );
         }
 
@@ -1577,6 +1618,63 @@ mod tests {
         assert!(client.auth_mode, "auth_mode should be true after set_auth_mode(true)");
         client.set_auth_mode(false);
         assert!(!client.auth_mode, "auth_mode should be false after set_auth_mode(false)");
+    }
+
+    // ============================================================================
+    // Session Terminated Recovery Tests
+    // ============================================================================
+
+    #[test]
+    fn test_session_terminated_detection() {
+        let ansi_regex = regex::Regex::new(r"\x1b\[[0-9;?]*[A-Za-z]").unwrap();
+
+        // Real output from an Aruba switch with a stale session
+        let raw_output = "\x1b[2J\x1b[?7h\x1b[1;23r\x1b[?6l\x1b[1;1H\x1b[?25l\x1b[1;1HHP J9773A 2530-24G-PoEP Switch\nSoftware revision YA.16.11.0016\n\n (C) Copyright 2024 Hewlett Packard Enterprise\n\n\x1b[10;5HSession Terminated, login timed out.\n\x1b[?25h\x1b[19;1H";
+        let clean = ansi_regex.replace_all(raw_output, "");
+        assert!(
+            clean.contains("Session Terminated"),
+            "Should detect 'Session Terminated' in ANSI-stripped output: {:?}",
+            clean
+        );
+    }
+
+    #[test]
+    fn test_enter_privileged_mode_ansi_stripping() {
+        let ansi_regex = regex::Regex::new(r"\x1b\[[0-9;?]*[A-Za-z]").unwrap();
+
+        // Simulated ANSI-laden prompt response
+        let raw_prompt = "\x1b[24;1H\x1b[?25lShadow-Switch-1# \x1b[?25h\x1b[24;19H";
+        let clean = ansi_regex.replace_all(raw_prompt, "");
+        let last_line = clean.lines()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("")
+            .trim();
+
+        assert!(
+            last_line.ends_with('#'),
+            "Should detect privileged prompt after ANSI stripping: {:?}",
+            last_line
+        );
+    }
+
+    #[test]
+    fn test_verify_connectivity_detects_password_prompt() {
+        // When verify_connectivity gets a "Password:" prompt, it means
+        // the session wasn't authenticated — this should be caught
+        let ansi_regex = regex::Regex::new(r"\x1b\[[0-9;?]*[A-Za-z]").unwrap();
+        let response = "\x1b[24;1HPassword: \x1b[?25h\x1b[24;11H";
+        let clean = ansi_regex.replace_all(response, "");
+        let clean_trimmed = clean.trim();
+
+        assert!(
+            clean_trimmed.contains("Password:"),
+            "Should detect Password: prompt in response"
+        );
+        assert!(
+            !clean_trimmed.contains('#') && !clean_trimmed.contains('>'),
+            "Should NOT contain a command prompt"
+        );
     }
 }
 
