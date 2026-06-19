@@ -134,9 +134,57 @@ pub fn verify_hardware_model(
     warnings
 }
 
+/// Safety check: refuse to apply if the parsed state is completely empty but the desired
+/// config has VLANs/ports. An empty parse result almost certainly means the running-config
+/// command returned garbage (e.g. serial session was in a broken state).
+pub fn check_empty_state_safety(
+    current: &SwitchState,
+    desired_vlans: usize,
+    desired_ports: usize,
+    hostname: &str,
+) -> Result<(), VendorError> {
+    if current.vlans.is_empty() && current.ports.is_empty()
+        && (desired_vlans > 0 || desired_ports > 0)
+    {
+        let msg = format!(
+            "Parsed state for '{}' is completely empty (0 VLANs, 0 ports) but desired config \
+             has {} VLANs and {} ports. This likely indicates a failed 'show running-config' \
+             — refusing to apply to avoid overwriting the switch from scratch.",
+            hostname, desired_vlans, desired_ports
+        );
+        warn!("{}", msg);
+        return Err(VendorError::ParseError(msg));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_empty_state_safety_rejects_when_desired_has_config() {
+        let empty_state = SwitchState::default();
+        let result = check_empty_state_safety(&empty_state, 5, 10, "test-switch");
+        assert!(result.is_err(), "Should reject empty parsed state when desired config has VLANs/ports");
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("completely empty"), "Error should explain the issue: {}", err);
+    }
+
+    #[test]
+    fn test_empty_state_safety_allows_when_desired_also_empty() {
+        let empty_state = SwitchState::default();
+        let result = check_empty_state_safety(&empty_state, 0, 0, "test-switch");
+        assert!(result.is_ok(), "Should allow when desired config is also empty");
+    }
+
+    #[test]
+    fn test_empty_state_safety_allows_nonempty_state() {
+        let mut state = SwitchState::default();
+        state.vlans.push(Vlan { id: 1, name: "default".to_string(), description: None, ip_config: Default::default() });
+        let result = check_empty_state_safety(&state, 5, 10, "test-switch");
+        assert!(result.is_ok(), "Should allow when parsed state has VLANs");
+    }
 
     /// Helper: create the standard Aruba hardware ID regex
     fn aruba_pattern() -> regex::Regex {

@@ -984,6 +984,13 @@ impl SwitchVendor for FortiswitchSwitch {
         debug!("Parsing current state from {}", self.config.hostname());
         let current = self.parse_current_state().await?;
 
+        super::traits::check_empty_state_safety(
+            &current,
+            self.config.vlans.len(),
+            self.config.ports.len(),
+            &self.config.hostname(),
+        )?;
+
         // Store current state for warnings retrieval
         self.current_state = Some(current.clone());
 
