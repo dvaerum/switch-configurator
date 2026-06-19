@@ -29,6 +29,43 @@ impl BackendClient {
         Ok(resp_body)
     }
 
+    pub async fn delete(&self, path: &str) -> Result<(u16, serde_json::Value)> {
+        self.request_with_status("DELETE", path, None).await
+    }
+
+    pub async fn get_text(&self, path: &str) -> Result<String> {
+        use http_body_util::BodyExt;
+
+        let req = hyper::Request::builder()
+            .method("GET")
+            .uri(path)
+            .header("host", "localhost")
+            .body(http_body_util::Full::new(hyper::body::Bytes::new()))?;
+
+        let resp = match &self.transport {
+            BackendTransport::UnixSocket(socket_path) => {
+                let stream = tokio::net::UnixStream::connect(socket_path).await?;
+                let io = TokioIo::new(stream);
+                let (mut sender, conn) = hyper::client::conn::http1::handshake(io).await?;
+                tokio::spawn(async move { let _ = conn.await; });
+                sender.send_request(req).await?
+            }
+            BackendTransport::Tcp(url) => {
+                let parsed: hyper::Uri = url.parse()?;
+                let host = parsed.host().unwrap_or("localhost");
+                let port = parsed.port_u16().unwrap_or(4002);
+                let stream = tokio::net::TcpStream::connect(format!("{}:{}", host, port)).await?;
+                let io = TokioIo::new(stream);
+                let (mut sender, conn) = hyper::client::conn::http1::handshake(io).await?;
+                tokio::spawn(async move { let _ = conn.await; });
+                sender.send_request(req).await?
+            }
+        };
+
+        let body_bytes = resp.into_body().collect().await?.to_bytes();
+        Ok(String::from_utf8_lossy(&body_bytes).to_string())
+    }
+
     pub async fn sse_stream(&self, path: &str) -> Result<tokio::sync::mpsc::Receiver<SseEvent>> {
         use http_body_util::BodyExt;
 

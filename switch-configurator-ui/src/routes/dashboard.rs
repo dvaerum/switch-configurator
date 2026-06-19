@@ -1,6 +1,6 @@
 use askama::Template;
-use axum::extract::State;
-use axum::response::IntoResponse;
+use axum::extract::{Path, State};
+use axum::response::{IntoResponse, Redirect};
 
 use super::AppState;
 
@@ -17,11 +17,18 @@ pub struct SwitchCard {
 }
 
 #[derive(Debug, Clone)]
+pub struct OverlayFileInfo {
+    pub filename: String,
+    pub full_path: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct ValidationFailureView {
     pub switch_id: String,
     pub hostname: String,
     pub error: String,
     pub config_sources: Vec<String>,
+    pub overlay_files: Vec<OverlayFileInfo>,
 }
 
 #[derive(Template)]
@@ -39,22 +46,45 @@ pub async fn index(State(state): State<AppState>) -> impl IntoResponse {
 async fn fetch_dashboard_data(state: &AppState) -> (Vec<SwitchCard>, Vec<ValidationFailureView>) {
     let switches = fetch_switch_cards(state).await;
 
-    // Fetch validation failures from status
-    let failures = match state.backend.get("/api/status").await {
-        Ok(json) => {
-            json["validation_failures"].as_array()
-                .map(|arr| arr.iter().map(|f| ValidationFailureView {
-                    switch_id: f["switch_id"].as_str().unwrap_or("").to_string(),
-                    hostname: f["hostname"].as_str().unwrap_or("unknown").to_string(),
-                    error: f["error"].as_str().unwrap_or("").to_string(),
-                    config_sources: f["config_sources"].as_array()
-                        .map(|a| a.iter().filter_map(|s| s.as_str().map(|s| s.to_string())).collect())
-                        .unwrap_or_default(),
-                }).collect())
-                .unwrap_or_default()
-        }
-        Err(_) => vec![],
+    let status_json = match state.backend.get("/api/status").await {
+        Ok(json) => Some(json),
+        Err(_) => None,
     };
+
+    let main_config = status_json.as_ref()
+        .and_then(|s| s["config"]["config_file"].as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let failures = status_json.as_ref()
+        .and_then(|s| s["validation_failures"].as_array())
+        .map(|arr| arr.iter().map(|f| {
+            let config_sources: Vec<String> = f["config_sources"].as_array()
+                .map(|a| a.iter().filter_map(|s| s.as_str().map(|s| s.to_string())).collect())
+                .unwrap_or_default();
+
+            let overlay_files: Vec<OverlayFileInfo> = config_sources.iter()
+                .filter(|src| *src != &main_config)
+                .filter(|src| src.ends_with(".yaml") || src.ends_with(".yml"))
+                .filter_map(|src| {
+                    std::path::Path::new(src)
+                        .file_name()
+                        .map(|name| OverlayFileInfo {
+                            filename: name.to_string_lossy().to_string(),
+                            full_path: src.clone(),
+                        })
+                })
+                .collect();
+
+            ValidationFailureView {
+                switch_id: f["switch_id"].as_str().unwrap_or("").to_string(),
+                hostname: f["hostname"].as_str().unwrap_or("unknown").to_string(),
+                error: f["error"].as_str().unwrap_or("").to_string(),
+                config_sources,
+                overlay_files,
+            }
+        }).collect())
+        .unwrap_or_default();
 
     (switches, failures)
 }
@@ -132,4 +162,51 @@ async fn fetch_switch_cards(state: &AppState) -> Vec<SwitchCard> {
             }
         })
         .collect()
+}
+
+#[derive(Template)]
+#[template(path = "overlay_view.html")]
+struct OverlayViewTemplate {
+    switch_id: String,
+    filename: String,
+    content: String,
+    error: Option<String>,
+}
+
+pub async fn view_overlay(
+    State(state): State<AppState>,
+    Path((switch_id, filename)): Path<(String, String)>,
+) -> impl IntoResponse {
+    let path = format!("/switches/{}/overlay/{}", switch_id, filename);
+    let (content, error) = match state.backend.get_text(&path).await {
+        Ok(text) => (text, None),
+        Err(e) => (String::new(), Some(format!("Failed to load overlay: {}", e))),
+    };
+
+    OverlayViewTemplate {
+        switch_id,
+        filename,
+        content,
+        error,
+    }
+}
+
+pub async fn delete_overlay(
+    State(state): State<AppState>,
+    Path((switch_id, filename)): Path<(String, String)>,
+) -> impl IntoResponse {
+    let path = format!("/switches/{}/overlay/{}", switch_id, filename);
+    match state.backend.delete(&path).await {
+        Ok((status, _)) if status < 300 => {
+            tracing::info!("Deleted overlay {} for {}", filename, switch_id);
+        }
+        Ok((status, body)) => {
+            tracing::error!("Failed to delete overlay: {} {:?}", status, body);
+        }
+        Err(e) => {
+            tracing::error!("Failed to delete overlay: {}", e);
+        }
+    }
+
+    Redirect::to("/")
 }

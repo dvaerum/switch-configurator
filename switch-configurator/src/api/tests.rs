@@ -2670,4 +2670,136 @@ mod integration_tests {
         let response = app.oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
+
+    // ============================================================================
+    // Overlay file management (delete + read)
+    // ============================================================================
+
+    #[tokio::test]
+    async fn test_delete_overlay_success() {
+        let store = create_test_config_store();
+        let config_dir = tempfile::tempdir().unwrap();
+        store.status.set_config_metadata(crate::status::ConfigMetadata {
+            config_file: std::path::PathBuf::from("/tmp/main.yaml"),
+            config_folders: vec![config_dir.path().to_path_buf()],
+            last_loaded: chrono::Utc::now(),
+            switches_count: 1,
+        }).await;
+
+        // Create a file to delete
+        let file_path = config_dir.path().join("test-overlay.yaml");
+        std::fs::write(&file_path, "switches: []").unwrap();
+        assert!(file_path.exists());
+
+        let app = crate::api::create_router(store);
+
+        let request = Request::builder()
+            .method("DELETE")
+            .uri("/switches/test-sw-01/overlay/test-overlay.yaml")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "Delete should succeed");
+        assert!(!file_path.exists(), "File should be deleted");
+    }
+
+    #[tokio::test]
+    async fn test_delete_overlay_rejects_path_traversal() {
+        let store = create_test_config_store();
+        let config_dir = tempfile::tempdir().unwrap();
+        store.status.set_config_metadata(crate::status::ConfigMetadata {
+            config_file: std::path::PathBuf::from("/tmp/main.yaml"),
+            config_folders: vec![config_dir.path().to_path_buf()],
+            last_loaded: chrono::Utc::now(),
+            switches_count: 1,
+        }).await;
+
+        let app = crate::api::create_router(store);
+
+        let request = Request::builder()
+            .method("DELETE")
+            .uri("/switches/test-sw-01/overlay/..%2Fetc%2Fpasswd")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_delete_overlay_not_found() {
+        let store = create_test_config_store();
+        let config_dir = tempfile::tempdir().unwrap();
+        store.status.set_config_metadata(crate::status::ConfigMetadata {
+            config_file: std::path::PathBuf::from("/tmp/main.yaml"),
+            config_folders: vec![config_dir.path().to_path_buf()],
+            last_loaded: chrono::Utc::now(),
+            switches_count: 1,
+        }).await;
+
+        let app = crate::api::create_router(store);
+
+        let request = Request::builder()
+            .method("DELETE")
+            .uri("/switches/test-sw-01/overlay/nonexistent.yaml")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_read_overlay_success() {
+        let store = create_test_config_store();
+        let config_dir = tempfile::tempdir().unwrap();
+        store.status.set_config_metadata(crate::status::ConfigMetadata {
+            config_file: std::path::PathBuf::from("/tmp/main.yaml"),
+            config_folders: vec![config_dir.path().to_path_buf()],
+            last_loaded: chrono::Utc::now(),
+            switches_count: 1,
+        }).await;
+
+        let file_path = config_dir.path().join("test-overlay.yaml");
+        std::fs::write(&file_path, "switches:\n  - id: test\n").unwrap();
+
+        let app = crate::api::create_router(store);
+
+        let request = Request::builder()
+            .method("GET")
+            .uri("/switches/test-sw-01/overlay/test-overlay.yaml")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        assert!(text.contains("switches:"), "Should return YAML content");
+    }
+
+    #[tokio::test]
+    async fn test_read_overlay_rejects_path_traversal() {
+        let store = create_test_config_store();
+        let config_dir = tempfile::tempdir().unwrap();
+        store.status.set_config_metadata(crate::status::ConfigMetadata {
+            config_file: std::path::PathBuf::from("/tmp/main.yaml"),
+            config_folders: vec![config_dir.path().to_path_buf()],
+            last_loaded: chrono::Utc::now(),
+            switches_count: 1,
+        }).await;
+
+        let app = crate::api::create_router(store);
+
+        let request = Request::builder()
+            .method("GET")
+            .uri("/switches/test-sw-01/overlay/..%2Fetc%2Fpasswd")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
 }

@@ -490,16 +490,7 @@ pub async fn save_overlay(
         }
     }
 
-    // Get config folder path from metadata
-    let config_paths = store.status.get_config_paths().await;
-    let config_folder = config_paths
-        .and_then(|(_, folders)| folders.into_iter().next())
-        .ok_or_else(|| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": "No config folder configured"})),
-            )
-        })?;
+    let config_folder = get_first_config_folder(&store).await?;
 
     // Build the YAML content with merge_priority at the top
     let yaml_content = format!(
@@ -531,6 +522,66 @@ pub async fn save_overlay(
             "merge_priority": body.merge_priority,
         })),
     ))
+}
+
+/// Read an overlay config file's raw YAML content
+pub async fn read_overlay(
+    State(store): State<ConfigStore>,
+    Path((_id, filename)): Path<(String, String)>,
+) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    validate_overlay_filename(&filename)?;
+
+    let config_folder = get_first_config_folder(&store).await?;
+    let file_path = config_folder.join(&filename);
+
+    if !file_path.exists() {
+        return Err((StatusCode::NOT_FOUND, Json(json!({"error": format!("File '{}' not found", filename)}))));
+    }
+
+    let content = std::fs::read_to_string(&file_path).map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("Failed to read file: {}", e)})))
+    })?;
+
+    Ok(([(axum::http::header::CONTENT_TYPE, "text/yaml")], content))
+}
+
+/// Delete an overlay config file
+pub async fn delete_overlay(
+    State(store): State<ConfigStore>,
+    Path((_id, filename)): Path<(String, String)>,
+) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    validate_overlay_filename(&filename)?;
+
+    let config_folder = get_first_config_folder(&store).await?;
+    let file_path = config_folder.join(&filename);
+
+    if !file_path.exists() {
+        return Err((StatusCode::NOT_FOUND, Json(json!({"error": format!("File '{}' not found", filename)}))));
+    }
+
+    std::fs::remove_file(&file_path).map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("Failed to delete file: {}", e)})))
+    })?;
+
+    info!("Deleted overlay config: {}", file_path.display());
+
+    Ok(Json(json!({"status": "deleted", "file": filename})))
+}
+
+fn validate_overlay_filename(filename: &str) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    if filename.contains("..") || filename.contains('/') || filename.contains('\\') {
+        return Err((StatusCode::BAD_REQUEST, Json(json!({"error": "Invalid filename: path traversal not allowed"}))));
+    }
+    if !filename.ends_with(".yaml") && !filename.ends_with(".yml") {
+        return Err((StatusCode::BAD_REQUEST, Json(json!({"error": "Filename must end with .yaml or .yml"}))));
+    }
+    Ok(())
+}
+
+async fn get_first_config_folder(store: &ConfigStore) -> Result<std::path::PathBuf, (StatusCode, Json<serde_json::Value>)> {
+    store.status.get_config_paths().await
+        .and_then(|(_, folders)| folders.into_iter().next())
+        .ok_or_else(|| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "No config folder configured"}))))
 }
 
 /// Get configuration source files and their priorities for a switch
