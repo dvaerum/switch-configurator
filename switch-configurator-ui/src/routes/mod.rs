@@ -51,8 +51,8 @@ pub fn create_router(state: AppState) -> Router {
         .route("/draft/:id/vlan/:vlan_id", post(edit::update_vlan))
         .route("/draft/:id/vlan/:vlan_id/remove", get(edit::remove_vlan))
         // Port CRUD
+        .route("/draft/:id/ports", post(edit::update_ports))
         .route("/draft/:id/port/add", post(edit::add_port))
-        .route("/draft/:id/port/:port_id", post(edit::update_port))
         .route("/draft/:id/port/:port_id/remove", get(edit::remove_port))
         // Mirror CRUD
         .route("/draft/:id/mirror/add", post(edit::add_mirror))

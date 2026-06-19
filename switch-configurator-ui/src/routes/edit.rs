@@ -251,19 +251,20 @@ pub async fn add_port(
     Redirect::to(&format!("/switch/{}/edit/ports", id)).into_response()
 }
 
-pub async fn update_port(
+/// Bulk-save every port row from the single "Save All Ports" form. Replaces the
+/// draft's port list in one shot so changes to multiple ports (e.g. toggling PoE
+/// on several ports) persist together.
+pub async fn update_ports(
     State(state): State<AppState>,
-    Path((id, port_id)): Path<(String, String)>,
-    Form(form): Form<PortForm>,
+    Path(id): Path<String>,
+    Form(pairs): Form<Vec<(String, String)>>,
 ) -> impl IntoResponse {
     let mut draft = match state.drafts.get(&id).await {
         Some(d) => d,
         None => return Redirect::to(&format!("/switch/{}/edit/ports", id)).into_response(),
     };
 
-    if let Some(port) = draft.edited.ports.iter_mut().find(|p| p.port_id == port_id) {
-        *port = form_to_port(&form);
-    }
+    draft.edited.ports = parse_ports_bulk(pairs, &draft.edited.ports);
 
     state.drafts.update(&id, draft.edited).await;
     Redirect::to(&format!("/switch/{}/edit/ports", id)).into_response()
@@ -635,6 +636,55 @@ fn form_to_port(form: &PortForm) -> Port {
     }
 }
 
+/// Parse a flat list of form pairs (from the single "Save All Ports" form) into
+/// a full set of ports. Field names are indexed per row, e.g. `port_id.0`,
+/// `vlan.0`, `poe_enabled.0`. Unchecked checkboxes are absent, so presence of the
+/// key means the box was ticked. `mac_notify` isn't an editable field, so it is
+/// preserved from the matching existing port by id.
+fn parse_ports_bulk(pairs: Vec<(String, String)>, existing: &[Port]) -> Vec<Port> {
+    use std::collections::{BTreeMap, HashMap};
+
+    let mut rows: BTreeMap<usize, HashMap<String, String>> = BTreeMap::new();
+    for (key, val) in pairs {
+        if let Some((field, idx)) = key.rsplit_once('.') {
+            if let Ok(i) = idx.parse::<usize>() {
+                rows.entry(i).or_default().insert(field.to_string(), val);
+            }
+        }
+    }
+
+    let mut ports = Vec::new();
+    for fields in rows.into_values() {
+        let port_id = match fields.get("port_id") {
+            Some(p) if !p.trim().is_empty() => p.clone(),
+            _ => continue,
+        };
+        let tagged = parse_tagged_vlans(fields.get("tagged_vlans").map(String::as_str).unwrap_or(""));
+        let vlan = fields.get("vlan").and_then(|s| s.parse::<u16>().ok()).unwrap_or(1);
+        let description = fields.get("description").cloned().unwrap_or_default();
+        let mac_notify = existing
+            .iter()
+            .find(|p| p.port_id == port_id)
+            .map(|p| p.mac_notify)
+            .unwrap_or(false);
+
+        ports.push(Port {
+            port_id,
+            mode: if tagged.is_empty() { PortMode::Access } else { PortMode::Trunk },
+            vlan,
+            tagged_vlans: tagged,
+            description: if description.is_empty() { None } else { Some(description) },
+            enabled: fields.contains_key("enabled"),
+            poe_enabled: fields.contains_key("poe_enabled"),
+            mac_notify,
+            speed_duplex: parse_speed_duplex(fields.get("speed_duplex").map(String::as_str).unwrap_or("auto")),
+        });
+    }
+
+    ports.sort_by(|a, b| natural_sort(&a.port_id, &b.port_id));
+    ports
+}
+
 fn form_to_mirror(form: &MirrorForm) -> PortMirror {
     PortMirror {
         session_id: form.session_id.clone(),
@@ -672,4 +722,108 @@ fn natural_sort(a: &str, b: &str) -> std::cmp::Ordering {
         .map(|s| s.parse::<u32>().unwrap_or(u32::MAX))
         .collect();
     a_nums.cmp(&b_nums)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pair(k: &str, v: &str) -> (String, String) {
+        (k.to_string(), v.to_string())
+    }
+
+    #[test]
+    fn test_parse_ports_bulk_multiple_poe_enabled() {
+        // Both rows have poe_enabled checkbox present (checked) -> both true.
+        // This is the regression: previously only one row's save persisted.
+        let pairs = vec![
+            pair("port_id.0", "1"),
+            pair("vlan.0", "10"),
+            pair("tagged_vlans.0", ""),
+            pair("description.0", "port one"),
+            pair("enabled.0", "on"),
+            pair("poe_enabled.0", "on"),
+            pair("speed_duplex.0", "auto"),
+            pair("port_id.1", "2"),
+            pair("vlan.1", "10"),
+            pair("tagged_vlans.1", ""),
+            pair("description.1", "port two"),
+            pair("enabled.1", "on"),
+            pair("poe_enabled.1", "on"),
+            pair("speed_duplex.1", "auto"),
+        ];
+        let ports = parse_ports_bulk(pairs, &[]);
+        assert_eq!(ports.len(), 2);
+        assert!(ports.iter().find(|p| p.port_id == "1").unwrap().poe_enabled);
+        assert!(ports.iter().find(|p| p.port_id == "2").unwrap().poe_enabled);
+    }
+
+    #[test]
+    fn test_parse_ports_bulk_unchecked_poe_is_false() {
+        // Unchecked checkboxes are simply absent from the form submission.
+        // Row 0 keeps poe on, row 1 has no poe_enabled key -> false.
+        let pairs = vec![
+            pair("port_id.0", "1"),
+            pair("vlan.0", "10"),
+            pair("enabled.0", "on"),
+            pair("poe_enabled.0", "on"),
+            pair("speed_duplex.0", "auto"),
+            pair("port_id.1", "2"),
+            pair("vlan.1", "10"),
+            pair("enabled.1", "on"),
+            pair("speed_duplex.1", "auto"),
+        ];
+        let ports = parse_ports_bulk(pairs, &[]);
+        assert!(ports.iter().find(|p| p.port_id == "1").unwrap().poe_enabled);
+        assert!(!ports.iter().find(|p| p.port_id == "2").unwrap().poe_enabled);
+    }
+
+    #[test]
+    fn test_parse_ports_bulk_preserves_mac_notify() {
+        // mac_notify isn't an editable field; bulk save must not silently drop it.
+        let existing = vec![Port {
+            port_id: "1".to_string(),
+            mode: PortMode::Access,
+            vlan: 10,
+            tagged_vlans: vec![],
+            description: None,
+            enabled: true,
+            poe_enabled: false,
+            mac_notify: true,
+            speed_duplex: SpeedDuplex::Auto,
+        }];
+        let pairs = vec![
+            pair("port_id.0", "1"),
+            pair("vlan.0", "10"),
+            pair("enabled.0", "on"),
+            pair("speed_duplex.0", "auto"),
+        ];
+        let ports = parse_ports_bulk(pairs, &existing);
+        assert!(ports[0].mac_notify, "mac_notify should be preserved");
+    }
+
+    #[test]
+    fn test_parse_ports_bulk_sorts_and_parses_fields() {
+        let pairs = vec![
+            pair("port_id.0", "10"),
+            pair("vlan.0", "5"),
+            pair("tagged_vlans.0", "20,30"),
+            pair("enabled.0", "on"),
+            pair("speed_duplex.0", "1000-full"),
+            pair("port_id.1", "2"),
+            pair("vlan.1", "1"),
+            pair("speed_duplex.1", "auto"),
+        ];
+        let ports = parse_ports_bulk(pairs, &[]);
+        // natural sort: "2" before "10"
+        assert_eq!(ports[0].port_id, "2");
+        assert_eq!(ports[1].port_id, "10");
+        let p10 = &ports[1];
+        assert_eq!(p10.vlan, 5);
+        assert_eq!(p10.tagged_vlans, vec![20, 30]);
+        assert_eq!(p10.mode, PortMode::Trunk);
+        assert_eq!(p10.speed_duplex, SpeedDuplex::ThousandFull);
+        // port 2 had no enabled checkbox -> disabled
+        assert!(!ports[0].enabled);
+    }
 }
