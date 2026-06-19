@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+
+{% block title %}Overlay: {{ filename }} - Switch Configurator{% endblock %}
+
+{% block content %}
+<div class="flex justify-between items-center mb-1">
+    <div>
+        <h2>Overlay Config: {{ filename }}</h2>
+        <span class="text-sm text-muted">Switch: {{ switch_id }}</span>
+    </div>
+    <div class="flex" style="gap:0.5rem;">
+        <form method="POST" action="/overlay/{{ switch_id }}/{{ filename }}/delete"
+              onsubmit="return confirm('Delete {{ filename }}? This will remove the overlay and the switch may be reloaded without it.')">
+            <button type="submit" class="btn" style="background:var(--danger);color:white;">Delete Overlay</button>
+        </form>
+        <a href="/" class="btn btn-outline">Back to Dashboard</a>
+    </div>
+</div>
+
+{% match error %}
+    {% when Some with (msg) %}
+    <div class="card" style="border-color:var(--danger);background:var(--danger-light);color:var(--danger);">
+        {{ msg }}
+    </div>
+    {% when None %}
+{% endmatch %}
+
+<div class="card">
+    <pre style="margin:0;white-space:pre-wrap;font-size:0.85rem;line-height:1.5;">{{ content }}</pre>
+</div>
+{% endblock %}

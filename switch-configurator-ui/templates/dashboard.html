@@ -28,6 +28,17 @@
                 {% endfor %}
             </div>
             {% endif %}
+            {% if !f.overlay_files.is_empty() %}
+            <div class="mt-1 flex" style="gap:0.5rem;">
+                {% for overlay in f.overlay_files %}
+                <a href="/overlay/{{ f.switch_id }}/{{ overlay.filename }}/view" class="btn btn-outline text-sm">View {{ overlay.filename }}</a>
+                <form method="POST" action="/overlay/{{ f.switch_id }}/{{ overlay.filename }}/delete" style="display:inline;"
+                      onsubmit="return confirm('Delete {{ overlay.filename }}?')">
+                    <button type="submit" class="btn text-sm" style="background:var(--danger);color:white;">Delete {{ overlay.filename }}</button>
+                </form>
+                {% endfor %}
+            </div>
+            {% endif %}
         </div>
         {% endfor %}
     </div>
