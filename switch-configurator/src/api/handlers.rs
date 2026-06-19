@@ -29,6 +29,7 @@ pub async fn events(
                         crate::config::SseEvent::Status { .. } => "status",
                         crate::config::SseEvent::ConfigReload { .. } => "config-reload",
                         crate::config::SseEvent::Warning { .. } => "warning",
+                        crate::config::SseEvent::PoeReset { .. } => "poe-reset",
                     };
                     Some(Ok(axum::response::sse::Event::default()
                         .event(event_name)
@@ -1416,36 +1417,78 @@ pub async fn poe_reset(
 
     store.status.set_currently_configuring(id.clone()).await;
 
-    let result = poe_reset_impl(&switch_config, &port_id).await;
+    // Run the reset in the background and stream progress via SSE.
+    // Returns 202 immediately; the UI listens on /api/events for the staged
+    // connecting -> disabling -> waiting(3,2,1) -> enabling -> done|failed events.
+    let store_bg = store.clone();
+    let id_bg = id.clone();
+    let port_bg = port_id.clone();
+    let cfg_bg = switch_config.clone();
 
-    store.status.clear_currently_configuring(&id).await;
-
-    match result {
-        Ok(response) => (StatusCode::OK, Json(response)).into_response(),
-        Err(error_msg) => {
-            error!("PoE reset failed for {}:{}: {}", id, port_id, error_msg);
-            store
-                .status
-                .record_error(
-                    "PoeReset".to_string(),
-                    error_msg.clone(),
-                    Some(id.clone()),
-                    "poe_reset".to_string(),
-                )
-                .await;
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": error_msg, "switch_id": id, "port_id": port_id})),
-            )
-                .into_response()
+    tokio::spawn(async move {
+        let result = poe_reset_impl(&store_bg, &id_bg, &cfg_bg, &port_bg).await;
+        match &result {
+            Ok(()) => {
+                store_bg.emit_event(SseEvent::PoeReset {
+                    switch_id: id_bg.clone(),
+                    port_id: port_bg.clone(),
+                    stage: "done".to_string(),
+                    detail: None,
+                });
+                info!("PoE reset completed for {}:{}", id_bg, port_bg);
+            }
+            Err(error_msg) => {
+                store_bg.emit_event(SseEvent::PoeReset {
+                    switch_id: id_bg.clone(),
+                    port_id: port_bg.clone(),
+                    stage: "failed".to_string(),
+                    detail: Some(error_msg.clone()),
+                });
+                error!("PoE reset failed for {}:{}: {}", id_bg, port_bg, error_msg);
+                store_bg
+                    .status
+                    .record_error(
+                        "PoeReset".to_string(),
+                        error_msg.clone(),
+                        Some(id_bg.clone()),
+                        "poe_reset".to_string(),
+                    )
+                    .await;
+            }
         }
-    }
+        store_bg.status.clear_currently_configuring(&id_bg).await;
+    });
+
+    (
+        StatusCode::ACCEPTED,
+        Json(json!({
+            "status": "accepted",
+            "message": format!("PoE reset started for port {} on switch '{}'", port_id, id),
+            "switch_id": id,
+            "port_id": port_id,
+            "hint": "Listen on /api/events for poe-reset stage events"
+        })),
+    )
+        .into_response()
 }
 
 async fn poe_reset_impl(
+    store: &ConfigStore,
+    id: &str,
     switch_config: &SwitchConfig,
     port_id: &str,
-) -> Result<serde_json::Value, String> {
+) -> Result<(), String> {
+    let emit = |stage: &str, detail: Option<String>| {
+        store.emit_event(SseEvent::PoeReset {
+            switch_id: id.to_string(),
+            port_id: port_id.to_string(),
+            stage: stage.to_string(),
+            detail,
+        });
+    };
+
+    emit("connecting", None);
+
     let mut vendor = vendors::create_vendor_with_runtime(
         switch_config,
         &crate::config::RuntimeConfig::default(),
@@ -1466,14 +1509,21 @@ async fn poe_reset_impl(
     let disable_cmds = aruba.poe_disable_commands(port_id);
     let enable_cmds = aruba.poe_enable_commands(port_id);
 
+    emit("disabling", None);
     if let Err(e) = vendor.execute_raw_commands(&disable_cmds).await {
         let _ = vendor.disconnect().await;
         return Err(format!("Failed to disable PoE: {}", e));
     }
 
     info!("PoE disabled on port {}, waiting 3 seconds...", port_id);
-    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    // Emit one tick per second so the dashboard countdown reflects the real
+    // backend timer rather than a client-side guess.
+    for n in (1..=3).rev() {
+        emit("waiting", Some(n.to_string()));
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
 
+    emit("enabling", None);
     if let Err(e) = vendor.execute_raw_commands(&enable_cmds).await {
         warn!(
             "First PoE re-enable attempt failed for port {}: {}. Retrying...",
@@ -1492,10 +1542,5 @@ async fn poe_reset_impl(
     info!("PoE re-enabled on port {}", port_id);
     let _ = vendor.disconnect().await;
 
-    Ok(json!({
-        "switch_id": switch_config.id,
-        "port_id": port_id,
-        "success": true,
-        "message": format!("PoE reset completed for port {}", port_id),
-    }))
+    Ok(())
 }

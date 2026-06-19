@@ -303,6 +303,18 @@ pub enum SseEvent {
     ConfigReload { switches_affected: Vec<String> },
     #[serde(rename = "warning")]
     Warning { switch_id: String, message: String },
+    /// PoE reset progress for a specific port. `stage` is one of
+    /// connecting / disabling / waiting / enabling / done / failed.
+    /// For the `waiting` stage `detail` carries the seconds remaining;
+    /// for `failed` it carries the error message.
+    #[serde(rename = "poe-reset")]
+    PoeReset {
+        switch_id: String,
+        port_id: String,
+        stage: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
+    },
 }
 
 /// Shared configuration store with status tracking

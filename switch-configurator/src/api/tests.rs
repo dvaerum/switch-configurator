@@ -1,5 +1,5 @@
 use super::handlers::*;
-use crate::config::{AppConfig, ConfigStore, Settings};
+use crate::config::{AppConfig, ConfigStore, Settings, SseEvent};
 use crate::models::{
     ConnectionType, Credentials, Port, PortMode, SpeedDuplex, SwitchConfig, SwitchModel, Vlan,
     VlanIpConfig,
@@ -2902,6 +2902,72 @@ mod integration_tests {
         .await
         .into_response();
         assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn test_poe_reset_valid_returns_202() {
+        // A valid Aruba PoE port returns 202 Accepted; the actual reset runs
+        // in a background task (connection happens there).
+        let store = create_test_config_store();
+        let response = poe_reset(
+            axum::extract::State(store),
+            axum::extract::Path(("test-sw-01".to_string(), "1".to_string())),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+    }
+
+    #[tokio::test]
+    async fn test_poe_reset_emits_connecting_event() {
+        // The first SSE event emitted by the background task is a PoeReset
+        // "connecting" stage — this arrives before the (slow) connect attempt,
+        // so the test is fast and deterministic regardless of connection outcome.
+        let store = create_test_config_store();
+        let mut rx = store.events.subscribe();
+
+        let response = poe_reset(
+            axum::extract::State(store.clone()),
+            axum::extract::Path(("test-sw-01".to_string(), "1".to_string())),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+
+        let ev = tokio::time::timeout(std::time::Duration::from_secs(3), rx.recv())
+            .await
+            .expect("timed out waiting for SSE event")
+            .expect("broadcast recv error");
+
+        match ev {
+            SseEvent::PoeReset {
+                stage,
+                port_id,
+                switch_id,
+                ..
+            } => {
+                assert_eq!(stage, "connecting");
+                assert_eq!(port_id, "1");
+                assert_eq!(switch_id, "test-sw-01");
+            }
+            other => panic!("expected PoeReset connecting event, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_sse_event_poe_reset_serialization() {
+        let ev = SseEvent::PoeReset {
+            switch_id: "sw1".to_string(),
+            port_id: "5".to_string(),
+            stage: "waiting".to_string(),
+            detail: Some("3".to_string()),
+        };
+        let json = serde_json::to_value(&ev).unwrap();
+        assert_eq!(json["event"], "poe-reset");
+        assert_eq!(json["data"]["switch_id"], "sw1");
+        assert_eq!(json["data"]["port_id"], "5");
+        assert_eq!(json["data"]["stage"], "waiting");
+        assert_eq!(json["data"]["detail"], "3");
     }
 
     #[tokio::test]

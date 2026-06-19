@@ -329,6 +329,9 @@ fn extract_port_numbers(port_id: &str) -> Vec<u32> {
         .collect()
 }
 
+/// Kicks off a PoE reset on the backend (returns 202) and forwards the status.
+/// Live progress is streamed separately over SSE (/events) and rendered by the
+/// poeReset() client script — this endpoint only starts the operation.
 pub async fn poe_reset(
     State(state): State<AppState>,
     Path((id, port_id)): Path<(String, String)>,
@@ -336,23 +339,14 @@ pub async fn poe_reset(
     let path = format!("/switches/{}/poe-reset/{}", id, port_id);
     match state.backend.post(&path, &serde_json::json!({})).await {
         Ok((status, body)) => {
-            if status < 300 {
-                axum::response::Html(
-                    r#"<span class="badge" style="background:var(--success);color:white;">Reset OK</span>"#.to_string()
-                ).into_response()
-            } else {
-                let error = body["error"].as_str().unwrap_or("Unknown error");
-                axum::response::Html(format!(
-                    r#"<span class="badge" style="background:var(--danger);color:white;" title="{}">Failed</span>"#,
-                    error
-                )).into_response()
-            }
+            let code = axum::http::StatusCode::from_u16(status)
+                .unwrap_or(axum::http::StatusCode::BAD_GATEWAY);
+            (code, axum::Json(body)).into_response()
         }
-        Err(e) => {
-            axum::response::Html(format!(
-                r#"<span class="badge" style="background:var(--danger);color:white;" title="{}">Error</span>"#,
-                e
-            )).into_response()
-        }
+        Err(e) => (
+            axum::http::StatusCode::BAD_GATEWAY,
+            axum::Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response(),
     }
 }
