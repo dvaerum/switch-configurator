@@ -294,6 +294,9 @@ impl SshClient {
                             if more_regex.is_match(&clean) {
                                 debug!("Detected '-- MORE --' paging prompt, sending SPACE");
                                 channel.data(&b" "[..]).await?;
+                                // Remove the answered pager prompt so the stale
+                                // marker can't re-match forever (page content kept).
+                                crate::ssh::strip_pager_prompt(&mut output);
                                 last_data_time = tokio::time::Instant::now();
                                 prompt_detected_at = None;
                                 continue;
