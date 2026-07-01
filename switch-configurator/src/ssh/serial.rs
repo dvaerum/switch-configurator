@@ -671,6 +671,9 @@ impl SerialClient {
                                     debug!("Detected '-- MORE --' paging prompt, sending SPACE to continue");
                                     AsyncWriteExt::write_all(port, b" ").await?;
                                     AsyncWriteExt::flush(port).await?;
+                                    // Remove the answered pager prompt so the stale
+                                    // marker can't re-match forever (page content kept).
+                                    crate::ssh::strip_pager_prompt(&mut output);
                                     last_data_time = tokio::time::Instant::now();
                                     prompt_detected_at = None;
                                     continue;
@@ -772,6 +775,9 @@ impl SerialClient {
                                 debug!("Detected '-- MORE --' paging prompt (idle path), sending SPACE");
                                 AsyncWriteExt::write_all(port, b" ").await?;
                                 AsyncWriteExt::flush(port).await?;
+                                // Remove the answered pager prompt so the stale
+                                // marker can't re-match forever (page content kept).
+                                crate::ssh::strip_pager_prompt(&mut output);
                                 last_data_time = tokio::time::Instant::now();
                                 continue;
                             }
