@@ -175,13 +175,42 @@ ports:
 **Common Fields:**
 - `port_id` - Port identifier (vendor-specific format, supports ranges like "1-5")
 - `mode` - `access` or `trunk`
-- `vlan` - VLAN ID (native VLAN for trunk ports)
-- `allowed_vlans` - List of allowed VLANs (trunk mode only)
+- `vlan` - Untagged/native VLAN, by **ID** (`vlan: 10`) or by **name** (`vlan: "Users"`)
+- `tagged_vlans` (alias `allowed_vlans`) - Tagged VLANs, each by ID or name (trunk mode)
 - `description` - Port description (optional)
 - `enabled` - `true` to enable port, `false` to disable
 - `poe_enabled` - `true` to enable Power over Ethernet, `false` to disable
 - `mac_notify` - `true` to enable MAC address change notifications (requires global SNMP trap, see [SNMP Configuration](#snmp-configuration))
 - `speed_duplex` - Port speed/duplex setting (e.g., `auto`, `100-full`, `1000-full`)
+
+### Referencing VLANs by Name
+
+Both `vlan` (untagged) and `tagged_vlans` accept a VLAN **name** as an alternative
+to a numeric ID. The name is matched against the switch's defined `vlans` list.
+
+```yaml
+vlans:
+  - { id: 10, name: Users }
+  - { id: 30, name: Voice }
+ports:
+  - port_id: "15"
+    vlan: "Users"                 # untagged VLAN by name → resolves to 10
+    tagged_vlans: ["Voice", 40]   # names and IDs may be mixed; order preserved
+```
+
+Rules:
+- **Type-strict:** a bare integer is always an ID (`vlan: 10`); a quoted string is
+  always a name lookup (`vlan: "10"` looks up a VLAN *named* `10`, not ID 10).
+- Name matching is **case-sensitive** and exact.
+- VLAN names referenced by ports must be **unique**; a name mapping to two IDs is
+  a hard error (ambiguous).
+- An **unknown untagged** VLAN name is a hard error (the switch is skipped).
+- An **unknown tagged** VLAN name is dropped with a warning on normal loads, or a
+  hard error under `--strict-deployment`.
+
+Names are resolved to numeric IDs at load time, so switches always receive
+ordinary numeric VLAN commands — this is purely a config-authoring convenience.
+See [`examples/vlan-by-name.yaml`](../../examples/vlan-by-name.yaml).
 
 **Note:** For `mac_notify` to work, you must also enable the global `mac-notify` trap in the [SNMP configuration section](#snmp-configuration).
 

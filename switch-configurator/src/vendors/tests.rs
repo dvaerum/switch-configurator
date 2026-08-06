@@ -116,6 +116,8 @@ mod tests {
                     poe_enabled: false,
                     mac_notify: false,
                     speed_duplex: crate::models::SpeedDuplex::Auto,
+                    vlan_name: None,
+                    tagged_vlan_refs: vec![],
                 },
             ],
             port_mirrors: vec![],
@@ -245,6 +247,8 @@ mod tests {
                 poe_enabled: true,
                 mac_notify: false,
                 speed_duplex: crate::models::SpeedDuplex::Auto,
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
             },
             Port {
                 port_id: "24".to_string(),
@@ -256,6 +260,8 @@ mod tests {
                 poe_enabled: false,
                 mac_notify: false,
                 speed_duplex: crate::models::SpeedDuplex::Auto,
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
             },
         ];
 
@@ -520,6 +526,8 @@ interface 1
                 poe_enabled: false,
                 mac_notify: false,
                 speed_duplex: crate::models::SpeedDuplex::Auto,
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
             },
             Port {
                 port_id: "2".to_string(),
@@ -531,6 +539,8 @@ interface 1
                 poe_enabled: false,
                 mac_notify: false,
                 speed_duplex: crate::models::SpeedDuplex::HundredFull,
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
             },
             Port {
                 port_id: "3".to_string(),
@@ -542,6 +552,8 @@ interface 1
                 poe_enabled: false,
                 mac_notify: false,
                 speed_duplex: crate::models::SpeedDuplex::ThousandFull,
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
             },
         ];
 
@@ -584,6 +596,8 @@ interface 1
                     poe_enabled: false,
                     mac_notify: false,
                     speed_duplex: crate::models::SpeedDuplex::Auto,
+                    vlan_name: None,
+                    tagged_vlan_refs: vec![],
                 },
                 Port {
                     port_id: "2".to_string(),
@@ -595,6 +609,8 @@ interface 1
                     poe_enabled: false,
                     mac_notify: false,
                     speed_duplex: crate::models::SpeedDuplex::HundredFull,
+                    vlan_name: None,
+                    tagged_vlan_refs: vec![],
                 },
             ],
             port_mirrors: vec![],
@@ -638,6 +654,8 @@ interface 1
                     poe_enabled: false,
                     mac_notify: false,
                     speed_duplex: crate::models::SpeedDuplex::HundredFull,
+                    vlan_name: None,
+                    tagged_vlan_refs: vec![],
                 },
             ],
             ports_to_reset: vec![],

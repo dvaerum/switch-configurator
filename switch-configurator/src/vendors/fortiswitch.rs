@@ -1635,6 +1635,8 @@ mod tests {
             poe_enabled: false,
             mac_notify: false,
             speed_duplex: SpeedDuplex::Auto,
+            vlan_name: None,
+            tagged_vlan_refs: vec![],
         }];
 
         let commands = switch.generate_port_commands(&ports);
@@ -1667,6 +1669,8 @@ mod tests {
             poe_enabled: false,
             mac_notify: false,
             speed_duplex: SpeedDuplex::ThousandFull,
+            vlan_name: None,
+            tagged_vlan_refs: vec![],
         }];
 
         let commands = switch.generate_port_commands(&ports);
@@ -1699,6 +1703,8 @@ mod tests {
             poe_enabled: false,
             mac_notify: false,
             speed_duplex: SpeedDuplex::Auto,
+            vlan_name: None,
+            tagged_vlan_refs: vec![],
         }];
 
         let commands = switch.generate_port_commands(&ports);
@@ -1719,6 +1725,8 @@ mod tests {
             poe_enabled: true,
             mac_notify: false,
             speed_duplex: SpeedDuplex::Auto,
+            vlan_name: None,
+            tagged_vlan_refs: vec![],
         }];
 
         let commands = switch.generate_port_commands(&ports);
@@ -1740,6 +1748,8 @@ mod tests {
                 poe_enabled: false,
                 mac_notify: false,
                 speed_duplex: SpeedDuplex::Auto,
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
             },
             Port {
                 port_id: "2".to_string(),
@@ -1751,6 +1761,8 @@ mod tests {
                 poe_enabled: false,
                 mac_notify: false,
                 speed_duplex: SpeedDuplex::HundredFull,
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
             },
             Port {
                 port_id: "3".to_string(),
@@ -1762,6 +1774,8 @@ mod tests {
                 poe_enabled: false,
                 mac_notify: false,
                 speed_duplex: SpeedDuplex::ThousandFull,
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
             },
         ];
 
@@ -2044,6 +2058,8 @@ mod tests {
             poe_enabled: false,
             mac_notify: false,
             speed_duplex: SpeedDuplex::Auto,
+            vlan_name: None,
+            tagged_vlan_refs: vec![],
         }];
 
         let switch = FortiswitchSwitch::new(config, RuntimeConfig::default(), false);
@@ -2080,6 +2096,8 @@ mod tests {
             poe_enabled: false,
             mac_notify: false,
             speed_duplex: SpeedDuplex::Auto,
+            vlan_name: None,
+            tagged_vlan_refs: vec![],
         }];
 
         let switch = FortiswitchSwitch::new(config, RuntimeConfig::default(), false);
@@ -2119,6 +2137,8 @@ mod tests {
                 poe_enabled: false,
                 mac_notify: false,
                 speed_duplex: SpeedDuplex::Auto,
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
             },
             Port {
                 port_id: "24".to_string(),
@@ -2130,6 +2150,8 @@ mod tests {
                 poe_enabled: false,
                 mac_notify: false,
                 speed_duplex: SpeedDuplex::ThousandFull,
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
             },
         ];
         config.port_mirrors = vec![PortMirror {
@@ -2663,6 +2685,8 @@ mod tests {
             poe_enabled: false,
             mac_notify: true,
             speed_duplex: SpeedDuplex::Auto,
+            vlan_name: None,
+            tagged_vlan_refs: vec![],
         }];
 
         let commands = switch.generate_port_commands(&ports);

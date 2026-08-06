@@ -633,6 +633,8 @@ fn form_to_port(form: &PortForm) -> Port {
         poe_enabled: form.poe_enabled.is_some(),
         mac_notify: false,
         speed_duplex: parse_speed_duplex(&form.speed_duplex),
+        vlan_name: None,
+        tagged_vlan_refs: vec![],
     }
 }
 
@@ -678,6 +680,8 @@ fn parse_ports_bulk(pairs: Vec<(String, String)>, existing: &[Port]) -> Vec<Port
             poe_enabled: fields.contains_key("poe_enabled"),
             mac_notify,
             speed_duplex: parse_speed_duplex(fields.get("speed_duplex").map(String::as_str).unwrap_or("auto")),
+            vlan_name: None,
+            tagged_vlan_refs: vec![],
         });
     }
 
@@ -791,6 +795,8 @@ mod tests {
             poe_enabled: false,
             mac_notify: true,
             speed_duplex: SpeedDuplex::Auto,
+            vlan_name: None,
+            tagged_vlan_refs: vec![],
         }];
         let pairs = vec![
             pair("port_id.0", "1"),

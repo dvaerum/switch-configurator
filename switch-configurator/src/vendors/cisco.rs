@@ -1466,6 +1466,8 @@ mod tests {
                 poe_enabled: true,
                 mac_notify: false,
                 speed_duplex: SpeedDuplex::Auto,
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
             },
         ];
 
@@ -1502,6 +1504,8 @@ mod tests {
                 poe_enabled: false,
                 mac_notify: false,
                 speed_duplex: SpeedDuplex::Auto,
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
             },
         ];
 
@@ -1531,6 +1535,8 @@ mod tests {
                 poe_enabled: false,
                 mac_notify: false,
                 speed_duplex: SpeedDuplex::Auto,
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
             },
         ];
 
@@ -1557,6 +1563,8 @@ mod tests {
                 poe_enabled: false,
                 mac_notify: true,
                 speed_duplex: SpeedDuplex::Auto,
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
             },
         ];
 
@@ -1584,6 +1592,8 @@ mod tests {
                 poe_enabled: false,
                 mac_notify: false,
                 speed_duplex: SpeedDuplex::HundredFull,
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
             },
         ];
 
@@ -1610,6 +1620,8 @@ mod tests {
                 poe_enabled: false,
                 mac_notify: false,
                 speed_duplex: SpeedDuplex::Auto,
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
             },
         ];
 
@@ -1805,6 +1817,8 @@ mod tests {
                 poe_enabled: false,
                 mac_notify: false,
                 speed_duplex: SpeedDuplex::Auto,
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
             },
         ];
 
@@ -1831,6 +1845,8 @@ mod tests {
                 poe_enabled: false,
                 mac_notify: false,
                 speed_duplex: SpeedDuplex::Auto,
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
             },
         ];
 
@@ -1867,6 +1883,8 @@ mod tests {
                 poe_enabled: false,
                 mac_notify: false,
                 speed_duplex: SpeedDuplex::Auto,
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
             },
         ];
 
@@ -1911,6 +1929,8 @@ mod tests {
                 poe_enabled: false,
                 mac_notify: false,
                 speed_duplex: SpeedDuplex::Auto,
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
             },
         ];
 
@@ -1947,6 +1967,8 @@ mod tests {
                 poe_enabled: true,
                 mac_notify: false,
                 speed_duplex: SpeedDuplex::Auto,
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
             },
             Port {
                 port_id: "GigabitEthernet1/0/2".to_string(),
@@ -1958,6 +1980,8 @@ mod tests {
                 poe_enabled: true,
                 mac_notify: false,
                 speed_duplex: SpeedDuplex::Auto,
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
             },
             Port {
                 port_id: "GigabitEthernet1/0/3".to_string(),
@@ -1969,6 +1993,8 @@ mod tests {
                 poe_enabled: false,
                 mac_notify: false,
                 speed_duplex: SpeedDuplex::Auto,
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
             },
             Port {
                 port_id: "GigabitEthernet1/0/24".to_string(),
@@ -1980,6 +2006,8 @@ mod tests {
                 poe_enabled: false,
                 mac_notify: false,
                 speed_duplex: SpeedDuplex::Auto,
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
             },
         ];
 
@@ -2030,6 +2058,8 @@ mod tests {
                 poe_enabled: false,
                 mac_notify: false,
                 speed_duplex: SpeedDuplex::Auto,
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
             },
         ];
 
@@ -2059,6 +2089,8 @@ mod tests {
                 poe_enabled: true,
                 mac_notify: false,
                 speed_duplex: SpeedDuplex::Auto,
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
             },
             Port {
                 port_id: "GigabitEthernet1/0/3".to_string(),
@@ -2070,6 +2102,8 @@ mod tests {
                 poe_enabled: false,
                 mac_notify: false,
                 speed_duplex: SpeedDuplex::Auto,
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
             },
         ];
 
@@ -2333,6 +2367,8 @@ mod tests {
             poe_enabled: false,
             mac_notify: false,
             speed_duplex: SpeedDuplex::Auto,
+            vlan_name: None,
+            tagged_vlan_refs: vec![],
         }];
 
         let commands = cisco.generate_port_commands(&ports);
@@ -2353,6 +2389,8 @@ mod tests {
             poe_enabled: false,
             mac_notify: false,
             speed_duplex: SpeedDuplex::TenHalf,
+            vlan_name: None,
+            tagged_vlan_refs: vec![],
         }];
 
         let commands = cisco.generate_port_commands(&ports);
@@ -2373,6 +2411,8 @@ mod tests {
             poe_enabled: false,
             mac_notify: false,
             speed_duplex: SpeedDuplex::TenFull,
+            vlan_name: None,
+            tagged_vlan_refs: vec![],
         }];
 
         let commands = cisco.generate_port_commands(&ports);
@@ -2393,6 +2433,8 @@ mod tests {
             poe_enabled: false,
             mac_notify: false,
             speed_duplex: SpeedDuplex::HundredHalf,
+            vlan_name: None,
+            tagged_vlan_refs: vec![],
         }];
 
         let commands = cisco.generate_port_commands(&ports);
@@ -2413,6 +2455,8 @@ mod tests {
             poe_enabled: false,
             mac_notify: false,
             speed_duplex: SpeedDuplex::HundredFull,
+            vlan_name: None,
+            tagged_vlan_refs: vec![],
         }];
 
         let commands = cisco.generate_port_commands(&ports);
@@ -2433,6 +2477,8 @@ mod tests {
             poe_enabled: false,
             mac_notify: false,
             speed_duplex: SpeedDuplex::ThousandFull,
+            vlan_name: None,
+            tagged_vlan_refs: vec![],
         }];
 
         let commands = cisco.generate_port_commands(&ports);
@@ -2453,6 +2499,8 @@ mod tests {
             poe_enabled: false,
             mac_notify: false,
             speed_duplex: SpeedDuplex::TenGFull,
+            vlan_name: None,
+            tagged_vlan_refs: vec![],
         }];
 
         let commands = cisco.generate_port_commands(&ports);
@@ -2542,6 +2590,8 @@ mod tests {
             poe_enabled: false,
             mac_notify: false,
             speed_duplex: SpeedDuplex::Auto,
+            vlan_name: None,
+            tagged_vlan_refs: vec![],
         }];
         let port_commands = cisco.generate_port_commands(&ports);
         assert!(

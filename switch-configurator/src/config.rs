@@ -580,8 +580,10 @@ fn merge_configs(configs: Vec<ConfigWithMetadata>) -> Result<(AppConfig, Vec<Swi
             continue;
         }
 
-        // Validate VLAN references and other checks
-        let vlan_result = validate_vlan_references(&mut switch);
+        // Resolve VLAN name references against the merged VLAN list, then
+        // validate VLAN references and other checks.
+        let vlan_result = resolve_vlan_names(&mut switch, false)
+            .and_then(|_| validate_vlan_references(&mut switch));
         let has_vlans_result = validate_has_vlans(&switch);
 
         if let Err(e) = vlan_result {
@@ -1193,6 +1195,98 @@ fn validate_vlan_references_inner(switch: &mut SwitchConfig, strict: bool) -> Re
     Ok(())
 }
 
+/// Resolve VLAN name references on ports into numeric VLAN IDs.
+///
+/// Ports may reference their untagged (`vlan`) and tagged (`tagged_vlans`) VLANs
+/// either by numeric id or by name. Names are captured at deserialization time
+/// into `Port::vlan_name` / `Port::tagged_vlan_refs` and resolved here against
+/// the switch's (already merged) `vlans` list.
+///
+/// Behavior (see design decisions):
+/// - Matching is **case-sensitive** and exact.
+/// - Duplicate VLAN names in the switch's `vlans` list are a hard error
+///   (ambiguous), even if never referenced.
+/// - An unknown **untagged** VLAN name is always a hard error.
+/// - An unknown **tagged** VLAN name is a hard error in `strict` mode, or a
+///   drop-with-warning in lenient mode (mirrors numeric tagged-VLAN handling).
+///
+/// After this runs, all `vlan_name` / `tagged_vlan_refs` fields are cleared and
+/// downstream code only ever sees numeric ids.
+pub fn resolve_vlan_names(switch: &mut SwitchConfig, strict: bool) -> Result<()> {
+    use std::collections::HashMap;
+    use tracing::warn;
+
+    // Build a case-sensitive name -> id map, detecting duplicate names.
+    let mut name_to_id: HashMap<&str, u16> = HashMap::new();
+    for vlan in &switch.vlans {
+        if let Some(existing_id) = name_to_id.insert(vlan.name.as_str(), vlan.id) {
+            if existing_id != vlan.id {
+                anyhow::bail!(
+                    "Switch '{}': VLAN name '{}' is ambiguous — it is defined for both VLAN {} and VLAN {}. \
+                     VLAN names referenced by ports must be unique.",
+                    switch.hostname.as_ref().unwrap_or(&switch.id),
+                    vlan.name,
+                    existing_id,
+                    vlan.id
+                );
+            }
+        }
+    }
+
+    let hostname_owned = switch.hostname.clone().unwrap_or_else(|| switch.id.clone());
+
+    for port in &mut switch.ports {
+        // Resolve the untagged VLAN name, if any.
+        if let Some(name) = port.vlan_name.take() {
+            match name_to_id.get(name.as_str()) {
+                Some(&id) => port.vlan = id,
+                None => {
+                    anyhow::bail!(
+                        "Switch '{}' port {}: untagged VLAN name '{}' does not match any defined VLAN.",
+                        hostname_owned, port.port_id, name
+                    );
+                }
+            }
+        }
+
+        // Resolve tagged VLAN references (ids and names), preserving order.
+        if !port.tagged_vlan_refs.is_empty() {
+            let refs = std::mem::take(&mut port.tagged_vlan_refs);
+            let mut resolved: Vec<u16> = Vec::with_capacity(refs.len());
+            for r in refs {
+                let id = match r {
+                    crate::models::VlanRef::Id(id) => Some(id),
+                    crate::models::VlanRef::Name(name) => match name_to_id.get(name.as_str()) {
+                        Some(&id) => Some(id),
+                        None => {
+                            if strict {
+                                anyhow::bail!(
+                                    "Switch '{}' port {}: tagged VLAN name '{}' does not match any defined VLAN.",
+                                    hostname_owned, port.port_id, name
+                                );
+                            } else {
+                                warn!(
+                                    "Switch '{}' port {}: tagged VLAN name '{}' does not match any defined VLAN. Dropping it.",
+                                    hostname_owned, port.port_id, name
+                                );
+                                None
+                            }
+                        }
+                    },
+                };
+                if let Some(id) = id {
+                    if !resolved.contains(&id) {
+                        resolved.push(id);
+                    }
+                }
+            }
+            port.tagged_vlans = resolved;
+        }
+    }
+
+    Ok(())
+}
+
 /// Validate a single switch configuration.
 ///
 /// This is the shared validation function used by both YAML loading and API endpoints.
@@ -1224,6 +1318,13 @@ pub fn validate_switch_config(switch: &mut SwitchConfig) -> Result<()> {
             switch.hostname.as_ref().unwrap_or(&switch.id)
         )
     })?;
+
+    // Step 3b: Resolve VLAN name references (ports may reference VLANs by name).
+    // Must run after required-field/structural validation (so `vlans` is populated)
+    // and before VLAN-reference validation (which checks numeric ids).
+    // The resolver's error is already switch-scoped and actionable, so it is
+    // propagated as-is (no extra context wrapper that would hide the detail).
+    resolve_vlan_names(switch, false)?;
 
     // Step 4: Validate VLAN references and speed/duplex compatibility
     validate_vlan_references(switch).with_context(|| {
@@ -1265,6 +1366,11 @@ pub fn validate_overlay_config(switch: &mut SwitchConfig) -> Result<()> {
             anyhow::bail!("Duplicate port ID '{}' in switch '{}'", port.port_id, switch.id);
         }
     }
+
+    // Resolve VLAN name references before checking numeric references.
+    // Overlays are strict: any unknown VLAN name is rejected.
+    resolve_vlan_names(switch, true)
+        .with_context(|| format!("VLAN name resolution failed for switch '{}'", switch.id))?;
 
     // Validate port VLAN references strictly — reject any invalid references.
     // Uses the model's implicit_vlans() if model is set, otherwise only
@@ -1420,6 +1526,160 @@ fn extract_number_suffix(s: &str) -> Result<(&str, u32)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ========== resolve_vlan_names tests ==========
+
+    fn vlan(id: u16, name: &str) -> crate::models::Vlan {
+        crate::models::Vlan {
+            id,
+            name: name.to_string(),
+            description: None,
+            ip_config: Default::default(),
+        }
+    }
+
+    fn port_named(port_id: &str, vlan_name: Option<&str>, vlan: u16, tagged_names: &[&str]) -> crate::models::Port {
+        crate::models::Port {
+            port_id: port_id.to_string(),
+            mode: crate::models::PortMode::Access,
+            vlan,
+            tagged_vlans: vec![],
+            description: None,
+            enabled: true,
+            poe_enabled: false,
+            mac_notify: false,
+            speed_duplex: crate::models::SpeedDuplex::Auto,
+            vlan_name: vlan_name.map(String::from),
+            tagged_vlan_refs: tagged_names
+                .iter()
+                .map(|s| crate::models::VlanRef::Name(s.to_string()))
+                .collect(),
+        }
+    }
+
+    fn switch_with(vlans: Vec<crate::models::Vlan>, ports: Vec<crate::models::Port>) -> SwitchConfig {
+        SwitchConfig {
+            id: "test-switch".to_string(),
+            hostname: Some("test-switch".to_string()),
+            model: Some(crate::models::SwitchModel::Aruba2930F),
+            management_ip: Some("10.0.0.1".to_string()),
+            credentials: None,
+            vlans,
+            ports,
+            port_mirrors: vec![],
+            snmp: None,
+            management_vlan: None,
+            validation: None,
+            vendor_specific: Default::default(),
+            settings: Default::default(),
+        }
+    }
+
+    #[test]
+    fn test_resolve_untagged_name() {
+        let mut sw = switch_with(
+            vec![vlan(1020, "APC-Zone1")],
+            vec![port_named("15", Some("APC-Zone1"), 1, &[])],
+        );
+        resolve_vlan_names(&mut sw, false).unwrap();
+        assert_eq!(sw.ports[0].vlan, 1020);
+        assert_eq!(sw.ports[0].vlan_name, None);
+    }
+
+    #[test]
+    fn test_resolve_unknown_untagged_name_is_error() {
+        let mut sw = switch_with(
+            vec![vlan(1020, "APC-Zone1")],
+            vec![port_named("15", Some("Zone-99"), 1, &[])],
+        );
+        let err = resolve_vlan_names(&mut sw, false).unwrap_err().to_string();
+        assert!(err.contains("Zone-99"), "error should name the bad vlan: {}", err);
+        assert!(err.contains("untagged"), "error should mention untagged: {}", err);
+    }
+
+    #[test]
+    fn test_resolve_tagged_names() {
+        let mut sw = switch_with(
+            vec![vlan(10, "Users"), vlan(20, "Voice"), vlan(30, "Guest")],
+            vec![port_named("15", None, 10, &["Voice", "Guest"])],
+        );
+        resolve_vlan_names(&mut sw, false).unwrap();
+        assert_eq!(sw.ports[0].tagged_vlans, vec![20, 30]);
+        assert!(sw.ports[0].tagged_vlan_refs.is_empty());
+    }
+
+    #[test]
+    fn test_resolve_unknown_tagged_name_lenient_drops() {
+        let mut sw = switch_with(
+            vec![vlan(20, "Voice")],
+            vec![port_named("15", None, 1, &["Voice", "Nope"])],
+        );
+        resolve_vlan_names(&mut sw, false).unwrap();
+        assert_eq!(sw.ports[0].tagged_vlans, vec![20], "unknown tagged name dropped in lenient mode");
+    }
+
+    #[test]
+    fn test_resolve_unknown_tagged_name_strict_errors() {
+        let mut sw = switch_with(
+            vec![vlan(20, "Voice")],
+            vec![port_named("15", None, 1, &["Voice", "Nope"])],
+        );
+        let err = resolve_vlan_names(&mut sw, true).unwrap_err().to_string();
+        assert!(err.contains("Nope"), "strict mode should error on unknown tagged name: {}", err);
+    }
+
+    #[test]
+    fn test_resolve_duplicate_vlan_names_is_error() {
+        let mut sw = switch_with(
+            vec![vlan(10, "Users"), vlan(20, "Users")],
+            vec![port_named("15", None, 10, &[])],
+        );
+        let err = resolve_vlan_names(&mut sw, false).unwrap_err().to_string();
+        assert!(err.contains("ambiguous"), "duplicate names should be ambiguous error: {}", err);
+        assert!(err.contains("Users"));
+    }
+
+    #[test]
+    fn test_resolve_case_sensitive_mismatch_is_error() {
+        let mut sw = switch_with(
+            vec![vlan(1020, "APC-Zone1")],
+            vec![port_named("15", Some("apc-zone1"), 1, &[])],
+        );
+        assert!(resolve_vlan_names(&mut sw, false).is_err(), "name match is case-sensitive");
+    }
+
+    #[test]
+    fn test_resolve_numeric_only_is_noop() {
+        let mut sw = switch_with(
+            vec![vlan(10, "Users"), vlan(20, "Voice")],
+            vec![{
+                let mut p = port_named("15", None, 10, &[]);
+                p.tagged_vlans = vec![20];
+                p
+            }],
+        );
+        resolve_vlan_names(&mut sw, false).unwrap();
+        assert_eq!(sw.ports[0].vlan, 10);
+        assert_eq!(sw.ports[0].tagged_vlans, vec![20]);
+    }
+
+    #[test]
+    fn test_resolve_tagged_name_dedups_against_existing_id() {
+        // Mixed list [20, "Voice"] where "Voice" is also id 20 → deduplicated.
+        let mut sw = switch_with(
+            vec![vlan(20, "Voice")],
+            vec![{
+                let mut p = port_named("15", None, 1, &[]);
+                p.tagged_vlan_refs = vec![
+                    crate::models::VlanRef::Id(20),
+                    crate::models::VlanRef::Name("Voice".to_string()),
+                ];
+                p
+            }],
+        );
+        resolve_vlan_names(&mut sw, false).unwrap();
+        assert_eq!(sw.ports[0].tagged_vlans, vec![20], "should not duplicate id 20");
+    }
 
     #[test]
     fn test_parse_port_id_single() {
@@ -1934,6 +2194,8 @@ switches:
                     poe_enabled: false,
                     mac_notify: false,
                     speed_duplex: crate::models::SpeedDuplex::Auto,
+                    vlan_name: None,
+                    tagged_vlan_refs: vec![],
                 },
                 Port {
                     port_id: "2".to_string(),
@@ -1945,6 +2207,8 @@ switches:
                     poe_enabled: false,
                     mac_notify: false,
                     speed_duplex: crate::models::SpeedDuplex::Auto,
+                    vlan_name: None,
+                    tagged_vlan_refs: vec![],
                 },
             ],
             port_mirrors: vec![],
@@ -1999,6 +2263,8 @@ switches:
                     poe_enabled: false,
                     mac_notify: false,
                     speed_duplex: crate::models::SpeedDuplex::Auto,
+                    vlan_name: None,
+                    tagged_vlan_refs: vec![],
                 },
             ],
             port_mirrors: vec![],
@@ -2062,6 +2328,8 @@ switches:
                     poe_enabled: false,
                     mac_notify: false,
                     speed_duplex: crate::models::SpeedDuplex::Auto,
+                    vlan_name: None,
+                    tagged_vlan_refs: vec![],
                 },
             ],
             port_mirrors: vec![],
@@ -2121,6 +2389,8 @@ switches:
                     poe_enabled: false,
                     mac_notify: false,
                     speed_duplex: crate::models::SpeedDuplex::Auto,
+                    vlan_name: None,
+                    tagged_vlan_refs: vec![],
                 },
             ],
             port_mirrors: vec![
@@ -2182,6 +2452,8 @@ switches:
                     poe_enabled: false,
                     mac_notify: false,
                     speed_duplex: crate::models::SpeedDuplex::Auto,
+                    vlan_name: None,
+                    tagged_vlan_refs: vec![],
                 },
                 Port {
                     port_id: "2".to_string(),
@@ -2193,6 +2465,8 @@ switches:
                     poe_enabled: false,
                     mac_notify: false,
                     speed_duplex: crate::models::SpeedDuplex::Auto,
+                    vlan_name: None,
+                    tagged_vlan_refs: vec![],
                 },
             ],
             port_mirrors: vec![],
@@ -2267,6 +2541,8 @@ switches:
                     poe_enabled: false,
                     mac_notify: false,
                     speed_duplex: crate::models::SpeedDuplex::Auto,
+                    vlan_name: None,
+                    tagged_vlan_refs: vec![],
                 },
             ],
             port_mirrors: vec![],
@@ -2687,6 +2963,8 @@ settings:
                 poe_enabled: false,
                 speed_duplex: crate::models::SpeedDuplex::Auto,
                 mac_notify: false,
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
             }],
             port_mirrors: vec![],
             snmp: None,
@@ -2763,6 +3041,8 @@ settings:
                 poe_enabled: false,
                 speed_duplex: crate::models::SpeedDuplex::Auto,
                 mac_notify: false,
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
             }],
             port_mirrors: vec![],
             snmp: None,
@@ -2813,6 +3093,8 @@ settings:
                 poe_enabled: false,
                 speed_duplex: crate::models::SpeedDuplex::Auto,
                 mac_notify: false,
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
             }],
             port_mirrors: vec![],
             snmp: None,
@@ -2986,6 +3268,8 @@ switches:
                     poe_enabled: false,
                     mac_notify: false,
                     speed_duplex: crate::models::SpeedDuplex::Auto,
+                    vlan_name: None,
+                    tagged_vlan_refs: vec![],
                 },
                 Port {
                     port_id: "22".to_string(),
@@ -2997,6 +3281,8 @@ switches:
                     poe_enabled: false,
                     mac_notify: false,
                     speed_duplex: crate::models::SpeedDuplex::Auto,
+                    vlan_name: None,
+                    tagged_vlan_refs: vec![],
                 },
             ],
             port_mirrors: vec![
@@ -3059,6 +3345,8 @@ switches:
                     poe_enabled: false,
                     mac_notify: false,
                     speed_duplex: crate::models::SpeedDuplex::Auto,
+                    vlan_name: None,
+                    tagged_vlan_refs: vec![],
                 },
             ],
             port_mirrors: vec![
@@ -3109,6 +3397,8 @@ switches:
                 port_id: "1".to_string(), mode: PortMode::Access, vlan: 10,
                 tagged_vlans: vec![], description: None, enabled: true,
                 poe_enabled: false, mac_notify: false, speed_duplex: SpeedDuplex::Auto,
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
             }],
             port_mirrors: vec![],
             snmp: None,
@@ -3140,6 +3430,8 @@ switches:
                 port_id: "1".to_string(), mode: PortMode::Access, vlan: 999, // References non-existent VLAN
                 tagged_vlans: vec![], description: None, enabled: true,
                 poe_enabled: false, mac_notify: false, speed_duplex: SpeedDuplex::Auto,
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
             }],
             port_mirrors: vec![],
             snmp: None,

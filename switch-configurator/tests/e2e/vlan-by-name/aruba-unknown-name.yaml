@@ -1,0 +1,21 @@
+# E2E: unknown VLAN name → switch is skipped at load time with a validation
+# error BEFORE any connection is attempted. Run with --one-off; expect the
+# switch to be reported as skipped and NOT connected to.
+switches:
+  - id: e2e-aruba-unknown-name
+    hostname: e2e-aruba-unknown-name
+    model: Aruba2530_8G_POE
+    management_ip: "192.168.1.2"
+    credentials:
+      username: admin
+      password: admin
+      connection_type: serial
+      serial_device: /dev/serial_aruba-2530-8g-poe+
+      baud_rate: 115200
+    vlans:
+      - id: 10
+        name: Users
+    ports:
+      - port_id: "1"
+        vlan: "DOES-NOT-EXIST"
+        enabled: true

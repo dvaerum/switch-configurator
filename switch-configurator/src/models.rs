@@ -721,8 +721,91 @@ impl SpeedDuplex {
     }
 }
 
+/// A reference to a VLAN in a port configuration.
+///
+/// Accepts either a numeric VLAN ID or a VLAN name (string) in YAML.
+/// Matching is **type-strict**: a bare integer (`vlan: 1020`) is always an ID,
+/// while a quoted string (`vlan: "1020"`) is always a name lookup. Name matching
+/// is case-sensitive and resolved against the switch's defined VLANs after merge.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VlanRef {
+    /// Numeric VLAN ID (IEEE 802.1Q, 1-4094)
+    Id(u16),
+    /// VLAN name, resolved to an ID against the switch's `vlans` list
+    Name(String),
+}
+
+impl serde::Serialize for VlanRef {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            VlanRef::Id(id) => serializer.serialize_u16(*id),
+            VlanRef::Name(name) => serializer.serialize_str(name),
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for VlanRef {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::{self, Visitor};
+        use std::fmt;
+
+        struct VlanRefVisitor;
+
+        impl<'de> Visitor<'de> for VlanRefVisitor {
+            type Value = VlanRef;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("a VLAN id (integer 1-4094) or a VLAN name (string)")
+            }
+
+            fn visit_u64<E>(self, value: u64) -> Result<VlanRef, E>
+            where
+                E: de::Error,
+            {
+                if value == 0 || value > u16::MAX as u64 {
+                    return Err(de::Error::custom(format!(
+                        "VLAN id {} out of range (expected 1-65535)",
+                        value
+                    )));
+                }
+                Ok(VlanRef::Id(value as u16))
+            }
+
+            fn visit_i64<E>(self, value: i64) -> Result<VlanRef, E>
+            where
+                E: de::Error,
+            {
+                if value < 1 || value > u16::MAX as i64 {
+                    return Err(de::Error::custom(format!(
+                        "VLAN id {} out of range (expected 1-65535)",
+                        value
+                    )));
+                }
+                Ok(VlanRef::Id(value as u16))
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<VlanRef, E>
+            where
+                E: de::Error,
+            {
+                // Type-strict: a quoted value is always treated as a name,
+                // even if it looks numeric (e.g. "1020" is the name, not id 1020).
+                Ok(VlanRef::Name(value.to_string()))
+            }
+        }
+
+        deserializer.deserialize_any(VlanRefVisitor)
+    }
+}
+
 /// Port configuration
-#[derive(Debug, Clone, Serialize, Deserialize, Validate, PartialEq)]
+#[derive(Debug, Clone, Serialize, Validate, PartialEq)]
 pub struct Port {
     /// Port identifier (e.g., "1/0/1", "GigabitEthernet1/0/1")
     pub port_id: String,
@@ -761,6 +844,87 @@ pub struct Port {
     /// Speed and duplex configuration
     #[serde(default)]
     pub speed_duplex: SpeedDuplex,
+
+    /// Deferred untagged VLAN name reference, present only between deserialization
+    /// and name resolution. `None` once resolved (or if a numeric id was given).
+    /// Never serialized; resolved into `vlan` by `resolve_vlan_names`.
+    #[serde(skip)]
+    pub vlan_name: Option<String>,
+
+    /// Deferred tagged VLAN references (ids and/or names) in their original
+    /// order, present only between deserialization and name resolution. Empty
+    /// once resolved. Never serialized; resolved into `tagged_vlans` by
+    /// `resolve_vlan_names`, which preserves order.
+    #[serde(skip)]
+    pub tagged_vlan_refs: Vec<VlanRef>,
+}
+
+impl<'de> serde::Deserialize<'de> for Port {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        /// Wire representation of a Port that accepts VLAN ids or names.
+        #[derive(Deserialize)]
+        struct PortDe {
+            port_id: String,
+            #[serde(default)]
+            mode: PortMode,
+            vlan: VlanRef,
+            #[serde(default, alias = "allowed_vlans")]
+            tagged_vlans: Vec<VlanRef>,
+            #[serde(default)]
+            description: Option<String>,
+            #[serde(default = "default_true")]
+            enabled: bool,
+            #[serde(default)]
+            poe_enabled: bool,
+            #[serde(default)]
+            mac_notify: bool,
+            #[serde(default)]
+            speed_duplex: SpeedDuplex,
+        }
+
+        let de = PortDe::deserialize(deserializer)?;
+
+        // Split the untagged VLAN reference: numeric ids populate `vlan`
+        // immediately; names are deferred for later resolution. A sentinel of 1
+        // is used for `vlan` while a name is pending (never observed downstream
+        // because resolution runs before any consumer).
+        let (vlan, vlan_name) = match de.vlan {
+            VlanRef::Id(id) => (id, None),
+            VlanRef::Name(name) => (1, Some(name)),
+        };
+
+        // Tagged VLANs: if every entry is a numeric id, populate `tagged_vlans`
+        // directly. If any entry is a name, defer the WHOLE ordered list to
+        // `tagged_vlan_refs` so name resolution can preserve the original order.
+        let mut tagged_vlans = Vec::new();
+        let mut tagged_vlan_refs = Vec::new();
+        if de.tagged_vlans.iter().any(|r| matches!(r, VlanRef::Name(_))) {
+            tagged_vlan_refs = de.tagged_vlans;
+        } else {
+            for r in de.tagged_vlans {
+                if let VlanRef::Id(id) = r {
+                    tagged_vlans.push(id);
+                }
+            }
+        }
+
+        Ok(Port {
+            port_id: de.port_id,
+            mode: de.mode,
+            vlan,
+            tagged_vlans,
+            description: de.description,
+            enabled: de.enabled,
+            poe_enabled: de.poe_enabled,
+            mac_notify: de.mac_notify,
+            speed_duplex: de.speed_duplex,
+            vlan_name,
+            tagged_vlan_refs,
+        })
+    }
 }
 
 impl Port {
@@ -1225,6 +1389,125 @@ impl StateDiff {
 mod tests {
     use super::*;
 
+    // ========== VlanRef Tests ==========
+
+    #[test]
+    fn test_vlanref_deserialize_bare_int_is_id() {
+        let r: VlanRef = serde_yaml::from_str("1020").unwrap();
+        assert_eq!(r, VlanRef::Id(1020));
+    }
+
+    #[test]
+    fn test_vlanref_deserialize_quoted_number_is_name() {
+        // Type-strict: a quoted number is a name, not an id.
+        let r: VlanRef = serde_yaml::from_str("\"1020\"").unwrap();
+        assert_eq!(r, VlanRef::Name("1020".to_string()));
+    }
+
+    #[test]
+    fn test_vlanref_deserialize_string_is_name() {
+        let r: VlanRef = serde_yaml::from_str("Users").unwrap();
+        assert_eq!(r, VlanRef::Name("Users".to_string()));
+        let r2: VlanRef = serde_yaml::from_str("\"APC v1 - Zone 1\"").unwrap();
+        assert_eq!(r2, VlanRef::Name("APC v1 - Zone 1".to_string()));
+    }
+
+    #[test]
+    fn test_vlanref_id_out_of_range_errors() {
+        assert!(serde_yaml::from_str::<VlanRef>("0").is_err());
+        assert!(serde_yaml::from_str::<VlanRef>("70000").is_err());
+    }
+
+    #[test]
+    fn test_vlanref_serialize_id_as_int_name_as_string() {
+        assert_eq!(serde_yaml::to_string(&VlanRef::Id(1020)).unwrap().trim(), "1020");
+        assert_eq!(serde_yaml::to_string(&VlanRef::Name("Users".into())).unwrap().trim(), "Users");
+    }
+
+    // ========== Port VLAN-name deserialization (spike) ==========
+
+    #[test]
+    fn test_port_deserialize_numeric_vlan_populates_id_no_deferred_name() {
+        let yaml = r#"
+            port_id: "15"
+            vlan: 1020
+        "#;
+        let port: Port = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(port.vlan, 1020);
+        assert_eq!(port.vlan_name, None);
+        assert!(port.tagged_vlans.is_empty());
+        assert!(port.tagged_vlan_refs.is_empty());
+    }
+
+    #[test]
+    fn test_port_deserialize_named_untagged_vlan_defers_name() {
+        let yaml = r#"
+            port_id: "15"
+            vlan: "APC-Zone1"
+        "#;
+        let port: Port = serde_yaml::from_str(yaml).unwrap();
+        // Sentinel until resolved
+        assert_eq!(port.vlan, 1);
+        assert_eq!(port.vlan_name, Some("APC-Zone1".to_string()));
+    }
+
+    #[test]
+    fn test_port_deserialize_mixed_tagged_vlans() {
+        let yaml = r#"
+            port_id: "15"
+            vlan: 10
+            tagged_vlans: [20, "Voice", 30, "Guest"]
+        "#;
+        let port: Port = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(port.vlan, 10);
+        // Any name present → whole list deferred (ordered) to tagged_vlan_refs.
+        assert!(port.tagged_vlans.is_empty());
+        assert_eq!(
+            port.tagged_vlan_refs,
+            vec![
+                VlanRef::Id(20),
+                VlanRef::Name("Voice".to_string()),
+                VlanRef::Id(30),
+                VlanRef::Name("Guest".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_port_deserialize_allowed_vlans_alias_still_works() {
+        let yaml = r#"
+            port_id: "15"
+            vlan: 10
+            allowed_vlans: [20, 30]
+        "#;
+        let port: Port = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(port.tagged_vlans, vec![20, 30]);
+    }
+
+    #[test]
+    fn test_port_serialize_omits_deferred_name_fields() {
+        let port = Port {
+            port_id: "1".into(),
+            mode: PortMode::Access,
+            vlan: 10,
+            tagged_vlans: vec![20],
+            description: None,
+            enabled: true,
+            poe_enabled: false,
+            mac_notify: false,
+            speed_duplex: SpeedDuplex::Auto,
+            vlan_name: None,
+            tagged_vlan_refs: vec![],
+        };
+        let yaml = serde_yaml::to_string(&port).unwrap();
+        assert!(!yaml.contains("vlan_name"));
+        assert!(!yaml.contains("tagged_vlan_refs"));
+        // Round-trips back
+        let back: Port = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(back.vlan, 10);
+        assert_eq!(back.tagged_vlans, vec![20]);
+    }
+
     // ========== SpeedDuplex Tests ==========
 
     #[test]
@@ -1393,6 +1676,8 @@ mod tests {
             poe_enabled: false,
             mac_notify: false,
             speed_duplex: SpeedDuplex::Auto,
+            vlan_name: None,
+            tagged_vlan_refs: vec![],
         };
 
         let port_100full = Port {
@@ -1405,6 +1690,8 @@ mod tests {
             poe_enabled: false,
             mac_notify: false,
             speed_duplex: SpeedDuplex::HundredFull,
+            vlan_name: None,
+            tagged_vlan_refs: vec![],
         };
 
         assert_eq!(port_auto.speed_duplex, SpeedDuplex::Auto);
@@ -1440,6 +1727,8 @@ mod tests {
             poe_enabled: false,
             mac_notify: false,
             speed_duplex: SpeedDuplex::HundredFull,
+            vlan_name: None,
+            tagged_vlan_refs: vec![],
         };
 
         let yaml = serde_yaml::to_string(&port).unwrap();
@@ -1718,6 +2007,8 @@ mod tests {
             poe_enabled: false,
             mac_notify: false,
             speed_duplex: SpeedDuplex::Auto,
+            vlan_name: None,
+            tagged_vlan_refs: vec![],
         };
         assert_eq!(port.inferred_mode(), PortMode::Access);
     }
@@ -1734,6 +2025,8 @@ mod tests {
             poe_enabled: false,
             mac_notify: false,
             speed_duplex: SpeedDuplex::Auto,
+            vlan_name: None,
+            tagged_vlan_refs: vec![],
         };
         assert_eq!(port.inferred_mode(), PortMode::Trunk);
     }
