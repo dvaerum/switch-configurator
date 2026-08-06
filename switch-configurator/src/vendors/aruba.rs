@@ -555,7 +555,7 @@ impl ArubaSwitch {
         let port_id = line.strip_prefix("interface ")?.trim().to_string();
 
         let mut description: Option<String> = None;
-        let mut has_mirror = false;
+        let has_mirror = false;
         let mut has_monitor = false;
         // For non-PoE switches, default to false since there's no PoE configuration to parse
         // For PoE switches, default to true (PoE is enabled by default unless "no power-over-ethernet" is present)
@@ -2367,7 +2367,7 @@ mod tests {
     use crate::config::RuntimeConfig;
     use crate::models::{
         ConnectionType, Credentials, MirrorDirection, PortMirror, SnmpAccess, SnmpCommunity, SnmpConfig,
-        SpeedDuplex, TrapType, SnmpTrapReceiver, SwitchModel, Vendor, VlanIpConfig,
+        SpeedDuplex, TrapType, SnmpTrapReceiver, SwitchModel, VlanIpConfig,
     };
 
     fn create_test_switch() -> ArubaSwitch {
@@ -4308,7 +4308,7 @@ vlan 1
     #[test]
     fn test_port_name_removed_in_reset_ports() {
         // reset_ports() should clear port names using "no name"
-        let mut switch = create_test_switch();
+        let switch = create_test_switch();
 
         let port_ids = vec!["1".to_string(), "2".to_string(), "3".to_string()];
 

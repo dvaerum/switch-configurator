@@ -10,8 +10,6 @@ use axum::{
     response::IntoResponse,
 };
 use serde_json::Value;
-use std::sync::Arc;
-use tokio::sync::RwLock;
 use tower::ServiceExt; // for `oneshot` method
 
 async fn create_test_config_store_async() -> ConfigStore {
@@ -2125,8 +2123,6 @@ mod integration_tests {
 
     #[tokio::test]
     async fn test_preview_diff_with_current_state() {
-        use crate::models::{SwitchState, PortMode, VlanIpConfig, SpeedDuplex};
-
         let store = create_test_config_store();
         let app = crate::api::create_router(store);
 

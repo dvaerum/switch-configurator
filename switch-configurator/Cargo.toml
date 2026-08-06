@@ -1,7 +1,8 @@
 [package]
 name = "switch-configurator"
 version = "0.4.8"
-edition = "2021"
+edition = "2024"
+rust-version = "1.85"
 
 [dependencies]
 # Async runtime

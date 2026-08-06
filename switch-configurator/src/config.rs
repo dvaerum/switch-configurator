@@ -456,8 +456,8 @@ pub struct MergeConflict {
 /// - Identity fields (hostname, management_ip, model) must match across all configs for same switch
 /// - Multiple definitions of same component with same priority = conflict
 fn merge_configs(configs: Vec<ConfigWithMetadata>) -> Result<(AppConfig, Vec<SwitchValidationFailure>)> {
-    use std::collections::{HashMap, BTreeMap};
-    use tracing::{info, warn};
+    use std::collections::HashMap;
+    use tracing::info;
 
     if configs.is_empty() {
         return Err(anyhow!("No configurations to merge"));
@@ -858,8 +858,6 @@ fn merge_single_switch(
 
 /// Merge SNMP configurations with sub-component list replacement
 fn merge_snmp_configs(configs: &[ConfigWithMetadata]) -> Result<Option<crate::models::SnmpConfig>> {
-    use std::collections::BTreeMap;
-
     let mut merged_snmp: Option<crate::models::SnmpConfig> = None;
     let mut communities_priority: Option<u16> = None;
     let mut trap_receivers_priority: Option<u16> = None;
@@ -1519,7 +1517,7 @@ mod tests {
 
     #[test]
     fn test_port_expansion_in_switch_config() {
-        use crate::models::{Port, PortMode, SwitchConfig, SwitchModel, Vendor, ConnectionType, Credentials};
+        use crate::models::{PortMode, SwitchConfig};
 
         let yaml = r#"
 id: test-switch-01
@@ -1564,7 +1562,7 @@ port_mirrors: []
 
     #[test]
     fn test_port_expansion_mixed_ranges() {
-        use crate::models::{Port, PortMode, SwitchConfig};
+        use crate::models::{PortMode, SwitchConfig};
 
         let yaml = r#"
 id: test-switch-02
@@ -1617,7 +1615,7 @@ port_mirrors: []
 
     #[test]
     fn test_port_mirror_source_expansion() {
-        use crate::models::{PortMirror, MirrorDirection, SwitchConfig};
+        use crate::models::SwitchConfig;
 
         let yaml = r#"
 id: test-sw-01

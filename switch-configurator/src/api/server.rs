@@ -1,10 +1,9 @@
-use crate::config::{AppConfig, ConfigStore};
+use crate::config::ConfigStore;
 use axum::{
-    routing::{delete, get, patch, post, put},
+    routing::{get, post},
     Router,
 };
 use std::net::SocketAddr;
-use std::path::Path;
 use tower_http::trace::TraceLayer;
 use tracing::info;
 

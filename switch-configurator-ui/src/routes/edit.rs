@@ -1,6 +1,6 @@
 use askama::Template;
 use axum::extract::{Path, State};
-use axum::response::{Html, IntoResponse, Redirect};
+use axum::response::{IntoResponse, Redirect};
 use axum::Form;
 use serde::Deserialize;
 use switch_configurator::models::*;

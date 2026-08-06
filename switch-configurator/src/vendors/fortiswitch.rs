@@ -1396,7 +1396,7 @@ mod tests {
     };
 
     fn create_test_config() -> SwitchConfig {
-        use crate::models::{ConnectionType, Credentials, SwitchModel, Vendor};
+        use crate::models::{ConnectionType, Credentials, SwitchModel};
 
         SwitchConfig {
             id: "test-fortiswitch".to_string(),
@@ -2182,7 +2182,6 @@ mod tests {
     #[test]
     fn test_management_vlan_diff_add() {
         use crate::diff::compute_diff;
-        use crate::config::RuntimeConfig;
 
         let mut config = create_test_config();
 
@@ -2217,7 +2216,6 @@ mod tests {
     #[test]
     fn test_management_vlan_diff_change() {
         use crate::diff::compute_diff;
-        use crate::config::RuntimeConfig;
 
         let mut config = create_test_config();
 
@@ -2249,7 +2247,6 @@ mod tests {
     #[test]
     fn test_management_vlan_diff_remove() {
         use crate::diff::compute_diff;
-        use crate::config::RuntimeConfig;
 
         let config = create_test_config();
 
@@ -2273,7 +2270,6 @@ mod tests {
     #[test]
     fn test_management_vlan_diff_no_change() {
         use crate::diff::compute_diff;
-        use crate::config::RuntimeConfig;
 
         let mut config = create_test_config();
 
