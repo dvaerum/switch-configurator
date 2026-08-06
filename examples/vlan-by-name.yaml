@@ -1,0 +1,63 @@
+# Referencing VLANs by Name
+#
+# A port's untagged `vlan` and its `tagged_vlans` may reference a VLAN either by
+# its numeric ID or by its NAME (as defined in the switch's `vlans` list).
+#
+# Rules:
+#   - A bare integer is always a VLAN ID:            vlan: 1020
+#   - A quoted string is always a VLAN NAME lookup:  vlan: "APC-Zone1"
+#     (Type-strict: `vlan: "1020"` looks up a VLAN *named* "1020", not ID 1020.)
+#   - Name matching is CASE-SENSITIVE and exact.
+#   - VLAN names used for references must be unique on the switch; a name that
+#     maps to two different IDs is a hard error (ambiguous).
+#   - An unknown name in the untagged `vlan` is a hard error.
+#   - An unknown name in `tagged_vlans` is dropped with a warning (lenient load)
+#     or is an error in strict deployment.
+#
+# Names are resolved to numeric IDs at load time, so the switch always receives
+# ordinary numeric VLAN commands — the feature is purely a config-authoring
+# convenience.
+
+switches:
+  - id: IT-04249
+    hostname: IT-04249
+    model: Aruba2930F
+    management_ip: "192.168.1.30"
+
+    credentials:
+      username: admin
+      password: "secure-password-here"
+      connection_type: ssh
+
+    vlans:
+      - id: 10
+        name: Users
+      - id: 30
+        name: Voice
+      - id: 40
+        name: Guest
+      - id: 1020
+        name: APC-Zone1
+
+    ports:
+      # Untagged VLAN referenced by name
+      - port_id: "15"
+        vlan: "APC-Zone1"
+        description: "APC v1 - Zone 1"
+        enabled: true
+        mac_notify: true
+        speed_duplex: "100-full"
+
+      # Untagged by ID, tagged VLANs mixed by name and ID (order preserved)
+      - port_id: "16"
+        vlan: 10
+        tagged_vlans: ["Voice", 40]
+        description: "Desk phone + guest uplink"
+        enabled: true
+
+      # Equivalent to port 16 written entirely with numeric IDs
+      - port_id: "17"
+        vlan: 10
+        tagged_vlans: [30, 40]
+        description: "Same result, numeric form"
+        enabled: true

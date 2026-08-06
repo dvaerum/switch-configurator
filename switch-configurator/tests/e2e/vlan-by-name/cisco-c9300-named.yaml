@@ -1,0 +1,39 @@
+# E2E: Cisco Catalyst 9300-24P — NAMED VLAN references
+# Identical to cisco-c9300-numeric.yaml except ports reference VLANs by NAME.
+# Must produce byte-identical switch commands in --dry-run. No writes performed.
+switches:
+  - id: e2e-cisco-c9300
+    hostname: e2e-cisco-c9300
+    model: CiscoCatalyst9300_24P_UPOE
+    management_ip: "192.168.1.3"
+
+    settings:
+      ssh_timeout_secs: 30
+      max_retries: 3
+      enforce_port_config: true
+
+    credentials:
+      username: admin
+      password: admin
+      connection_type: serial
+      serial_device: /dev/serial_cisco_c9300-24u-a
+      baud_rate: 9600
+
+    vlans:
+      - id: 10
+        name: Users
+      - id: 20
+        name: Voice
+      - id: 30
+        name: Guest
+
+    ports:
+      - port_id: "GigabitEthernet1/0/1"
+        vlan: "Users"
+        description: "Access user"
+        enabled: true
+      - port_id: "GigabitEthernet1/0/2"
+        vlan: "Users"
+        tagged_vlans: ["Voice", "Guest"]
+        description: "Trunk to AP"
+        enabled: true

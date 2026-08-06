@@ -837,6 +837,8 @@ mod tests {
                     poe_enabled: false,
                     mac_notify: false,
                     speed_duplex: SpeedDuplex::Auto,
+                    vlan_name: None,
+                    tagged_vlan_refs: vec![],
                 },
             ],
             port_mirrors: vec![],
@@ -857,6 +859,8 @@ mod tests {
                 poe_enabled: true,
                 mac_notify: false,
                 speed_duplex: SpeedDuplex::Auto,
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
             },
         ];
 
@@ -882,6 +886,8 @@ mod tests {
                     poe_enabled: false,
                     mac_notify: false,
                     speed_duplex: SpeedDuplex::Auto,
+                    vlan_name: None,
+                    tagged_vlan_refs: vec![],
                 },
                 Port {
                     port_id: "2".to_string(),
@@ -893,6 +899,8 @@ mod tests {
                     poe_enabled: false,
                     mac_notify: false,
                     speed_duplex: SpeedDuplex::Auto,
+                    vlan_name: None,
+                    tagged_vlan_refs: vec![],
                 },
             ],
             port_mirrors: vec![],
@@ -913,6 +921,8 @@ mod tests {
                 poe_enabled: false,
                 mac_notify: false,
                 speed_duplex: SpeedDuplex::Auto,
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
             },
         ];
 
@@ -942,6 +952,8 @@ mod tests {
                     poe_enabled: false,
                     mac_notify: false,
                     speed_duplex: SpeedDuplex::Auto,
+                    vlan_name: None,
+                    tagged_vlan_refs: vec![],
                 },
             ],
             port_mirrors: vec![],
@@ -962,6 +974,8 @@ mod tests {
                 poe_enabled: false,
                 mac_notify: false,
                 speed_duplex: SpeedDuplex::Auto,
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
             },
         ];
 
@@ -1044,6 +1058,8 @@ mod tests {
             poe_enabled: false,
             mac_notify: false,
             speed_duplex: SpeedDuplex::Auto,
+            vlan_name: None,
+            tagged_vlan_refs: vec![],
         };
 
         let port2 = Port {
@@ -1056,6 +1072,8 @@ mod tests {
             poe_enabled: false,
             mac_notify: false,
             speed_duplex: SpeedDuplex::Auto,
+            vlan_name: None,
+            tagged_vlan_refs: vec![],
         };
 
         assert!(!ports_equivalent(&port1, &port2));
@@ -1073,6 +1091,8 @@ mod tests {
             poe_enabled: false,
             mac_notify: false,
             speed_duplex: SpeedDuplex::Auto,
+            vlan_name: None,
+            tagged_vlan_refs: vec![],
         };
 
         let port2 = Port {
@@ -1085,6 +1105,8 @@ mod tests {
             poe_enabled: false,
             mac_notify: false,
             speed_duplex: SpeedDuplex::Auto,
+            vlan_name: None,
+            tagged_vlan_refs: vec![],
         };
 
         assert!(ports_equivalent(&port1, &port2));
@@ -1102,6 +1124,8 @@ mod tests {
             poe_enabled: false,
             mac_notify: false,
             speed_duplex: SpeedDuplex::Auto,
+            vlan_name: None,
+            tagged_vlan_refs: vec![],
         };
 
         let port2 = Port {
@@ -1114,6 +1138,8 @@ mod tests {
             poe_enabled: false,
             mac_notify: false,
             speed_duplex: SpeedDuplex::Auto,
+            vlan_name: None,
+            tagged_vlan_refs: vec![],
         };
 
         assert!(!ports_equivalent(&port1, &port2));
@@ -1198,6 +1224,8 @@ mod tests {
                     poe_enabled: false,
                     mac_notify: false,
                     speed_duplex: SpeedDuplex::Auto,
+                    vlan_name: None,
+                    tagged_vlan_refs: vec![],
                 },
             ],
             port_mirrors: vec![],
@@ -1218,6 +1246,8 @@ mod tests {
                 poe_enabled: false,
                 mac_notify: false,
                 speed_duplex: SpeedDuplex::HundredFull,
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
             },
         ];
 
@@ -1244,6 +1274,8 @@ mod tests {
                     poe_enabled: false,
                     mac_notify: false,
                     speed_duplex: SpeedDuplex::HundredFull,
+                    vlan_name: None,
+                    tagged_vlan_refs: vec![],
                 },
             ],
             port_mirrors: vec![],
@@ -1264,6 +1296,8 @@ mod tests {
                 poe_enabled: false,
                 mac_notify: false,
                 speed_duplex: SpeedDuplex::HundredFull,
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
             },
         ];
 
@@ -1289,6 +1323,8 @@ mod tests {
                     poe_enabled: false,
                     mac_notify: false,
                     speed_duplex: SpeedDuplex::Auto,
+                    vlan_name: None,
+                    tagged_vlan_refs: vec![],
                 },
                 Port {
                     port_id: "2".to_string(),
@@ -1300,6 +1336,8 @@ mod tests {
                     poe_enabled: false,
                     mac_notify: false,
                     speed_duplex: SpeedDuplex::Auto,
+                    vlan_name: None,
+                    tagged_vlan_refs: vec![],
                 },
             ],
             port_mirrors: vec![],
@@ -1320,6 +1358,8 @@ mod tests {
                 poe_enabled: false,
                 mac_notify: false,
                 speed_duplex: SpeedDuplex::Auto,  // No change
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
             },
             Port {
                 port_id: "2".to_string(),
@@ -1331,6 +1371,8 @@ mod tests {
                 poe_enabled: false,
                 mac_notify: false,
                 speed_duplex: SpeedDuplex::HundredFull,  // Changed
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
             },
         ];
 
@@ -1358,6 +1400,8 @@ mod tests {
                     poe_enabled: true,
                     mac_notify: false,
                     speed_duplex: SpeedDuplex::Auto,
+                    vlan_name: None,
+                    tagged_vlan_refs: vec![],
                 },
             ],
             port_mirrors: vec![],
@@ -1378,6 +1422,8 @@ mod tests {
                 poe_enabled: false,  // Changed
                 mac_notify: true,     // Changed
                 speed_duplex: SpeedDuplex::HundredFull,  // Changed
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
             },
         ];
 
@@ -1406,6 +1452,8 @@ mod tests {
             poe_enabled: false,
             mac_notify: false,
             speed_duplex: SpeedDuplex::Auto,
+            vlan_name: None,
+            tagged_vlan_refs: vec![],
         };
 
         let port2 = Port {
@@ -1418,6 +1466,8 @@ mod tests {
             poe_enabled: false,
             mac_notify: false,
             speed_duplex: SpeedDuplex::HundredFull,
+            vlan_name: None,
+            tagged_vlan_refs: vec![],
         };
 
         // Ports should NOT be equivalent due to different speed_duplex
@@ -1436,6 +1486,8 @@ mod tests {
             poe_enabled: false,
             mac_notify: false,
             speed_duplex: SpeedDuplex::HundredFull,
+            vlan_name: None,
+            tagged_vlan_refs: vec![],
         };
 
         let port2 = Port {
@@ -1448,6 +1500,8 @@ mod tests {
             poe_enabled: false,
             mac_notify: false,
             speed_duplex: SpeedDuplex::HundredFull,
+            vlan_name: None,
+            tagged_vlan_refs: vec![],
         };
 
         // Ports should be equivalent
@@ -1471,6 +1525,8 @@ mod tests {
                     poe_enabled: false,
                     mac_notify: false,
                     speed_duplex: SpeedDuplex::Auto,
+                    vlan_name: None,
+                    tagged_vlan_refs: vec![],
                 },
             ],
             port_mirrors: vec![],
@@ -1500,6 +1556,8 @@ mod tests {
                     poe_enabled: false,
                     mac_notify: false,
                     speed_duplex: SpeedDuplex::Auto,
+                    vlan_name: None,
+                    tagged_vlan_refs: vec![],
                 },
                 Port {
                     port_id: "2".to_string(),
@@ -1511,6 +1569,8 @@ mod tests {
                     poe_enabled: false,
                     mac_notify: false,
                     speed_duplex: SpeedDuplex::Auto,
+                    vlan_name: None,
+                    tagged_vlan_refs: vec![],
                 },
             ],
             port_mirrors: vec![],
@@ -1543,6 +1603,8 @@ mod tests {
                     poe_enabled: false,
                     mac_notify: false,
                     speed_duplex: SpeedDuplex::Auto,
+                    vlan_name: None,
+                    tagged_vlan_refs: vec![],
                 },
                 Port {
                     port_id: "3".to_string(),
@@ -1554,6 +1616,8 @@ mod tests {
                     poe_enabled: false,
                     mac_notify: false,
                     speed_duplex: SpeedDuplex::Auto,
+                    vlan_name: None,
+                    tagged_vlan_refs: vec![],
                 },
                 Port {
                     port_id: "5".to_string(),
@@ -1565,6 +1629,8 @@ mod tests {
                     poe_enabled: false,
                     mac_notify: false,
                     speed_duplex: SpeedDuplex::Auto,
+                    vlan_name: None,
+                    tagged_vlan_refs: vec![],
                 },
             ],
             port_mirrors: vec![],
@@ -1597,6 +1663,8 @@ mod tests {
                     poe_enabled: false,
                     mac_notify: false,
                     speed_duplex: SpeedDuplex::Auto,
+                    vlan_name: None,
+                    tagged_vlan_refs: vec![],
                 },
             ],
             port_mirrors: vec![],
@@ -1638,6 +1706,8 @@ mod tests {
                     poe_enabled: false,
                     mac_notify: false,
                     speed_duplex: SpeedDuplex::Auto,
+                    vlan_name: None,
+                    tagged_vlan_refs: vec![],
                 },
             ],
             port_mirrors: vec![],
@@ -1679,6 +1749,8 @@ mod tests {
                     poe_enabled: false,
                     mac_notify: false,
                     speed_duplex: SpeedDuplex::Auto,
+                    vlan_name: None,
+                    tagged_vlan_refs: vec![],
                 },
                 Port {
                     port_id: "2".to_string(),
@@ -1690,6 +1762,8 @@ mod tests {
                     poe_enabled: false,
                     mac_notify: false,
                     speed_duplex: SpeedDuplex::Auto,
+                    vlan_name: None,
+                    tagged_vlan_refs: vec![],
                 },
             ],
             port_mirrors: vec![],
@@ -1733,6 +1807,8 @@ mod tests {
                     poe_enabled: false,
                     mac_notify: false,
                     speed_duplex: SpeedDuplex::Auto,
+                    vlan_name: None,
+                    tagged_vlan_refs: vec![],
                 },
                 Port {
                     port_id: "2".to_string(),
@@ -1744,6 +1820,8 @@ mod tests {
                     poe_enabled: false,
                     mac_notify: false,
                     speed_duplex: SpeedDuplex::Auto,
+                    vlan_name: None,
+                    tagged_vlan_refs: vec![],
                 },
             ],
             port_mirrors: vec![],
@@ -1773,6 +1851,8 @@ mod tests {
                     poe_enabled: false,
                     mac_notify: false,
                     speed_duplex: SpeedDuplex::Auto,
+                    vlan_name: None,
+                    tagged_vlan_refs: vec![],
                 },
                 Port {
                     port_id: "2".to_string(),
@@ -1784,6 +1864,8 @@ mod tests {
                     poe_enabled: false,
                     mac_notify: false,
                     speed_duplex: SpeedDuplex::Auto,
+                    vlan_name: None,
+                    tagged_vlan_refs: vec![],
                 },
                 Port {
                     port_id: "3".to_string(),
@@ -1795,6 +1877,8 @@ mod tests {
                     poe_enabled: false,
                     mac_notify: false,
                     speed_duplex: SpeedDuplex::Auto,
+                    vlan_name: None,
+                    tagged_vlan_refs: vec![],
                 },
             ],
             port_mirrors: vec![],
@@ -1826,6 +1910,8 @@ mod tests {
                     poe_enabled: false,
                     mac_notify: false,
                     speed_duplex: SpeedDuplex::Auto,
+                    vlan_name: None,
+                    tagged_vlan_refs: vec![],
                 },
             ],
             port_mirrors: vec![],
@@ -1871,6 +1957,8 @@ mod tests {
                     poe_enabled: false,  // Parser sets false for non-PoE switch
                     mac_notify: false,
                     speed_duplex: SpeedDuplex::Auto,
+                    vlan_name: None,
+                    tagged_vlan_refs: vec![],
                 },
             ],
             port_mirrors: vec![],
@@ -1893,6 +1981,8 @@ mod tests {
                 poe_enabled: true,   // User incorrectly specified true
                 mac_notify: false,
                 speed_duplex: SpeedDuplex::Auto,
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
             },
         ];
 
@@ -1919,6 +2009,8 @@ mod tests {
                     poe_enabled: true,  // PoE enabled on switch
                     mac_notify: false,
                     speed_duplex: SpeedDuplex::Auto,
+                    vlan_name: None,
+                    tagged_vlan_refs: vec![],
                 },
             ],
             port_mirrors: vec![],
@@ -1940,6 +2032,8 @@ mod tests {
                 poe_enabled: false,  // User wants PoE disabled
                 mac_notify: false,
                 speed_duplex: SpeedDuplex::Auto,
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
             },
         ];
 
@@ -1963,6 +2057,8 @@ mod tests {
             poe_enabled: false,  // Current state
             mac_notify: false,
             speed_duplex: SpeedDuplex::Auto,
+            vlan_name: None,
+            tagged_vlan_refs: vec![],
         };
 
         let port2 = Port {
@@ -1975,6 +2071,8 @@ mod tests {
             poe_enabled: true,   // Different poe_enabled
             mac_notify: false,
             speed_duplex: SpeedDuplex::Auto,
+            vlan_name: None,
+            tagged_vlan_refs: vec![],
         };
 
         // With supports_poe = false, should be equivalent despite poe_enabled difference
@@ -2002,6 +2100,8 @@ mod tests {
                     poe_enabled: false,
                     mac_notify: false,
                     speed_duplex: SpeedDuplex::Auto,
+                    vlan_name: None,
+                    tagged_vlan_refs: vec![],
                 },
             ],
             port_mirrors: vec![],
@@ -2023,6 +2123,8 @@ mod tests {
                 poe_enabled: true,   // Different PoE (should be ignored)
                 mac_notify: false,
                 speed_duplex: SpeedDuplex::HundredFull,  // Different speed
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
             },
         ];
 
@@ -2364,6 +2466,8 @@ mod tests {
                     poe_enabled: false,
                     mac_notify: false,
                     speed_duplex: SpeedDuplex::Auto,
+                    vlan_name: None,
+                    tagged_vlan_refs: vec![],
                 },
             ],
             port_mirrors: vec![],
@@ -2404,6 +2508,8 @@ mod tests {
                     poe_enabled: false,
                     mac_notify: false,
                     speed_duplex: SpeedDuplex::Auto,
+                    vlan_name: None,
+                    tagged_vlan_refs: vec![],
                 },
             ],
             port_mirrors: vec![
@@ -2478,6 +2584,8 @@ mod tests {
                     poe_enabled: false,
                     mac_notify: false,
                     speed_duplex: SpeedDuplex::Auto,
+                    vlan_name: None,
+                    tagged_vlan_refs: vec![],
                 },
             ],
             port_mirrors: vec![],
@@ -2558,6 +2666,8 @@ mod tests {
                     poe_enabled: false,
                     mac_notify: false,
                     speed_duplex: SpeedDuplex::Auto,
+                    vlan_name: None,
+                    tagged_vlan_refs: vec![],
                 },
             ],
             port_mirrors: vec![],
@@ -2578,6 +2688,8 @@ mod tests {
                 poe_enabled: false,
                 mac_notify: false,
                 speed_duplex: SpeedDuplex::Auto,
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
             },
         ];
 

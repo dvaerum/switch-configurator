@@ -1,0 +1,39 @@
+# E2E: Aruba 2530-8G PoE+ — NAMED VLAN references
+# Identical to aruba-2530-8g-numeric.yaml except ports reference VLANs by NAME.
+# Must produce byte-identical switch commands in --dry-run. No writes performed.
+switches:
+  - id: e2e-aruba-2530-8g
+    hostname: e2e-aruba-2530-8g
+    model: Aruba2530_8G_POE
+    management_ip: "192.168.1.2"
+
+    settings:
+      ssh_timeout_secs: 30
+      max_retries: 3
+      enforce_port_config: true
+
+    credentials:
+      username: admin
+      password: admin
+      connection_type: serial
+      serial_device: /dev/serial_aruba-2530-8g-poe+
+      baud_rate: 115200
+
+    vlans:
+      - id: 10
+        name: Users
+      - id: 20
+        name: Voice
+      - id: 30
+        name: Guest
+
+    ports:
+      - port_id: "1"
+        vlan: "Users"
+        description: "Access user"
+        enabled: true
+      - port_id: "2"
+        vlan: "Users"
+        tagged_vlans: ["Voice", "Guest"]
+        description: "Trunk to AP"
+        enabled: true

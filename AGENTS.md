@@ -286,8 +286,14 @@ Key sections in `config.yaml`:
   - Serial: `connection_type: serial`, `serial_device`, `baud_rate`
   - Jump hosts: `jump_hosts` array for bastion servers
 - `switches[].vlans[]`: VLAN definitions (id, name, ip_config)
-- `switches[].ports[]`: Port configurations (mode, vlan, poe_enabled, etc.)
-  - Port range syntax: `"1-5"`, `"1,3,5"`, `"1-5,7,10-12"`
+ - `switches[].ports[]`: Port configurations (mode, vlan, poe_enabled, etc.)
+   - Port range syntax: `"1-5"`, `"1,3,5"`, `"1-5,7,10-12"`
+   - VLAN references (`vlan`, `tagged_vlans`) accept a numeric ID or a VLAN **name**.
+     Type-strict: bare int = ID (`vlan: 10`), quoted string = name lookup
+     (`vlan: "Users"`; `vlan: "10"` looks up a VLAN *named* "10"). Names are
+     case-sensitive, must be unique, and are resolved to IDs at load time
+     (see `resolve_vlan_names` in `config.rs`). Unknown untagged name = error;
+     unknown tagged name = dropped-with-warning (lenient) / error (strict).
 - `switches[].port_mirrors[]`: Port mirroring sessions
 - `switches[].snmp`: SNMP configuration (communities, trap_receivers, enabled_traps)
 - `switches[].settings`: Per-switch settings (ssh_timeout_secs, enforce_port_config, etc.)

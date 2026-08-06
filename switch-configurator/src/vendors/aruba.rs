@@ -1597,6 +1597,8 @@ impl SwitchVendor for ArubaSwitch {
                 poe_enabled: vlan_info.poe_enabled,
                 mac_notify: vlan_info.mac_notify,
                 speed_duplex: vlan_info.speed_duplex,
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
             });
         }
 
@@ -2250,6 +2252,8 @@ impl ArubaSwitch {
                 poe_enabled: vlan_info.poe_enabled,
                 mac_notify: vlan_info.mac_notify,
                 speed_duplex: vlan_info.speed_duplex,
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
             });
         }
 
@@ -2510,6 +2514,8 @@ mod tests {
                 poe_enabled: true,
                 mac_notify: false,
                 speed_duplex: crate::models::SpeedDuplex::Auto,
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
             },
         ];
 
@@ -2538,6 +2544,8 @@ mod tests {
                 poe_enabled: false,
                 mac_notify: false,
                 speed_duplex: crate::models::SpeedDuplex::Auto,
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
             },
         ];
 
@@ -2566,6 +2574,8 @@ mod tests {
                 poe_enabled: false,
                 mac_notify: false,
                 speed_duplex: crate::models::SpeedDuplex::Auto,
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
             },
         ];
 
@@ -2709,6 +2719,8 @@ mod tests {
                 poe_enabled: false,
                 mac_notify: true,
                 speed_duplex: crate::models::SpeedDuplex::Auto,
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
             },
         ];
 
@@ -2739,6 +2751,8 @@ mod tests {
                 poe_enabled: true,  // PoE enabled
                 mac_notify: false,
                 speed_duplex: crate::models::SpeedDuplex::Auto,
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
             },
         ];
 
@@ -2767,6 +2781,8 @@ mod tests {
                 poe_enabled: false,  // PoE disabled
                 mac_notify: false,
                 speed_duplex: crate::models::SpeedDuplex::Auto,
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
             },
         ];
 
@@ -2876,6 +2892,8 @@ management_vlan: None,
                 poe_enabled: false,
                 mac_notify: true,  // MAC notify enabled
                 speed_duplex: crate::models::SpeedDuplex::Auto,
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
             },
         ];
 
@@ -2905,6 +2923,8 @@ management_vlan: None,
                 poe_enabled: false,
                 mac_notify: false,  // MAC notify disabled
                 speed_duplex: crate::models::SpeedDuplex::Auto,
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
             },
         ];
 
@@ -2980,6 +3000,8 @@ management_vlan: None,
                 poe_enabled: false,
                 mac_notify: false,
                 speed_duplex: SpeedDuplex::Auto,
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
             },
         ];
         let commands_rx = switch.generate_port_commands(&ports_rx, &mirrors_rx);
@@ -3006,6 +3028,8 @@ management_vlan: None,
                 poe_enabled: false,
                 mac_notify: false,
                 speed_duplex: SpeedDuplex::Auto,
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
             },
         ];
         let commands_tx = switch.generate_port_commands(&ports_tx, &mirrors_tx);
@@ -3061,6 +3085,8 @@ management_vlan: None,
                 poe_enabled: true,   // Bug #1
                 mac_notify: true,    // Bug #5
                 speed_duplex: crate::models::SpeedDuplex::Auto,
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
             },
         ];
 
@@ -3289,6 +3315,8 @@ snmp-server community "private" operator unrestricted
                 poe_enabled: true,
                 mac_notify: true,  // Enable MAC notifications
                 speed_duplex: crate::models::SpeedDuplex::Auto,
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
             },
         ];
 
@@ -3323,6 +3351,8 @@ snmp-server community "private" operator unrestricted
                 poe_enabled: true,
                 mac_notify: false,  // Disable MAC notifications
                 speed_duplex: crate::models::SpeedDuplex::Auto,
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
             },
         ];
 
@@ -3357,6 +3387,8 @@ snmp-server community "private" operator unrestricted
                 poe_enabled: true,
                 mac_notify: true,  // Enable
                 speed_duplex: crate::models::SpeedDuplex::Auto,
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
             },
             Port {
                 port_id: "2".to_string(),
@@ -3368,6 +3400,8 @@ snmp-server community "private" operator unrestricted
                 poe_enabled: true,
                 mac_notify: false,  // Disable
                 speed_duplex: crate::models::SpeedDuplex::Auto,
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
             },
             Port {
                 port_id: "3".to_string(),
@@ -3379,6 +3413,8 @@ snmp-server community "private" operator unrestricted
                 poe_enabled: true,
                 mac_notify: true,  // Enable
                 speed_duplex: crate::models::SpeedDuplex::Auto,
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
             },
         ];
 
@@ -3453,6 +3489,8 @@ snmp-server community "private" operator unrestricted
                 poe_enabled: true,
                 mac_notify: true,
                 speed_duplex: crate::models::SpeedDuplex::Auto,
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
             });
         }
 
@@ -3467,6 +3505,8 @@ snmp-server community "private" operator unrestricted
                 poe_enabled: true,
                 mac_notify: false,
                 speed_duplex: crate::models::SpeedDuplex::Auto,
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
             });
         }
 
@@ -3764,6 +3804,8 @@ snmp-server host 192.168.1.1 community "public"
                 poe_enabled: false,
                 mac_notify: false,
                 speed_duplex: SpeedDuplex::Auto,
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
             },
             Port {
                 port_id: "34".to_string(),
@@ -3775,6 +3817,8 @@ snmp-server host 192.168.1.1 community "public"
                 poe_enabled: false,
                 mac_notify: false,
                 speed_duplex: SpeedDuplex::Auto,
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
             },
             Port {
                 port_id: "35".to_string(),
@@ -3786,6 +3830,8 @@ snmp-server host 192.168.1.1 community "public"
                 poe_enabled: false,
                 mac_notify: false,
                 speed_duplex: SpeedDuplex::Auto,
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
             },
             Port {
                 port_id: "36".to_string(),
@@ -3797,6 +3843,8 @@ snmp-server host 192.168.1.1 community "public"
                 poe_enabled: false,
                 mac_notify: false,
                 speed_duplex: SpeedDuplex::Auto,
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
             },
         ];
 
@@ -4055,6 +4103,8 @@ vlan 1
                     poe_enabled: false,
                     mac_notify: false,
                     speed_duplex: crate::models::SpeedDuplex::Auto,
+                    vlan_name: None,
+                    tagged_vlan_refs: vec![],
                 },
             ],
             port_mirrors: vec![],
@@ -4076,6 +4126,8 @@ vlan 1
                 poe_enabled: false,
                 mac_notify: false,
                 speed_duplex: crate::models::SpeedDuplex::Auto,
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
             },
         ];
 
@@ -4120,6 +4172,8 @@ vlan 1
                     poe_enabled: false,
                     mac_notify: false,
                     speed_duplex: crate::models::SpeedDuplex::Auto,
+                    vlan_name: None,
+                    tagged_vlan_refs: vec![],
                 },
             ],
             port_mirrors: vec![],
@@ -4141,6 +4195,8 @@ vlan 1
                 poe_enabled: false,
                 mac_notify: false,
                 speed_duplex: crate::models::SpeedDuplex::Auto,
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
             },
         ];
 
@@ -4186,6 +4242,8 @@ vlan 1
                     poe_enabled: false,
                     mac_notify: false,
                     speed_duplex: crate::models::SpeedDuplex::Auto,
+                    vlan_name: None,
+                    tagged_vlan_refs: vec![],
                 },
             ],
             port_mirrors: vec![],
@@ -4207,6 +4265,8 @@ vlan 1
                 poe_enabled: false,
                 mac_notify: false,
                 speed_duplex: crate::models::SpeedDuplex::Auto,
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
             },
         ];
 
@@ -4237,6 +4297,8 @@ vlan 1
                 poe_enabled: false,
                 mac_notify: false,
                 speed_duplex: crate::models::SpeedDuplex::Auto,
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
             });
         }
 
@@ -4270,6 +4332,8 @@ vlan 1
                 poe_enabled: false,
                 mac_notify: false,
                 speed_duplex: crate::models::SpeedDuplex::Auto,
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
             });
         }
         for i in 6..=10 {
@@ -4283,6 +4347,8 @@ vlan 1
                 poe_enabled: false,
                 mac_notify: false,
                 speed_duplex: crate::models::SpeedDuplex::Auto,
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
             });
         }
 
@@ -4683,6 +4749,8 @@ interface 5
                 poe_enabled: true,  // Even if config says true, non-PoE switch can't support it
                 mac_notify: false,
                 speed_duplex: crate::models::SpeedDuplex::Auto,
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
             },
         ];
 
@@ -4719,6 +4787,8 @@ interface 5
                 poe_enabled: false,  // Explicitly disabled
                 mac_notify: false,
                 speed_duplex: crate::models::SpeedDuplex::Auto,
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
             },
         ];
 
@@ -4745,6 +4815,8 @@ interface 5
                 poe_enabled: true,
                 mac_notify: false,
                 speed_duplex: crate::models::SpeedDuplex::Auto,
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
             },
         ];
 
@@ -4771,6 +4843,8 @@ interface 5
                 poe_enabled: false,  // PoE disabled
                 mac_notify: false,
                 speed_duplex: crate::models::SpeedDuplex::Auto,
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
             },
         ];
 
@@ -5015,6 +5089,8 @@ vlan 1020
                 poe_enabled: false,
                 mac_notify: false,
                 speed_duplex: SpeedDuplex::Auto,
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
             },
             Port {
                 port_id: "16".to_string(),
@@ -5026,6 +5102,8 @@ vlan 1020
                 poe_enabled: false,
                 mac_notify: false,
                 speed_duplex: SpeedDuplex::Auto,
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
             },
         ];
 
@@ -5133,6 +5211,8 @@ vlan 1020
                     poe_enabled: false,
                     mac_notify: false,
                     speed_duplex: speed,
+                    vlan_name: None,
+                    tagged_vlan_refs: vec![],
                 },
             ];
 
@@ -5235,6 +5315,8 @@ vlan 1
                 poe_enabled: true,
                 mac_notify: false,
                 speed_duplex: SpeedDuplex::Auto,
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
             },
             Port {
                 port_id: "2".to_string(),
@@ -5246,6 +5328,8 @@ vlan 1
                 poe_enabled: false,
                 mac_notify: false,
                 speed_duplex: SpeedDuplex::Auto,
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
             },
             Port {
                 port_id: "24".to_string(),
@@ -5257,6 +5341,8 @@ vlan 1
                 poe_enabled: true,
                 mac_notify: true,
                 speed_duplex: SpeedDuplex::HundredFull,
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
             },
         ];
 
@@ -5756,6 +5842,8 @@ interface 48
                     poe_enabled: false,
                     mac_notify: false,
                     speed_duplex: SpeedDuplex::Auto,
+                    vlan_name: None,
+                    tagged_vlan_refs: vec![],
                 },
             ],
             port_mirrors: vec![],
@@ -5775,6 +5863,8 @@ interface 48
                 poe_enabled: false,
                 mac_notify: false,
                 speed_duplex: SpeedDuplex::Auto,
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
             },
         ];
 
@@ -5802,6 +5892,8 @@ interface 48
                 poe_enabled: false,
                 mac_notify: false,
                 speed_duplex: SpeedDuplex::Auto,
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
             },
         ];
 
@@ -5856,6 +5948,8 @@ interface 48
                     poe_enabled: false,
                     mac_notify: false,
                     speed_duplex: SpeedDuplex::Auto,
+                    vlan_name: None,
+                    tagged_vlan_refs: vec![],
                 },
             ],
             port_mirrors: vec![],
@@ -5881,6 +5975,8 @@ interface 48
                 poe_enabled: false,
                 mac_notify: false,
                 speed_duplex: SpeedDuplex::Auto,
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
             },
         ];
 
@@ -5917,6 +6013,8 @@ interface 48
                     poe_enabled: false,
                     mac_notify: false,
                     speed_duplex: SpeedDuplex::Auto,
+                    vlan_name: None,
+                    tagged_vlan_refs: vec![],
                 },
             ],
             ..Default::default()
