@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-08-06
+
+### Added
+- **VLAN references by name**: A port's untagged `vlan` and its `tagged_vlans` may now reference a VLAN by name (string) in addition to numeric id, e.g. `vlan: "Users"` or `tagged_vlans: ["Voice", 40]`. Matching is type-strict (bare int = id, quoted string = name), case-sensitive, and names are resolved to ids at load time. Unknown untagged names are a hard error; unknown tagged names are dropped-with-warning (lenient) or an error (strict); duplicate VLAN names are rejected as ambiguous. See `examples/vlan-by-name.yaml`.
+
+### Changed
+- Migrated both workspace crates to the Rust 2024 edition (`rust-version = "1.85"`).
+
+
 ## [0.3.21] - 2026-03-17
 
 ### Added

@@ -4,6 +4,22 @@ This file provides guidelines for AI agents (OpenCode, Claude Code, etc.) workin
 
 ---
 
+## Workflow Conventions
+
+- **Commit whenever something is fixed or improved.** After each self-contained
+  fix, feature, or improvement lands and tests pass, make a commit rather than
+  batching unrelated changes together.
+- **Bump the version accordingly** with every such commit, following Semantic
+  Versioning (`switch-configurator/Cargo.toml`, and `switch-configurator-ui/Cargo.toml`
+  when the UI changes):
+  - patch (`0.4.8 → 0.4.9`) for bug fixes / small improvements,
+  - minor (`0.4.x → 0.5.0`) for backward-compatible features,
+  - major for breaking changes.
+- Update `CHANGELOG.md` (under `## [Unreleased]` or a new version heading) when
+  the change is user-visible.
+
+---
+
 ## Project Overview
 
 Switch Configurator is a Rust-based service that automates network switch configuration across multiple vendors (Aruba, Cisco, FortiSwitch). The service watches a YAML configuration file for changes and automatically applies them to switches via SSH or serial connection. It also provides a REST API for programmatic configuration management.
