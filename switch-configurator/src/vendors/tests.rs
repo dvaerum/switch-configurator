@@ -2,7 +2,7 @@ use super::traits::{SwitchVendor, VendorError};
 use crate::models::{
     ConfigResult, ConnectionType, Credentials, MirrorDirection, Port, PortMirror, PortMode,
     StateDiff, SwitchConfig, SwitchModel,
-    SwitchState, Vlan, VlanIpConfig, Vendor,
+    SwitchState, Vlan, VlanIpConfig,
 };
 use crate::validation::{ValidationConfig, ValidationResult, RollbackMethod};
 use async_trait::async_trait;

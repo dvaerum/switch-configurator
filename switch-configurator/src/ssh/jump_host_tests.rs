@@ -4,7 +4,7 @@
 
 #[cfg(test)]
 mod tests {
-    use crate::models::{ConnectionType, Credentials, JumpHost, SwitchConfig, SwitchModel};
+    use crate::models::{ConnectionType, Credentials, JumpHost, SwitchConfig};
     use crate::ssh::jump_host_parser::resolve_jump_host;
 
     #[test]

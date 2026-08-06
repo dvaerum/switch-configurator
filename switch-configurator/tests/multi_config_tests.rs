@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use switch_configurator::config::{AppConfig, ConfigSourceType};
+use switch_configurator::config::AppConfig;
 
 #[cfg(test)]
 mod multi_config_tests {

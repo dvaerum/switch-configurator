@@ -638,7 +638,7 @@ mod tests {
     use super::*;
     use crate::models::{
         ConnectionType, Credentials, Port, PortMirror, PortMode, MirrorDirection, SnmpConfig,
-        SnmpCommunity, SnmpTrapReceiver, TrapType, SnmpAccess, SwitchModel, Vendor, VlanIpConfig,
+        SnmpCommunity, SnmpTrapReceiver, TrapType, SnmpAccess, SwitchModel, VlanIpConfig,
         SpeedDuplex,
     };
 

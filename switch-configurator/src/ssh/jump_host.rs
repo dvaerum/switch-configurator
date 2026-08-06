@@ -222,7 +222,7 @@ impl JumpHostSession {
                     debug!("Accepted connection on localhost:{}", local_port);
 
                     // Create SSH channel to target
-                    let mut session_guard = session.lock().await;
+                    let session_guard = session.lock().await;
                     match session_guard.channel_open_direct_tcpip(
                         &target_host_clone,
                         target_port as u32,
@@ -234,7 +234,7 @@ impl JumpHostSession {
 
                             // Forward data bidirectionally
                             let mut buf_tcp = vec![0u8; 8192];
-                            let mut buf_ssh = vec![0u8; 8192];
+                            let buf_ssh = vec![0u8; 8192];
 
                             loop {
                                 tokio::select! {

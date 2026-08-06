@@ -5,7 +5,7 @@ use crate::models::{
 };
 use crate::vendors;
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Path, State},
     http::StatusCode,
     response::IntoResponse,
     Json,

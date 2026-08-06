@@ -194,7 +194,7 @@ impl SshClient {
     /// Clear any buffered data from the channel
     async fn clear_buffer(&self, channel: &mut russh::Channel<russh::client::Msg>) -> Result<()> {
         // Try to read any pending data with a short timeout
-        let mut buf = vec![0u8; 4096];
+        let buf = vec![0u8; 4096];
         loop {
             tokio::select! {
                 msg = channel.wait() => {
