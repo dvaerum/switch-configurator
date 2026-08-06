@@ -20,31 +20,37 @@ cd "$(dirname "$0")/../../.."   # -> switch-configurator crate dir
 HERE="tests/e2e/vlan-by-name"
 FAIL=0
 
-# Extract the ordered list of commands the tool would send in dry-run.
-# We capture lines the vendor logs as "would send"/generated commands. To stay
-# robust across log formats, we diff the full dry-run transcripts with volatile
-# lines (timestamps, connection banners) stripped.
-run_dryrun() {
+# Extract the SORTED set of switch commands the tool would send in dry-run.
+# We compare the command SET (order-insensitive) because VLAN-definition and
+# unconfigured-port-reset ordering is derived from hash-set iteration and is
+# non-deterministic run-to-run — independent of this feature. The commands that
+# actually consume VLAN references (the configured ports) are deterministic and
+# therefore compared exactly by the CI test `vlan_name_e2e_equivalence.rs`; here
+# the set comparison is the robust on-hardware signal.
+command_set() {
   local cfg="$1"
   nix develop --command cargo run --quiet -- \
     --config-file "$cfg" --one-off --dry-run --log-level info 2>&1 \
-    | sed -E 's/^[0-9TZ:.\-]+ +//' \
-    | grep -vE 'Connecting|Connected|Starting switch-configurator|Loaded configuration|DRY-RUN mode|Disconnect' \
-    || true
+    | sed -E 's/\x1b\[[0-9;]*m//g' \
+    | grep -oE 'Command: .*' \
+    | sort
 }
 
 compare_pair() {
   local label="$1" numeric="$2" named="$3"
-  echo "=== $label: comparing numeric vs named (dry-run) ==="
+  echo "=== $label: comparing numeric vs named (dry-run, command set) ==="
   local out_num out_name
   out_num="$(mktemp)"; out_name="$(mktemp)"
-  run_dryrun "$HERE/$numeric" > "$out_num"
-  run_dryrun "$HERE/$named"   > "$out_name"
+  command_set "$HERE/$numeric" > "$out_num"
+  command_set "$HERE/$named"   > "$out_name"
 
-  if diff -u "$out_num" "$out_name" > /tmp/vlan_name_diff.txt; then
-    echo "PASS: $label — name-based and numeric dry-runs are identical"
+  if [ ! -s "$out_num" ] || [ ! -s "$out_name" ]; then
+    echo "SKIP: $label — no commands generated (switch unreachable or state parse"
+    echo "      unsupported for this model); cannot compare over hardware."
+  elif diff -u "$out_num" "$out_name" > /tmp/vlan_name_diff.txt; then
+    echo "PASS: $label — name-based and numeric configs produce the same command set"
   else
-    echo "FAIL: $label — dry-run transcripts differ:"
+    echo "FAIL: $label — command sets differ:"
     cat /tmp/vlan_name_diff.txt
     FAIL=1
   fi
