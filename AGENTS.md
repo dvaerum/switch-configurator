@@ -17,6 +17,8 @@ This file provides guidelines for AI agents (OpenCode, Claude Code, etc.) workin
   - major for breaking changes.
 - Update `CHANGELOG.md` (under `## [Unreleased]` or a new version heading) when
   the change is user-visible.
+- **Push after committing.** Once the commit (with its version bump) is made and
+  tests pass, run `git push` to publish it.
 
 ---
 
