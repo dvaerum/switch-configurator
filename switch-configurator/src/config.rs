@@ -255,6 +255,24 @@ pub struct SwitchValidationFailure {
     pub hostname: Option<String>,
     pub error: String,
     pub config_sources: Vec<String>,
+
+    /// The merged-but-unvalidated switch — the merge itself doesn't fail on
+    /// e.g. an ambiguous VLAN name (both colliding VLAN ids end up as
+    /// ordinary rows here); only the later validation step does. Kept so a
+    /// structured editor can offer the same rename/renumber/remove controls
+    /// a valid switch gets, instead of raw-text editing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preview: Option<crate::models::SwitchConfig>,
+
+    /// Which source file each VLAN id came from, keyed by id. Lets an editor
+    /// flag "this id/name is also used by <file>" instead of discovering a
+    /// collision only after saving.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub vlan_sources: std::collections::HashMap<u16, std::path::PathBuf>,
+
+    /// Same idea as `vlan_sources`, keyed by port id.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub port_sources: std::collections::HashMap<String, std::path::PathBuf>,
 }
 
 /// Result of validating all switches — valid configs + failures
@@ -284,6 +302,9 @@ pub fn validate_all_switches(switches: Vec<crate::models::SwitchConfig>) -> Vali
                     hostname: switch.hostname.clone(),
                     error: e.to_string(),
                     config_sources: vec![],
+                    preview: Some(switch.clone()),
+                    vlan_sources: std::collections::HashMap::new(),
+                    port_sources: std::collections::HashMap::new(),
                 });
             }
         }
@@ -499,6 +520,7 @@ fn merge_configs(configs: Vec<ConfigWithMetadata>) -> Result<(AppConfig, Vec<Swi
     let mut merged_switches = Vec::new();
     let mut all_conflicts = Vec::new();
     let mut vlan_source_maps: HashMap<String, HashMap<u16, std::path::PathBuf>> = HashMap::new();
+    let mut port_source_maps: HashMap<String, HashMap<String, std::path::PathBuf>> = HashMap::new();
 
     for (switch_id, switch_configs) in switches_by_id {
         info!("Merging switch: {}", switch_id);
@@ -518,8 +540,9 @@ fn merge_configs(configs: Vec<ConfigWithMetadata>) -> Result<(AppConfig, Vec<Swi
 
         // Merge this switch's configs
         match merge_single_switch(switch_id.clone(), switch_configs) {
-            Ok((merged_switch, vlan_sources)) => {
+            Ok((merged_switch, vlan_sources, port_sources)) => {
                 vlan_source_maps.insert(switch_id.clone(), vlan_sources);
+                port_source_maps.insert(switch_id.clone(), port_sources);
                 merged_switches.push(merged_switch);
             }
             Err(e) => {
@@ -578,6 +601,9 @@ fn merge_configs(configs: Vec<ConfigWithMetadata>) -> Result<(AppConfig, Vec<Swi
                 hostname: switch.hostname.clone(),
                 error: error.format_log_message(),
                 config_sources: sources,
+                preview: Some(switch.clone()),
+                vlan_sources: vlan_source_maps.get(&switch.id).cloned().unwrap_or_default(),
+                port_sources: port_source_maps.get(&switch.id).cloned().unwrap_or_default(),
             });
             continue;
         }
@@ -622,6 +648,9 @@ fn merge_configs(configs: Vec<ConfigWithMetadata>) -> Result<(AppConfig, Vec<Swi
                 hostname: switch.hostname.clone(),
                 error: error_message,
                 config_sources: sources,
+                preview: Some(switch.clone()),
+                vlan_sources: vlan_source_maps.get(&switch.id).cloned().unwrap_or_default(),
+                port_sources: port_source_maps.get(&switch.id).cloned().unwrap_or_default(),
             });
             continue;
         }
@@ -636,6 +665,9 @@ fn merge_configs(configs: Vec<ConfigWithMetadata>) -> Result<(AppConfig, Vec<Swi
                 hostname: switch.hostname.clone(),
                 error: e.to_string(),
                 config_sources: sources,
+                preview: Some(switch.clone()),
+                vlan_sources: vlan_source_maps.get(&switch.id).cloned().unwrap_or_default(),
+                port_sources: port_source_maps.get(&switch.id).cloned().unwrap_or_default(),
             });
             continue;
         }
@@ -782,7 +814,11 @@ fn validate_switch_identity(
 fn merge_single_switch(
     switch_id: String,
     mut configs: Vec<ConfigWithMetadata>,
-) -> Result<(SwitchConfig, std::collections::HashMap<u16, std::path::PathBuf>)> {
+) -> Result<(
+    SwitchConfig,
+    std::collections::HashMap<u16, std::path::PathBuf>,
+    std::collections::HashMap<String, std::path::PathBuf>,
+)> {
     use std::collections::BTreeMap;
 
     // Sort by priority (lower number = higher priority)
@@ -840,10 +876,12 @@ fn merge_single_switch(
 
     // Merge Ports
     let mut ports_by_id: BTreeMap<String, (crate::models::Port, u16)> = BTreeMap::new();
+    let mut port_sources: std::collections::HashMap<String, std::path::PathBuf> = std::collections::HashMap::new();
 
     for config in &configs {
         let switch = &config.config.switches[0];
         for port in &switch.ports {
+            port_sources.entry(port.port_id.clone()).or_insert_with(|| config.source_file.clone());
             ports_by_id
                 .entry(port.port_id.clone())
                 .or_insert((port.clone(), config.merge_priority));
@@ -886,7 +924,7 @@ fn merge_single_switch(
 
     // Credentials already merged above as optional field
 
-    Ok((merged, vlan_sources))
+    Ok((merged, vlan_sources, port_sources))
 }
 
 /// Merge SNMP configurations with sub-component list replacement

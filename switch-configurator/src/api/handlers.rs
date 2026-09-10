@@ -566,48 +566,6 @@ pub async fn read_overlay(
     Ok(([(axum::http::header::CONTENT_TYPE, "text/yaml")], content))
 }
 
-/// Overwrite an existing overlay config file with corrected content, so a
-/// switch that failed validation can be fixed from the web UI instead of
-/// only offering View (read-only) and Delete (discards everything the
-/// overlay owned).
-///
-/// Resolves via the same folder search + switch-id ownership check as
-/// `read_overlay`/`delete_overlay` — it can never create a new file, and it
-/// can never target the main config (which never lives in a searched
-/// folder). Runs the submitted content through the exact same
-/// `validate_overlay_config` check `save_overlay` already uses, so there is
-/// one definition of "valid overlay," not two that can drift apart. On
-/// failure, the file on disk is left untouched and the submitted content is
-/// never silently discarded — the caller gets both the error and its own
-/// text back to re-edit.
-pub async fn update_overlay(
-    State(store): State<ConfigStore>,
-    Path((id, filename)): Path<(String, String)>,
-    body: String,
-) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
-    validate_overlay_filename(&filename)?;
-
-    let file_path = find_switch_overlay_file(&store, &id, &filename).await?;
-
-    let mut parsed: crate::config::AppConfigFile = serde_yaml::from_str(&body).map_err(|e| {
-        (StatusCode::BAD_REQUEST, Json(json!({"error": format!("Invalid YAML: {}", e)})))
-    })?;
-
-    for switch in &mut parsed.config.switches {
-        if let Err(e) = crate::config::validate_overlay_config(switch) {
-            return Err((StatusCode::BAD_REQUEST, Json(json!({"error": format!("Validation failed: {}", e)}))));
-        }
-    }
-
-    std::fs::write(&file_path, &body).map_err(|e| {
-        (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("Failed to write file: {}", e)})))
-    })?;
-
-    info!("Updated overlay config: {}", file_path.display());
-
-    Ok(Json(json!({"status": "updated", "file": file_path.to_string_lossy()})))
-}
-
 /// Delete an overlay config file
 pub async fn delete_overlay(
     State(store): State<ConfigStore>,
@@ -1467,6 +1425,50 @@ pub async fn patch_switch_config(
 /// Returns the current desired configuration stored in memory for the given switch.
 /// This is different from GET /switches/{id}/config which retrieves the actual
 /// running configuration from the switch hardware via SSH.
+/// Merged-but-possibly-invalid view of a switch, for a structured editor.
+/// A switch that failed validation still went through the merge itself —
+/// e.g. an ambiguous-VLAN-name collision leaves *both* colliding rows in the
+/// merged config; only the later uniqueness check rejects it — so there's a
+/// real `SwitchConfig` to hand a rename/renumber/remove UI even though the
+/// switch never made it into the normal valid set. Falls back to the
+/// ordinary valid-switch view when there's no recorded failure, so the UI
+/// has one endpoint regardless of whether the switch currently validates.
+pub async fn get_merge_preview(
+    State(store): State<ConfigStore>,
+    Path(id): Path<String>,
+) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    let failures = store.validation_failures.read().await;
+    if let Some(failure) = failures.iter().find(|f| f.switch_id == id) {
+        let vlan_sources: serde_json::Map<String, serde_json::Value> = failure.vlan_sources.iter()
+            .map(|(id, path)| (id.to_string(), json!(path.to_string_lossy())))
+            .collect();
+        let port_sources: serde_json::Map<String, serde_json::Value> = failure.port_sources.iter()
+            .map(|(id, path)| (id.clone(), json!(path.to_string_lossy())))
+            .collect();
+        return Ok(Json(json!({
+            "valid": false,
+            "config": failure.preview,
+            "vlan_sources": vlan_sources,
+            "port_sources": port_sources,
+        })));
+    }
+    drop(failures);
+
+    let config = store.config.read().await;
+    match config.switches.iter().find(|s| s.id == id) {
+        Some(switch) => Ok(Json(json!({
+            "valid": true,
+            "config": switch,
+            "vlan_sources": {},
+            "port_sources": {},
+        }))),
+        None => Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": format!("Switch '{}' not found", id)})),
+        )),
+    }
+}
+
 pub async fn get_desired_config(
     State(store): State<ConfigStore>,
     Path(id): Path<String>,

@@ -9,6 +9,14 @@ pub struct SwitchDraft {
     pub original: SwitchConfig,
     pub edited: SwitchConfig,
     pub created_at: chrono::DateTime<chrono::Utc>,
+
+    /// Which file each VLAN/port row came from — only populated for a draft
+    /// seeded from a switch that failed validation (`merge-preview`, not
+    /// `desired-config`). Empty for an ordinary healthy-switch draft, since
+    /// there's nothing to attribute. `None` in a row's own lookup means "the
+    /// main config" (never editable); `Some(path)` means a genuine overlay.
+    pub vlan_sources: HashMap<u16, String>,
+    pub port_sources: HashMap<String, String>,
 }
 
 #[derive(Clone)]
@@ -28,11 +36,27 @@ impl DraftStore {
     }
 
     pub async fn create(&self, switch_id: String, config: SwitchConfig) -> SwitchDraft {
+        self.create_with_sources(switch_id, config, HashMap::new(), HashMap::new()).await
+    }
+
+    /// Same as `create`, but records which file each VLAN/port row came
+    /// from — used when the draft is seeded from a switch that failed
+    /// validation (`merge-preview`), so the editor can render the main
+    /// config's rows read-only and annotate cross-file name collisions.
+    pub async fn create_with_sources(
+        &self,
+        switch_id: String,
+        config: SwitchConfig,
+        vlan_sources: HashMap<u16, String>,
+        port_sources: HashMap<String, String>,
+    ) -> SwitchDraft {
         let draft = SwitchDraft {
             switch_id: switch_id.clone(),
             original: config.clone(),
             edited: config,
             created_at: chrono::Utc::now(),
+            vlan_sources,
+            port_sources,
         };
         self.drafts.write().await.insert(switch_id, draft.clone());
         draft
@@ -126,6 +150,34 @@ mod tests {
         let removed = store.discard("sw-01").await;
         assert!(removed);
         assert!(!store.has_draft("sw-01").await);
+    }
+
+    #[tokio::test]
+    async fn test_draft_create_with_sources_records_attribution() {
+        let store = DraftStore::new();
+        let mut vlan_sources = HashMap::new();
+        vlan_sources.insert(10u16, "/etc/main.yaml".to_string());
+        vlan_sources.insert(99u16, "/etc/switch-configurator/overlay.yaml".to_string());
+
+        let draft = store.create_with_sources(
+            "sw-01".to_string(),
+            test_config(),
+            vlan_sources,
+            HashMap::new(),
+        ).await;
+
+        assert_eq!(draft.vlan_sources.get(&10).map(String::as_str), Some("/etc/main.yaml"));
+        assert_eq!(draft.vlan_sources.get(&99).map(String::as_str), Some("/etc/switch-configurator/overlay.yaml"));
+    }
+
+    #[tokio::test]
+    async fn test_draft_create_defaults_to_empty_sources() {
+        // An ordinary healthy-switch draft (created via `create`, not
+        // `create_with_sources`) has nothing to attribute.
+        let store = DraftStore::new();
+        let draft = store.create("sw-01".to_string(), test_config()).await;
+        assert!(draft.vlan_sources.is_empty());
+        assert!(draft.port_sources.is_empty());
     }
 
     #[tokio::test]

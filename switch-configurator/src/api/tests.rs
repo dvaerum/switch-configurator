@@ -2899,99 +2899,93 @@ mod integration_tests {
     }
 
     #[tokio::test]
-    async fn test_update_overlay_success_writes_corrected_content() {
+    async fn test_merge_preview_valid_switch_returns_config() {
         let store = create_test_config_store();
-        let config_dir = tempfile::tempdir().unwrap();
-        store.status.set_config_metadata(crate::status::ConfigMetadata {
-            config_file: std::path::PathBuf::from("/tmp/main.yaml"),
-            config_folders: vec![config_dir.path().to_path_buf()],
-            last_loaded: chrono::Utc::now(),
-            switches_count: 1,
-        }).await;
-
-        let file_path = config_dir.path().join("broken.yaml");
-        std::fs::write(&file_path, "merge_priority: 200\nswitches:\n  - id: demo\n    vlans:\n      - id: 10\n        name: users\n      - id: 99\n        name: users\n").unwrap();
-
-        let corrected = "merge_priority: 200\nswitches:\n  - id: demo\n    vlans:\n      - id: 10\n        name: users\n";
-
         let app = crate::api::create_router(store);
+
         let request = Request::builder()
-            .method("PUT")
-            .uri("/switches/demo/overlay/broken.yaml")
-            .header("Content-Type", "text/yaml")
-            .body(Body::from(corrected))
+            .method("GET")
+            .uri("/switches/test-sw-01/merge-preview")
+            .body(Body::empty())
             .unwrap();
 
         let response = app.oneshot(request).await.unwrap();
-        assert_eq!(response.status(), StatusCode::OK, "corrected content should save");
-
-        let saved = std::fs::read_to_string(&file_path).unwrap();
-        assert_eq!(saved, corrected, "file on disk should match the submitted content");
-    }
-
-    #[tokio::test]
-    async fn test_update_overlay_invalid_content_leaves_file_unchanged() {
-        let store = create_test_config_store();
-        let config_dir = tempfile::tempdir().unwrap();
-        store.status.set_config_metadata(crate::status::ConfigMetadata {
-            config_file: std::path::PathBuf::from("/tmp/main.yaml"),
-            config_folders: vec![config_dir.path().to_path_buf()],
-            last_loaded: chrono::Utc::now(),
-            switches_count: 1,
-        }).await;
-
-        let original = "merge_priority: 200\nswitches:\n  - id: demo\n    vlans:\n      - id: 10\n        name: users\n";
-        let file_path = config_dir.path().join("broken.yaml");
-        std::fs::write(&file_path, original).unwrap();
-
-        // Still invalid: duplicate VLAN id within this same file.
-        let still_broken = "merge_priority: 200\nswitches:\n  - id: demo\n    vlans:\n      - id: 10\n        name: users\n      - id: 10\n        name: other\n";
-
-        let app = crate::api::create_router(store);
-        let request = Request::builder()
-            .method("PUT")
-            .uri("/switches/demo/overlay/broken.yaml")
-            .header("Content-Type", "text/yaml")
-            .body(Body::from(still_broken))
-            .unwrap();
-
-        let response = app.oneshot(request).await.unwrap();
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "invalid content should be rejected");
+        assert_eq!(response.status(), StatusCode::OK);
 
         let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        let text = String::from_utf8(body.to_vec()).unwrap();
-        assert!(text.contains("error"), "response should carry the validation error: {}", text);
-
-        let unchanged = std::fs::read_to_string(&file_path).unwrap();
-        assert_eq!(unchanged, original, "file on disk must not change when the save is rejected");
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["valid"], true);
+        assert_eq!(json["config"]["id"], "test-sw-01");
     }
 
     #[tokio::test]
-    async fn test_update_overlay_cannot_target_main_config() {
-        // The lookup only ever searches configured *folders*, never the main
-        // config's own directory (they're separate in every real deployment,
-        // e.g. a nix store path vs /etc/switch-configurator) — so an attempt
-        // to PUT over a file that only exists next to the main config simply
-        // finds nothing, regardless of filename or id.
-        let main_dir = tempfile::tempdir().unwrap();
-        let overlay_dir = tempfile::tempdir().unwrap();
-        let main_file = main_dir.path().join("main.yaml");
-        std::fs::write(&main_file, "merge_priority: 10\nswitches:\n  - id: demo\n").unwrap();
-
+    async fn test_merge_preview_failed_switch_returns_preview_and_sources() {
         let store = create_test_config_store();
-        store.status.set_config_metadata(crate::status::ConfigMetadata {
-            config_file: main_file,
-            config_folders: vec![overlay_dir.path().to_path_buf()],
-            last_loaded: chrono::Utc::now(),
-            switches_count: 1,
-        }).await;
+
+        let mut vlan_sources = std::collections::HashMap::new();
+        vlan_sources.insert(10u16, std::path::PathBuf::from("/etc/main.yaml"));
+        vlan_sources.insert(99u16, std::path::PathBuf::from("/etc/switch-configurator/overlay.yaml"));
+
+        let mut port_sources = std::collections::HashMap::new();
+        port_sources.insert("1".to_string(), std::path::PathBuf::from("/etc/main.yaml"));
+
+        let preview = SwitchConfig {
+            id: "broken-switch".to_string(),
+            hostname: Some("broken-switch".to_string()),
+            model: Some(SwitchModel::Aruba2930F),
+            management_ip: Some("192.168.1.2".to_string()),
+            credentials: None,
+            vlans: vec![
+                Vlan { id: 10, name: "users".to_string(), description: None, ip_config: VlanIpConfig::None },
+                Vlan { id: 99, name: "users".to_string(), description: None, ip_config: VlanIpConfig::None },
+            ],
+            ports: vec![],
+            port_mirrors: vec![],
+            snmp: None,
+            management_vlan: None,
+            validation: None,
+            vendor_specific: std::collections::HashMap::new(),
+            settings: Default::default(),
+        };
+
+        *store.validation_failures.write().await = vec![crate::config::SwitchValidationFailure {
+            switch_id: "broken-switch".to_string(),
+            hostname: Some("broken-switch".to_string()),
+            error: "VLAN name 'users' is ambiguous".to_string(),
+            config_sources: vec!["/etc/main.yaml".to_string(), "/etc/switch-configurator/overlay.yaml".to_string()],
+            preview: Some(preview),
+            vlan_sources,
+            port_sources,
+        }];
 
         let app = crate::api::create_router(store);
         let request = Request::builder()
-            .method("PUT")
-            .uri("/switches/demo/overlay/main.yaml")
-            .header("Content-Type", "text/yaml")
-            .body(Body::from("merge_priority: 10\nswitches:\n  - id: demo\n"))
+            .method("GET")
+            .uri("/switches/broken-switch/merge-preview")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["valid"], false);
+        assert_eq!(json["config"]["vlans"].as_array().unwrap().len(), 2, "both colliding rows should be present");
+        assert!(json["vlan_sources"]["10"].as_str().unwrap().ends_with("main.yaml"));
+        assert!(json["vlan_sources"]["99"].as_str().unwrap().ends_with("overlay.yaml"));
+        assert!(json["port_sources"]["1"].as_str().unwrap().ends_with("main.yaml"));
+    }
+
+    #[tokio::test]
+    async fn test_merge_preview_unknown_switch_is_not_found() {
+        let store = create_test_config_store();
+        let app = crate::api::create_router(store);
+
+        let request = Request::builder()
+            .method("GET")
+            .uri("/switches/nope/merge-preview")
+            .body(Body::empty())
             .unwrap();
 
         let response = app.oneshot(request).await.unwrap();
