@@ -25,25 +25,7 @@
     {% when None %}
 {% endmatch %}
 
-<div class="card mb-1">
-    <div class="text-sm text-muted mb-1">Lines naming a value from the current validation error are highlighted.</div>
-    <pre style="margin:0;white-space:pre-wrap;font-size:0.85rem;line-height:1.5;">{% for line in lines %}{% if line.highlighted %}<mark>{{ line.text }}</mark>{% else %}{{ line.text }}{% endif %}
-{% endfor %}</pre>
+<div class="card">
+    <pre style="margin:0;white-space:pre-wrap;font-size:0.85rem;line-height:1.5;">{{ content }}</pre>
 </div>
-
-<form method="POST" action="/overlay/{{ switch_id }}/{{ filename }}/save">
-    {% match save_error %}
-        {% when Some with (msg) %}
-        <div class="card mb-1" style="border-color:var(--danger);background:var(--danger-light);color:var(--danger);">
-            <strong>Save failed:</strong> {{ msg }}
-        </div>
-        {% when None %}
-    {% endmatch %}
-    <div class="card">
-        <textarea name="content" style="width:100%;min-height:20rem;font-family:monospace;font-size:0.85rem;line-height:1.5;padding:0.5rem;border:1px solid var(--border);border-radius:4px;">{{ content }}</textarea>
-        <div class="mt-1">
-            <button type="submit" class="btn btn-primary">Save</button>
-        </div>
-    </div>
-</form>
 {% endblock %}

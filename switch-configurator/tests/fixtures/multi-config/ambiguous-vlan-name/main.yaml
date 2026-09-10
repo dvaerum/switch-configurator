@@ -11,4 +11,7 @@ switches:
     vlans:
       - id: 10
         name: users
-    ports: []
+    ports:
+      - port_id: "1"
+        vlan: 10
+        enabled: true

@@ -169,28 +169,6 @@ mod tests {
         let overlay = sources.iter().find(|s| s.path == "/etc/switch-configurator/overlay.yaml").unwrap();
         assert!(!overlay.is_main, "overlay source should not be marked is_main");
     }
-
-    #[test]
-    fn test_highlighted_lines_marks_lines_naming_error_values() {
-        let content = "switches:\n- id: demo\n  vlans:\n  - id: 10\n    name: users\n  - id: 99\n    name: users\n";
-        let error = "Switch 'demo': VLAN name 'users' is ambiguous — VLAN 10 (from main.yaml) and VLAN 99 (from overlay.yaml).";
-
-        let lines = highlighted_lines(content, error);
-
-        let marked: Vec<&str> = lines.iter().filter(|l| l.highlighted).map(|l| l.text.as_str()).collect();
-        assert_eq!(marked, vec!["  - id: 10", "  - id: 99"], "only the lines naming the colliding ids should be highlighted");
-    }
-
-    #[test]
-    fn test_highlighted_lines_does_not_match_substrings() {
-        // "10" must not highlight a line containing "100" or "1099".
-        let content = "  - id: 100\n  - id: 10\n";
-        let error = "VLAN 10 (from a.yaml) and VLAN 20 (from b.yaml)";
-
-        let lines = highlighted_lines(content, error);
-        assert!(!lines[0].highlighted, "line with id 100 should not match needle '10'");
-        assert!(lines[1].highlighted, "line with id 10 should match needle '10'");
-    }
 }
 
 async fn fetch_switch_cards(state: &AppState) -> Vec<SwitchCard> {
@@ -268,46 +246,19 @@ async fn fetch_switch_cards(state: &AppState) -> Vec<SwitchCard> {
         .collect()
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct HighlightedLine {
-    pub text: String,
-    pub highlighted: bool,
-}
-
-/// Which lines of a config file's content should be visually highlighted,
-/// given an error message that names specific values (VLAN ids, filenames)
-/// — so the conflicting lines are findable at a glance instead of needing to
-/// read the whole file. Matches whole tokens only (a plain substring search
-/// would highlight "10" inside "100"), and only numeric or filename-like
-/// tokens (containing a `.`) — not every common word in the error sentence.
-fn highlighted_lines(content: &str, error: &str) -> Vec<HighlightedLine> {
-    let is_word_char = |c: char| c.is_alphanumeric() || c == '.' || c == '-' || c == '_';
-
-    let needles: Vec<&str> = error
-        .split(|c: char| !is_word_char(c))
-        .filter(|s| !s.is_empty())
-        .filter(|s| s.chars().all(|c| c.is_ascii_digit()) || s.contains('.'))
-        .collect();
-
-    content.lines().map(|line| {
-        let matched = needles.iter().any(|needle| {
-            line.split(|c: char| !is_word_char(c)).any(|word| word == *needle)
-        });
-        HighlightedLine { text: line.to_string(), highlighted: matched }
-    }).collect()
-}
-
 #[derive(Template)]
 #[template(path = "overlay_view.html")]
 struct OverlayViewTemplate {
     switch_id: String,
     filename: String,
     content: String,
-    lines: Vec<HighlightedLine>,
     error: Option<String>,
-    save_error: Option<String>,
 }
 
+/// Read-only raw dump of an overlay file — useful to double-check exactly
+/// what's on disk, but resolving a broken switch happens through the
+/// structured VLAN/port editor (`edit.rs`'s draft flow, seeded from
+/// `/switches/{id}/merge-preview`), not by editing this raw text.
 pub async fn view_overlay(
     State(state): State<AppState>,
     Path((switch_id, filename)): Path<(String, String)>,
@@ -318,70 +269,11 @@ pub async fn view_overlay(
         Err(e) => (String::new(), Some(format!("Failed to load overlay: {}", e))),
     };
 
-    // Find this switch's current validation error, if any, to highlight the
-    // lines it names in the content below.
-    let validation_error = state.backend.get("/api/status").await.ok()
-        .and_then(|s| {
-            s["validation_failures"].as_array()?.iter()
-                .find(|f| f["switch_id"].as_str() == Some(&switch_id))
-                .and_then(|f| f["error"].as_str().map(str::to_string))
-        });
-
-    let lines = match &validation_error {
-        Some(err) => highlighted_lines(&content, err),
-        None => content.lines().map(|l| HighlightedLine { text: l.to_string(), highlighted: false }).collect(),
-    };
-
     OverlayViewTemplate {
         switch_id,
         filename,
         content,
-        lines,
         error,
-        save_error: None,
-    }
-}
-
-#[derive(serde::Deserialize)]
-pub struct OverlaySaveForm {
-    pub content: String,
-}
-
-pub async fn save_overlay_edit(
-    State(state): State<AppState>,
-    Path((switch_id, filename)): Path<(String, String)>,
-    axum::Form(form): axum::Form<OverlaySaveForm>,
-) -> impl IntoResponse {
-    let path = format!("/switches/{}/overlay/{}", switch_id, filename);
-
-    match state.backend.put_text(&path, &form.content).await {
-        Ok((status, _)) if status < 300 => Redirect::to("/").into_response(),
-        Ok((_, body)) => {
-            let save_error = Some(
-                body["error"].as_str().map(str::to_string)
-                    .unwrap_or_else(|| "Save failed".to_string()),
-            );
-            let lines = form.content.lines().map(|l| HighlightedLine { text: l.to_string(), highlighted: false }).collect();
-            OverlayViewTemplate {
-                switch_id,
-                filename,
-                content: form.content,
-                lines,
-                error: None,
-                save_error,
-            }.into_response()
-        }
-        Err(e) => {
-            let lines = form.content.lines().map(|l| HighlightedLine { text: l.to_string(), highlighted: false }).collect();
-            OverlayViewTemplate {
-                switch_id,
-                filename,
-                content: form.content,
-                lines,
-                error: None,
-                save_error: Some(format!("Failed to save: {}", e)),
-            }.into_response()
-        }
     }
 }
 

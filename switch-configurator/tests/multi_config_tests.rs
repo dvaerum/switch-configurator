@@ -485,6 +485,50 @@ mod multi_config_tests {
     }
 
     #[test]
+    fn test_ambiguous_vlan_name_preview_keeps_both_colliding_rows() {
+        // A structured editor needs the merged-but-unvalidated switch (both
+        // colliding VLAN rows survive the merge itself — only the later
+        // uniqueness check rejects them) plus which file each id came from,
+        // instead of only an error string.
+        let main_config = fixtures_path("ambiguous-vlan-name/main.yaml");
+        let folder = fixtures_path("ambiguous-vlan-name/common");
+
+        let (_config, failures) = AppConfig::load_multi(&main_config, &[folder]).unwrap();
+        assert_eq!(failures.len(), 1);
+
+        let preview = failures[0].preview.as_ref().expect("preview should be populated");
+        let mut vlan_ids: Vec<u16> = preview.vlans.iter().map(|v| v.id).collect();
+        vlan_ids.sort();
+        assert_eq!(vlan_ids, vec![10, 99], "both colliding VLAN rows should survive the merge preview");
+
+        let sources = &failures[0].vlan_sources;
+        assert!(
+            sources.get(&10).map(|p| p.file_name().unwrap().to_string_lossy().into_owned()) == Some("main.yaml".to_string()),
+            "VLAN 10 should be attributed to main.yaml, got: {:?}", sources.get(&10)
+        );
+        assert!(
+            sources.get(&99).map(|p| p.file_name().unwrap().to_string_lossy().into_owned()) == Some("overlay.yaml".to_string()),
+            "VLAN 99 should be attributed to overlay.yaml, got: {:?}", sources.get(&99)
+        );
+
+        let mut port_ids: Vec<&str> = preview.ports.iter().map(|p| p.port_id.as_str()).collect();
+        port_ids.sort();
+        assert_eq!(port_ids, vec!["1", "2"], "both files' ports should survive the merge preview");
+
+        let port_sources = &failures[0].port_sources;
+        assert_eq!(
+            port_sources.get("1").and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()),
+            Some("main.yaml".to_string()),
+            "port 1 should be attributed to main.yaml"
+        );
+        assert_eq!(
+            port_sources.get("2").and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()),
+            Some("overlay.yaml".to_string()),
+            "port 2 should be attributed to overlay.yaml"
+        );
+    }
+
+    #[test]
     fn test_missing_vlans_in_all_configs_skips_switch() {
         // Setup: No config file provides VLANs for the switch (empty vlans: [])
         // Expected: Switch is skipped (graceful mode) and appears in failures

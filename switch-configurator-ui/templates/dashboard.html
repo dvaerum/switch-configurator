@@ -35,6 +35,9 @@
             {% endif %}
             {% if !f.overlay_files.is_empty() %}
             <div class="mt-1 flex" style="gap:0.5rem;">
+                <form method="POST" action="/draft/{{ f.switch_id }}/start" style="display:inline;">
+                    <button type="submit" class="btn btn-primary text-sm">Edit</button>
+                </form>
                 {% for overlay in f.overlay_files %}
                 <a href="/overlay/{{ f.switch_id }}/{{ overlay.filename }}/view" class="btn btn-outline text-sm">View {{ overlay.filename }}</a>
                 <form method="POST" action="/overlay/{{ f.switch_id }}/{{ overlay.filename }}/delete" style="display:inline;"

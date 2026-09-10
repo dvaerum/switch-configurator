@@ -73,7 +73,6 @@ pub fn create_router(state: AppState) -> Router {
         .route("/switch/:id/poe-reset/:port_id", post(switch::poe_reset))
         // Overlay management (broken config)
         .route("/overlay/:switch_id/:filename/view", get(dashboard::view_overlay))
-        .route("/overlay/:switch_id/:filename/save", post(dashboard::save_overlay_edit))
         .route("/overlay/:switch_id/:filename/delete", post(dashboard::delete_overlay))
         .route("/main-config/view", get(dashboard::view_main_config))
         .route("/events", get(events::sse_proxy))

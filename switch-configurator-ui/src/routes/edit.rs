@@ -17,12 +17,36 @@ pub struct StartDraftForm {
     pub tab: Option<String>,
 }
 
+/// Pull the merged config and per-row source attribution out of a
+/// `/switches/{id}/merge-preview` response. Used both for an ordinary
+/// healthy switch (empty source maps — nothing to attribute) and a switch
+/// that failed validation (both colliding rows present, each tagged with
+/// the file it came from) — one endpoint, one parse, so the draft flow
+/// doesn't need to know in advance which kind of switch it's editing.
+fn parse_merge_preview(
+    json: &serde_json::Value,
+) -> Option<(SwitchConfig, std::collections::HashMap<u16, String>, std::collections::HashMap<String, String>)> {
+    let config: SwitchConfig = serde_json::from_value(json["config"].clone()).ok()?;
+
+    let vlan_sources = json["vlan_sources"].as_object()
+        .map(|m| m.iter().filter_map(|(k, v)| {
+            Some((k.parse::<u16>().ok()?, v.as_str()?.to_string()))
+        }).collect())
+        .unwrap_or_default();
+
+    let port_sources = json["port_sources"].as_object()
+        .map(|m| m.iter().filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string()))).collect())
+        .unwrap_or_default();
+
+    Some((config, vlan_sources, port_sources))
+}
+
 pub async fn start_draft(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Form(form): Form<StartDraftForm>,
 ) -> impl IntoResponse {
-    let json = match state.backend.get(&format!("/switches/{}/desired-config", id)).await {
+    let json = match state.backend.get(&format!("/switches/{}/merge-preview", id)).await {
         Ok(json) => json,
         Err(e) => {
             tracing::error!("Failed to fetch config for draft: {}", e);
@@ -30,15 +54,15 @@ pub async fn start_draft(
         }
     };
 
-    let config: SwitchConfig = match serde_json::from_value(json) {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::error!("Failed to parse config: {}", e);
+    let (config, vlan_sources, port_sources) = match parse_merge_preview(&json) {
+        Some(parsed) => parsed,
+        None => {
+            tracing::error!("Failed to parse merge preview for {}", id);
             return Redirect::to(&format!("/switch/{}", id)).into_response();
         }
     };
 
-    state.drafts.create(id.clone(), config).await;
+    state.drafts.create_with_sources(id.clone(), config, vlan_sources, port_sources).await;
 
     let edit_tab = match form.tab.as_deref() {
         Some("ports") => "ports",
@@ -66,6 +90,19 @@ pub struct EditableVlan {
     pub id: u16,
     pub name: String,
     pub ip_config: String,
+    /// `true` for a row that came from the main config — never editable
+    /// here, same boundary the overlay View/Delete pages already enforce.
+    pub read_only: bool,
+    /// `Some("from overlay.yaml")` for a row attributed to a specific
+    /// overlay file; `None` for an ordinary healthy-switch draft (nothing
+    /// to attribute) or for a main-config row (labeled via `read_only`
+    /// instead, to avoid saying the same thing two different ways).
+    pub source_label: Option<String>,
+    /// Set when another row (a different id) shares this row's name — the
+    /// exact condition the merge-time ambiguous-name check rejects. Points
+    /// at the other row so both sides of a collision are visible together,
+    /// not just in the banner text above the table.
+    pub collision_note: Option<String>,
 }
 
 #[derive(Template)]
@@ -74,6 +111,54 @@ struct EditVlansTemplate {
     switch_id: String,
     hostname: String,
     vlans: Vec<EditableVlan>,
+}
+
+/// Build the editable VLAN rows for one switch, given its merged vlans, the
+/// per-id source-file attribution (empty for an ordinary healthy switch),
+/// and the main config's own path (to tell "from the main config" apart
+/// from "from an overlay").
+fn build_editable_vlans(
+    vlans: &[Vlan],
+    vlan_sources: &std::collections::HashMap<u16, String>,
+    main_config_path: &str,
+) -> Vec<EditableVlan> {
+    vlans.iter().map(|v| {
+        let source = vlan_sources.get(&v.id);
+        let read_only = is_main_config_source(source, main_config_path);
+        let source_label = source.filter(|_| !read_only).and_then(|path| {
+            std::path::Path::new(path).file_name().map(|n| format!("from {}", n.to_string_lossy()))
+        });
+
+        let collision = vlans.iter()
+            .filter(|other| other.id != v.id && other.name == v.name)
+            .next();
+        let collision_note = collision.map(|other| {
+            let other_source = vlan_sources.get(&other.id);
+            let other_is_main = is_main_config_source(other_source, main_config_path);
+            let other_label = if other_is_main {
+                "main config".to_string()
+            } else {
+                other_source
+                    .and_then(|path| std::path::Path::new(path).file_name())
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "another source".to_string())
+            };
+            format!("also used by id {} ({})", other.id, other_label)
+        });
+
+        EditableVlan {
+            id: v.id,
+            name: v.name.clone(),
+            ip_config: match &v.ip_config {
+                VlanIpConfig::None => "none".to_string(),
+                VlanIpConfig::Dhcp => "dhcp".to_string(),
+                VlanIpConfig::Static { address, netmask } => format!("{}/{}", address, netmask),
+            },
+            read_only,
+            source_label,
+            collision_note,
+        }
+    }).collect()
 }
 
 pub async fn edit_vlans(
@@ -85,23 +170,32 @@ pub async fn edit_vlans(
         None => return Redirect::to(&format!("/switch/{}", id)).into_response(),
     };
 
-    let vlans: Vec<EditableVlan> = draft.edited.vlans.iter().map(|v| {
-        EditableVlan {
-            id: v.id,
-            name: v.name.clone(),
-            ip_config: match &v.ip_config {
-                VlanIpConfig::None => "none".to_string(),
-                VlanIpConfig::Dhcp => "dhcp".to_string(),
-                VlanIpConfig::Static { address, netmask } => format!("{}/{}", address, netmask),
-            },
-        }
-    }).collect();
+    let main_config_path = main_config_path(&state).await;
+    let vlans = build_editable_vlans(&draft.edited.vlans, &draft.vlan_sources, &main_config_path);
 
     EditVlansTemplate {
         switch_id: id,
         hostname: draft.edited.hostname.clone().unwrap_or_default(),
         vlans,
     }.into_response()
+}
+
+/// The main config's own path, so a draft row attributed to it can be told
+/// apart from a row attributed to a genuine (editable) overlay. Empty when
+/// unknown — never equals a real source path, so every row reads as an
+/// editable overlay row rather than being mistaken for read-only.
+pub(crate) async fn main_config_path(state: &AppState) -> String {
+    state.backend.get("/api/status").await.ok()
+        .and_then(|s| s["configuration"]["config_file"].as_str().map(str::to_string))
+        .unwrap_or_default()
+}
+
+/// Whether a draft row (by its recorded source path, if any) came from the
+/// main config — and so must never be mutated from here, no matter what a
+/// form submission claims. `None` (no attribution recorded — an ordinary
+/// healthy-switch draft) is never read-only.
+pub(crate) fn is_main_config_source(source: Option<&String>, main_config_path: &str) -> bool {
+    source.map(|s| s == main_config_path).unwrap_or(false)
 }
 
 #[derive(Deserialize)]
@@ -119,6 +213,15 @@ pub async fn update_vlan(
         Some(d) => d,
         None => return Redirect::to(&format!("/switch/{}/edit/vlans", id)).into_response(),
     };
+
+    // Never mutate a row attributed to the main config, regardless of what
+    // the form claims — the same boundary View/Delete already enforce for
+    // overlay files, checked server-side rather than trusted from a
+    // (spoofable) disabled form control.
+    let main_config = main_config_path(&state).await;
+    if is_main_config_source(draft.vlan_sources.get(&vlan_id), &main_config) {
+        return Redirect::to(&format!("/switch/{}/edit/vlans", id)).into_response();
+    }
 
     if let Some(vlan) = draft.edited.vlans.iter_mut().find(|v| v.id == vlan_id) {
         vlan.name = form.name;
@@ -168,6 +271,11 @@ pub async fn remove_vlan(
         Some(d) => d,
         None => return Redirect::to(&format!("/switch/{}/edit/vlans", id)).into_response(),
     };
+
+    let main_config = main_config_path(&state).await;
+    if is_main_config_source(draft.vlan_sources.get(&vlan_id), &main_config) {
+        return Redirect::to(&format!("/switch/{}/edit/vlans", id)).into_response();
+    }
 
     draft.edited.vlans.retain(|v| v.id != vlan_id);
     state.drafts.update(&id, draft.edited).await;
@@ -769,6 +877,10 @@ mod tests {
         (k.to_string(), v.to_string())
     }
 
+    fn vlan(id: u16, name: &str) -> Vlan {
+        Vlan { id, name: name.to_string(), description: None, ip_config: VlanIpConfig::None }
+    }
+
     #[test]
     fn test_parse_ports_bulk_multiple_poe_enabled() {
         // Both rows have poe_enabled checkbox present (checked) -> both true.
@@ -901,6 +1013,82 @@ mod tests {
         assert_eq!(port.vlan, 10);
         assert_eq!(port.tagged_vlans, vec![20, 30]);
         assert_eq!(port.mode, PortMode::Trunk);
+    }
+
+    #[test]
+    fn test_parse_merge_preview_extracts_config_and_sources() {
+        let json = serde_json::json!({
+            "valid": false,
+            "config": {
+                "id": "broken-switch",
+                "hostname": "broken-switch",
+                "model": "Aruba2930F",
+                "management_ip": "192.168.1.2",
+                "credentials": null,
+                "vlans": [
+                    {"id": 10, "name": "users", "description": null, "ip_config": "none"},
+                    {"id": 99, "name": "users", "description": null, "ip_config": "none"}
+                ],
+                "ports": [],
+                "port_mirrors": [],
+                "snmp": null,
+                "management_vlan": null,
+                "validation": null,
+                "vendor_specific": {},
+                "settings": {"ssh_timeout_secs": 30, "max_retries": 3, "enforce_port_config": true}
+            },
+            "vlan_sources": {"10": "/etc/main.yaml", "99": "/etc/switch-configurator/overlay.yaml"},
+            "port_sources": {}
+        });
+
+        let (config, vlan_sources, port_sources) = parse_merge_preview(&json).expect("should parse");
+        assert_eq!(config.id, "broken-switch");
+        assert_eq!(config.vlans.len(), 2);
+        assert_eq!(vlan_sources.get(&10).map(String::as_str), Some("/etc/main.yaml"));
+        assert_eq!(vlan_sources.get(&99).map(String::as_str), Some("/etc/switch-configurator/overlay.yaml"));
+        assert!(port_sources.is_empty());
+    }
+
+    #[test]
+    fn test_build_editable_vlans_marks_main_config_row_read_only() {
+        let vlans = vec![vlan(10, "users"), vlan(99, "users")];
+        let mut sources = std::collections::HashMap::new();
+        sources.insert(10, "/etc/main.yaml".to_string());
+        sources.insert(99, "/etc/switch-configurator/overlay.yaml".to_string());
+
+        let rows = build_editable_vlans(&vlans, &sources, "/etc/main.yaml");
+
+        let main_row = rows.iter().find(|r| r.id == 10).unwrap();
+        assert!(main_row.read_only, "row sourced from the main config should be read-only");
+        assert_eq!(main_row.source_label, None);
+
+        let overlay_row = rows.iter().find(|r| r.id == 99).unwrap();
+        assert!(!overlay_row.read_only, "row sourced from an overlay should stay editable");
+        assert_eq!(overlay_row.source_label.as_deref(), Some("from overlay.yaml"));
+    }
+
+    #[test]
+    fn test_build_editable_vlans_notes_name_collision_both_ways() {
+        let vlans = vec![vlan(10, "users"), vlan(99, "users")];
+        let mut sources = std::collections::HashMap::new();
+        sources.insert(10, "/etc/main.yaml".to_string());
+        sources.insert(99, "/etc/switch-configurator/overlay.yaml".to_string());
+
+        let rows = build_editable_vlans(&vlans, &sources, "/etc/main.yaml");
+
+        let main_row = rows.iter().find(|r| r.id == 10).unwrap();
+        assert_eq!(main_row.collision_note.as_deref(), Some("also used by id 99 (overlay.yaml)"));
+
+        let overlay_row = rows.iter().find(|r| r.id == 99).unwrap();
+        assert_eq!(overlay_row.collision_note.as_deref(), Some("also used by id 10 (main config)"));
+    }
+
+    #[test]
+    fn test_build_editable_vlans_no_collision_no_note() {
+        let vlans = vec![vlan(10, "users"), vlan(20, "servers")];
+        let rows = build_editable_vlans(&vlans, &std::collections::HashMap::new(), "/etc/main.yaml");
+        assert!(rows.iter().all(|r| r.collision_note.is_none()));
+        assert!(rows.iter().all(|r| !r.read_only), "healthy-switch draft rows should all stay editable");
     }
 
     #[test]
