@@ -2661,6 +2661,114 @@ mod integration_tests {
     }
 
     #[tokio::test]
+    async fn test_save_overlay_writes_vlan_name_instead_of_id_when_named() {
+        // A port's untagged/tagged VLAN ids should be written back out using the
+        // switch's own VLAN name when one exists, not the bare numeric id — this
+        // is what the web UI now relies on to save VLAN-by-name.
+        let store = create_test_config_store();
+        let config_dir = tempfile::tempdir().unwrap();
+        store.status.set_config_metadata(crate::status::ConfigMetadata {
+            config_file: std::path::PathBuf::from("/tmp/main.yaml"),
+            config_folders: vec![config_dir.path().to_path_buf()],
+            last_loaded: chrono::Utc::now(),
+            switches_count: 1,
+        }).await;
+
+        let app = crate::api::create_router(store);
+
+        let body = serde_json::json!({
+            "filename": "named-vlan.yaml",
+            "merge_priority": 200,
+            "config": {
+                "switches": [{
+                    "id": "test-sw-01",
+                    "vlans": [
+                        {"id": 10, "name": "users"},
+                        {"id": 20, "name": "servers"}
+                    ],
+                    "ports": [{
+                        "port_id": "1",
+                        "vlan": 10,
+                        "tagged_vlans": [20],
+                        "enabled": true
+                    }]
+                }]
+            }
+        });
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/switches/test-sw-01/save-overlay")
+            .header("Content-Type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED, "save-overlay should return 201");
+
+        let content = std::fs::read_to_string(config_dir.path().join("named-vlan.yaml")).unwrap();
+        assert!(
+            content.contains("vlan: users"),
+            "untagged VLAN should be written by name, got:\n{}", content
+        );
+        assert!(
+            content.contains("- servers") || content.contains("[servers]"),
+            "tagged VLAN should be written by name, got:\n{}", content
+        );
+        assert!(
+            !content.contains("vlan: 10") && !content.contains("- 20"),
+            "numeric VLAN ids should not appear when a name is available, got:\n{}", content
+        );
+    }
+
+    #[tokio::test]
+    async fn test_save_overlay_writes_numeric_id_when_vlan_unnamed() {
+        // A port referencing a VLAN id that has no name on this switch (e.g. the
+        // implicit default VLAN 1) must still be written as a numeric id — there
+        // is nothing to name it with.
+        let store = create_test_config_store();
+        let config_dir = tempfile::tempdir().unwrap();
+        store.status.set_config_metadata(crate::status::ConfigMetadata {
+            config_file: std::path::PathBuf::from("/tmp/main.yaml"),
+            config_folders: vec![config_dir.path().to_path_buf()],
+            last_loaded: chrono::Utc::now(),
+            switches_count: 1,
+        }).await;
+
+        let app = crate::api::create_router(store);
+
+        let body = serde_json::json!({
+            "filename": "unnamed-vlan.yaml",
+            "merge_priority": 200,
+            "config": {
+                "switches": [{
+                    "id": "test-sw-01",
+                    "vlans": [],
+                    "ports": [{
+                        "port_id": "1",
+                        "vlan": 1,
+                        "tagged_vlans": [],
+                        "enabled": true
+                    }]
+                }]
+            }
+        });
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/switches/test-sw-01/save-overlay")
+            .header("Content-Type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        let content = std::fs::read_to_string(config_dir.path().join("unnamed-vlan.yaml")).unwrap();
+        assert!(content.contains("vlan: 1"), "unnamed VLAN should stay numeric, got:\n{}", content);
+    }
+
+    #[tokio::test]
     async fn test_config_sources_returns_files() {
         let store = create_test_config_store();
 

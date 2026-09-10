@@ -38,8 +38,20 @@
                     {{ port.port_id }}
                     <input type="hidden" name="port_id.{{ loop.index0 }}" value="{{ port.port_id }}">
                 </td>
-                <td><input type="number" name="vlan.{{ loop.index0 }}" value="{{ port.vlan }}" min="1" max="4094" style="width:70px;padding:0.2rem;border:1px solid var(--border);border-radius:4px;"></td>
-                <td><input type="text" name="tagged_vlans.{{ loop.index0 }}" value="{{ port.tagged_vlans }}" placeholder="e.g. 10,20,30" style="width:100px;padding:0.2rem;border:1px solid var(--border);border-radius:4px;"></td>
+                <td>
+                    <select name="vlan.{{ loop.index0 }}" style="width:130px;padding:0.2rem;border:1px solid var(--border);border-radius:4px;">
+                        {% for v in vlans %}
+                        <option value="{{ v.id }}"{% if v.id == port.vlan %} selected{% endif %}>{{ v.name }} ({{ v.id }})</option>
+                        {% endfor %}
+                    </select>
+                </td>
+                <td>
+                    <select name="tagged_vlans.{{ loop.index0 }}" multiple style="width:150px;height:4.5rem;padding:0.2rem;border:1px solid var(--border);border-radius:4px;">
+                        {% for v in port.tagged_vlan_choices %}
+                        <option value="{{ v.id }}"{% if v.selected %} selected{% endif %}>{{ v.name }} ({{ v.id }})</option>
+                        {% endfor %}
+                    </select>
+                </td>
                 <td><input type="text" name="description.{{ loop.index0 }}" value="{{ port.description }}" style="width:140px;padding:0.2rem;border:1px solid var(--border);border-radius:4px;"></td>
                 <td><input type="checkbox" name="enabled.{{ loop.index0 }}" value="on"{% if port.enabled %} checked{% endif %}></td>
                 <td><input type="checkbox" name="poe_enabled.{{ loop.index0 }}" value="on"{% if port.poe_enabled %} checked{% endif %}></td>
@@ -75,8 +87,16 @@
     <strong>Add Port</strong>
     <div class="flex gap-1 items-center mt-1" style="flex-wrap:wrap;">
         <input type="text" name="port_id" placeholder="Port (e.g. 5)" required style="width:90px;padding:0.3rem;border:1px solid var(--border);border-radius:4px;">
-        <input type="number" name="vlan" value="1" min="1" max="4094" placeholder="VLAN" style="width:80px;padding:0.3rem;border:1px solid var(--border);border-radius:4px;">
-        <input type="text" name="tagged_vlans" placeholder="Tagged e.g. 10,20" style="width:130px;padding:0.3rem;border:1px solid var(--border);border-radius:4px;">
+        <select name="vlan" style="width:130px;padding:0.3rem;border:1px solid var(--border);border-radius:4px;">
+            {% for v in vlans %}
+            <option value="{{ v.id }}">{{ v.name }} ({{ v.id }})</option>
+            {% endfor %}
+        </select>
+        <select name="tagged_vlans" multiple style="width:150px;height:4.5rem;padding:0.3rem;border:1px solid var(--border);border-radius:4px;">
+            {% for v in vlans %}
+            <option value="{{ v.id }}">{{ v.name }} ({{ v.id }})</option>
+            {% endfor %}
+        </select>
         <input type="text" name="description" placeholder="Description" style="width:160px;padding:0.3rem;border:1px solid var(--border);border-radius:4px;">
         <label class="text-sm"><input type="checkbox" name="enabled" value="on" checked> Enabled</label>
         <label class="text-sm"><input type="checkbox" name="poe_enabled" value="on"> PoE</label>
