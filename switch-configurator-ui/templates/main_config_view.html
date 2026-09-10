@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+
+{% block title %}Main Config - Switch Configurator{% endblock %}
+
+{% block content %}
+<div class="flex justify-between items-center mb-1">
+    <div>
+        <h2>Main Config</h2>
+        <span class="text-sm text-muted">Read-only — carries switch identity fields; edit it at its source, not here.</span>
+    </div>
+    <a href="/" class="btn btn-outline">Back to Dashboard</a>
+</div>
+
+{% match error %}
+    {% when Some with (msg) %}
+    <div class="card" style="border-color:var(--danger);background:var(--danger-light);color:var(--danger);">
+        {{ msg }}
+    </div>
+    {% when None %}
+{% endmatch %}
+
+<div class="card">
+    <pre style="margin:0;white-space:pre-wrap;font-size:0.85rem;line-height:1.5;">{{ content }}</pre>
+</div>
+{% endblock %}

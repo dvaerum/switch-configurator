@@ -24,7 +24,12 @@
             <div class="text-sm mt-1 text-muted">
                 Config files:
                 {% for src in f.config_sources %}
-                <code>{{ src }}</code>{% if !loop.last %}, {% endif %}
+                {% if src.is_main %}
+                <a href="/main-config/view"><code>{{ src.path }}</code></a>
+                {% else %}
+                <code>{{ src.path }}</code>
+                {% endif %}
+                {% if !loop.last %}, {% endif %}
                 {% endfor %}
             </div>
             {% endif %}

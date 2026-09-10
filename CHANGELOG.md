@@ -9,9 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - **VLAN-by-name in the web UI** (`switch-configurator-ui` 0.2.0): the port editor's untagged VLAN field is now a dropdown of the switch's own VLAN names, and tagged VLANs is a proper multi-select, replacing the old numeric spinbutton and comma-separated text field. Saving now persists VLANs by name (`vlan: "users"`) rather than by numeric id whenever the switch has a name for that VLAN, reusing the existing `VlanRef` name-or-id serialization on the save-overlay path (`switch-configurator` 0.6.0).
+- **Resolve broken overlay configs from the web UI, not just view or delete them** (`switch-configurator` 0.7.0, `switch-configurator-ui` 0.3.0):
+  - The ambiguous-VLAN-name validation error now names which file each colliding id came from (e.g. `VLAN 10 (from switch-config.yaml) and VLAN 99 (from overlay.yaml)`), instead of just the two ids — `merge_single_switch` already tracked this during merge and previously discarded it.
+  - The main config is now viewable (read-only) from the dashboard, so the file the error names can actually be inspected — it remains impossible to edit or delete from the UI.
+  - A new `PUT /switches/:id/overlay/:filename` endpoint (and matching edit form) lets a broken overlay be corrected and re-validated directly in the browser — it reuses the exact same `validate_overlay_config` check `save_overlay` already runs, and never discards a rejected edit: the submitted text and the validation error are both returned so it can be fixed in place.
+  - The lines the validation error names are now highlighted in the overlay's displayed content, so the conflicting values are visually findable without reading the whole file.
 
 ### Fixed
 - **Main config file no longer offered for deletion on the dashboard** (`switch-configurator-ui`): the validation-failure banner read the main config's path from the wrong `/api/status` JSON key, so the filter meant to exclude it from the "View/Delete overlay" list silently never matched — every validation failure offered to delete the main config alongside genuine overlays. The main config now only appears informationally under "Config files."
+- **Overlay `View`/`Delete` always used the first configured folder, and ignored the switch id** (`switch-configurator`): `get_first_config_folder` picked whichever config folder was configured first regardless of where the requested file actually lived, and the switch id in the URL was unused — a same-named overlay for a different switch could be served or deleted by mistake. The lookup now searches every configured folder and confirms the file actually declares the requested switch's id.
 
 ## [0.5.0] - 2026-08-06
 

@@ -66,6 +66,47 @@ impl BackendClient {
         Ok(String::from_utf8_lossy(&body_bytes).to_string())
     }
 
+    /// PUT a raw text body (e.g. an edited YAML overlay) and return the
+    /// response status plus its parsed JSON body. Separate from
+    /// `request_with_status` because that helper always sends
+    /// `content-type: application/json` — this sends the raw text as-is.
+    pub async fn put_text(&self, path: &str, body: &str) -> Result<(u16, serde_json::Value)> {
+        use http_body_util::BodyExt;
+
+        let req = hyper::Request::builder()
+            .method("PUT")
+            .uri(path)
+            .header("host", "localhost")
+            .header("content-type", "text/yaml")
+            .body(http_body_util::Full::new(hyper::body::Bytes::from(body.to_string())))?;
+
+        let resp = match &self.transport {
+            BackendTransport::UnixSocket(socket_path) => {
+                let stream = tokio::net::UnixStream::connect(socket_path).await?;
+                let io = TokioIo::new(stream);
+                let (mut sender, conn) = hyper::client::conn::http1::handshake(io).await?;
+                tokio::spawn(async move { let _ = conn.await; });
+                sender.send_request(req).await?
+            }
+            BackendTransport::Tcp(url) => {
+                let parsed: hyper::Uri = url.parse()?;
+                let host = parsed.host().unwrap_or("localhost");
+                let port = parsed.port_u16().unwrap_or(4002);
+                let stream = tokio::net::TcpStream::connect(format!("{}:{}", host, port)).await?;
+                let io = TokioIo::new(stream);
+                let (mut sender, conn) = hyper::client::conn::http1::handshake(io).await?;
+                tokio::spawn(async move { let _ = conn.await; });
+                sender.send_request(req).await?
+            }
+        };
+
+        let status = resp.status().as_u16();
+        let body_bytes = resp.into_body().collect().await?.to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap_or(serde_json::Value::Null);
+
+        Ok((status, json))
+    }
+
     pub async fn sse_stream(&self, path: &str) -> Result<tokio::sync::mpsc::Receiver<SseEvent>> {
         use http_body_util::BodyExt;
 
