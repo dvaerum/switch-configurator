@@ -28,6 +28,47 @@ fn default_overlay_filename(
         .unwrap_or_else(|| format!("{}.yaml", switch_id))
 }
 
+/// Build the JSON body sent to `POST /switches/{id}/save-overlay`.
+///
+/// Identity fields (`model`, `management_ip`, `credentials`) are always
+/// included, unconditionally — unlike VLANs/ports, they have no per-field
+/// source tracking, but including them is safe either way: when the main
+/// config also defines them, main always wins the merge regardless (it's
+/// processed first), so restating them here is redundant but harmless; when
+/// the overlay is the *only* source for them (a switch whose identity lives
+/// entirely in a folder config, not the main config — a supported shape),
+/// omitting them would silently strip required fields from the file on
+/// every save. Found via live verification: saving a fix to
+/// `demo-broken-switch.yaml` (identity only in the overlay) dropped its
+/// `model`/`management_ip`/`credentials` because this payload never sent
+/// them, turning a fixed VLAN collision into a new "missing required
+/// fields" failure.
+fn build_save_body(
+    id: &str,
+    form: &SaveForm,
+    edited: &switch_configurator::models::SwitchConfig,
+    vlans: Vec<Vlan>,
+    ports: Vec<Port>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "filename": form.filename,
+        "merge_priority": form.priority,
+        "config": {
+            "switches": [{
+                "id": id,
+                "hostname": edited.hostname,
+                "model": edited.model,
+                "management_ip": edited.management_ip,
+                "credentials": edited.credentials,
+                "vlans": vlans,
+                "ports": ports,
+                "port_mirrors": edited.port_mirrors,
+                "snmp": edited.snmp,
+            }]
+        }
+    })
+}
+
 /// Rows attributed to the main config must never be written into an
 /// overlay — that's exactly the duplication that made two files drift out
 /// of sync in the first place. A row with no recorded source (an ordinary
@@ -103,20 +144,7 @@ pub async fn save_overlay(
         &main_config,
     );
 
-    let save_body = serde_json::json!({
-        "filename": form.filename,
-        "merge_priority": form.priority,
-        "config": {
-            "switches": [{
-                "id": id,
-                "hostname": draft.edited.hostname,
-                "vlans": vlans,
-                "ports": ports,
-                "port_mirrors": draft.edited.port_mirrors,
-                "snmp": draft.edited.snmp,
-            }]
-        }
-    });
+    let save_body = build_save_body(&id, &form, &draft.edited, vlans, ports);
 
     match state.backend.post(&format!("/switches/{}/save-overlay", id), &save_body).await {
         Ok((status, resp)) => {
@@ -156,6 +184,50 @@ mod tests {
 
     fn vlan(id: u16, name: &str) -> Vlan {
         Vlan { id, name: name.to_string(), description: None, ip_config: VlanIpConfig::None }
+    }
+
+    #[test]
+    fn test_build_save_body_includes_identity_fields() {
+        // Regression test: found via live verification on it-02634 — saving
+        // a fix to an overlay whose identity lives entirely in that overlay
+        // (no main config counterpart) silently stripped model/
+        // management_ip/credentials, turning a fixed VLAN collision into a
+        // new "missing required fields" failure.
+        use switch_configurator::models::{Credentials, ConnectionType, SwitchConfig, SwitchModel};
+
+        let edited = SwitchConfig {
+            id: "demo-broken-switch".to_string(),
+            hostname: Some("demo-broken-switch".to_string()),
+            model: Some(SwitchModel::Aruba2530_24G_POE),
+            management_ip: Some("203.0.113.1".to_string()),
+            credentials: Some(Credentials {
+                username: "demo".to_string(),
+                password: Some("demo".to_string()),
+                ssh_key_path: None,
+                port: 22,
+                connection_type: ConnectionType::Ssh,
+                serial_device: None,
+                baud_rate: 9600,
+                jump_hosts: None,
+                enable_secret: None,
+            }),
+            vlans: vec![],
+            ports: vec![],
+            port_mirrors: vec![],
+            snmp: None,
+            management_vlan: None,
+            validation: None,
+            vendor_specific: std::collections::HashMap::new(),
+            settings: Default::default(),
+        };
+        let form = SaveForm { filename: "demo-broken-switch.yaml".to_string(), priority: 200 };
+
+        let body = build_save_body("demo-broken-switch", &form, &edited, vec![], vec![]);
+
+        let switch = &body["config"]["switches"][0];
+        assert_eq!(switch["model"], "Aruba2530_24G_POE");
+        assert_eq!(switch["management_ip"], "203.0.113.1");
+        assert_eq!(switch["credentials"]["username"], "demo");
     }
 
     #[test]
