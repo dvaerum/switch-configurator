@@ -531,19 +531,33 @@ pub async fn save_overlay(
     ))
 }
 
+/// Read the main config file's raw YAML content. Read-only, deliberately —
+/// there is no matching delete/edit endpoint for this path. The main config
+/// carries a switch's identity fields (model, credentials, management_ip);
+/// unlike a folder overlay it isn't a disposable, per-switch addition, so it
+/// should always be inspectable but never edited or removed from here.
+pub async fn read_main_config(
+    State(store): State<ConfigStore>,
+) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    let config_file = store.status.get_config_paths().await
+        .map(|(config_file, _folders)| config_file)
+        .ok_or_else(|| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "No config file configured"}))))?;
+
+    let content = std::fs::read_to_string(&config_file).map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("Failed to read file: {}", e)})))
+    })?;
+
+    Ok(([(axum::http::header::CONTENT_TYPE, "text/yaml")], content))
+}
+
 /// Read an overlay config file's raw YAML content
 pub async fn read_overlay(
     State(store): State<ConfigStore>,
-    Path((_id, filename)): Path<(String, String)>,
+    Path((id, filename)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
     validate_overlay_filename(&filename)?;
 
-    let config_folder = get_first_config_folder(&store).await?;
-    let file_path = config_folder.join(&filename);
-
-    if !file_path.exists() {
-        return Err((StatusCode::NOT_FOUND, Json(json!({"error": format!("File '{}' not found", filename)}))));
-    }
+    let file_path = find_switch_overlay_file(&store, &id, &filename).await?;
 
     let content = std::fs::read_to_string(&file_path).map_err(|e| {
         (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("Failed to read file: {}", e)})))
@@ -552,19 +566,56 @@ pub async fn read_overlay(
     Ok(([(axum::http::header::CONTENT_TYPE, "text/yaml")], content))
 }
 
-/// Delete an overlay config file
-pub async fn delete_overlay(
+/// Overwrite an existing overlay config file with corrected content, so a
+/// switch that failed validation can be fixed from the web UI instead of
+/// only offering View (read-only) and Delete (discards everything the
+/// overlay owned).
+///
+/// Resolves via the same folder search + switch-id ownership check as
+/// `read_overlay`/`delete_overlay` — it can never create a new file, and it
+/// can never target the main config (which never lives in a searched
+/// folder). Runs the submitted content through the exact same
+/// `validate_overlay_config` check `save_overlay` already uses, so there is
+/// one definition of "valid overlay," not two that can drift apart. On
+/// failure, the file on disk is left untouched and the submitted content is
+/// never silently discarded — the caller gets both the error and its own
+/// text back to re-edit.
+pub async fn update_overlay(
     State(store): State<ConfigStore>,
-    Path((_id, filename)): Path<(String, String)>,
+    Path((id, filename)): Path<(String, String)>,
+    body: String,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
     validate_overlay_filename(&filename)?;
 
-    let config_folder = get_first_config_folder(&store).await?;
-    let file_path = config_folder.join(&filename);
+    let file_path = find_switch_overlay_file(&store, &id, &filename).await?;
 
-    if !file_path.exists() {
-        return Err((StatusCode::NOT_FOUND, Json(json!({"error": format!("File '{}' not found", filename)}))));
+    let mut parsed: crate::config::AppConfigFile = serde_yaml::from_str(&body).map_err(|e| {
+        (StatusCode::BAD_REQUEST, Json(json!({"error": format!("Invalid YAML: {}", e)})))
+    })?;
+
+    for switch in &mut parsed.config.switches {
+        if let Err(e) = crate::config::validate_overlay_config(switch) {
+            return Err((StatusCode::BAD_REQUEST, Json(json!({"error": format!("Validation failed: {}", e)}))));
+        }
     }
+
+    std::fs::write(&file_path, &body).map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("Failed to write file: {}", e)})))
+    })?;
+
+    info!("Updated overlay config: {}", file_path.display());
+
+    Ok(Json(json!({"status": "updated", "file": file_path.to_string_lossy()})))
+}
+
+/// Delete an overlay config file
+pub async fn delete_overlay(
+    State(store): State<ConfigStore>,
+    Path((id, filename)): Path<(String, String)>,
+) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    validate_overlay_filename(&filename)?;
+
+    let file_path = find_switch_overlay_file(&store, &id, &filename).await?;
 
     std::fs::remove_file(&file_path).map_err(|e| {
         (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("Failed to delete file: {}", e)})))
@@ -573,6 +624,47 @@ pub async fn delete_overlay(
     info!("Deleted overlay config: {}", file_path.display());
 
     Ok(Json(json!({"status": "deleted", "file": filename})))
+}
+
+/// Find which configured folder holds `filename`, and confirm it actually
+/// declares an overlay for `switch_id` — not just a same-named file for a
+/// different switch. Replaces the old get_first_config_folder-based lookup,
+/// which always used whichever folder came first regardless of where the
+/// file lived or which switch the URL named (both `read_overlay` and
+/// `delete_overlay` used to ignore the switch id entirely).
+async fn find_switch_overlay_file(
+    store: &ConfigStore,
+    switch_id: &str,
+    filename: &str,
+) -> Result<std::path::PathBuf, (StatusCode, Json<serde_json::Value>)> {
+    let folders = store.status.get_config_paths().await
+        .map(|(_, folders)| folders)
+        .ok_or_else(|| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "No config folder configured"}))))?;
+
+    for folder in &folders {
+        let path = folder.join(filename);
+        if !path.exists() {
+            continue;
+        }
+
+        let declares_switch = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|content| serde_yaml::from_str::<serde_yaml::Value>(&content).ok())
+            .and_then(|v| v.get("switches").and_then(|s| s.as_sequence().cloned()))
+            .map(|switches| {
+                switches.iter().any(|s| s.get("id").and_then(|i| i.as_str()) == Some(switch_id))
+            })
+            .unwrap_or(false);
+
+        if declares_switch {
+            return Ok(path);
+        }
+    }
+
+    Err((
+        StatusCode::NOT_FOUND,
+        Json(json!({"error": format!("File '{}' not found for switch '{}'", filename, switch_id)})),
+    ))
 }
 
 fn validate_overlay_filename(filename: &str) -> Result<(), (StatusCode, Json<serde_json::Value>)> {

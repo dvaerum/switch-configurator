@@ -498,6 +498,7 @@ fn merge_configs(configs: Vec<ConfigWithMetadata>) -> Result<(AppConfig, Vec<Swi
 
     let mut merged_switches = Vec::new();
     let mut all_conflicts = Vec::new();
+    let mut vlan_source_maps: HashMap<String, HashMap<u16, std::path::PathBuf>> = HashMap::new();
 
     for (switch_id, switch_configs) in switches_by_id {
         info!("Merging switch: {}", switch_id);
@@ -517,7 +518,8 @@ fn merge_configs(configs: Vec<ConfigWithMetadata>) -> Result<(AppConfig, Vec<Swi
 
         // Merge this switch's configs
         match merge_single_switch(switch_id.clone(), switch_configs) {
-            Ok(merged_switch) => {
+            Ok((merged_switch, vlan_sources)) => {
+                vlan_source_maps.insert(switch_id.clone(), vlan_sources);
                 merged_switches.push(merged_switch);
             }
             Err(e) => {
@@ -590,11 +592,35 @@ fn merge_configs(configs: Vec<ConfigWithMetadata>) -> Result<(AppConfig, Vec<Swi
             let sources: Vec<String> = merge_trackers.get(&switch.id)
                 .map(|t| t.source_files().into_iter().map(|p| p.to_string_lossy().to_string()).collect())
                 .unwrap_or_default();
-            tracing::warn!("Switch '{}' failed VLAN validation: {}", switch.id, e);
+
+            // If this is a name collision, name each id's source file — the
+            // plain "VLAN 10 and VLAN 99" message gives no way to know which
+            // file to actually go fix.
+            let error_message = match find_ambiguous_vlan_name(&switch.vlans) {
+                Some((name, id1, id2)) => {
+                    let vlan_sources = vlan_source_maps.get(&switch.id);
+                    let file_for = |id: u16| -> String {
+                        vlan_sources
+                            .and_then(|m| m.get(&id))
+                            .and_then(|p| p.file_name())
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_else(|| "an unknown file".to_string())
+                    };
+                    format!(
+                        "Switch '{}': VLAN name '{}' is ambiguous — VLAN {} (from {}) and VLAN {} (from {}). \
+                         VLAN names referenced by ports must be unique.",
+                        switch.hostname.as_ref().unwrap_or(&switch.id),
+                        name, id1, file_for(id1), id2, file_for(id2)
+                    )
+                }
+                None => e.to_string(),
+            };
+
+            tracing::warn!("Switch '{}' failed VLAN validation: {}", switch.id, error_message);
             failures.push(SwitchValidationFailure {
                 switch_id: switch.id.clone(),
                 hostname: switch.hostname.clone(),
-                error: e.to_string(),
+                error: error_message,
                 config_sources: sources,
             });
             continue;
@@ -750,10 +776,13 @@ fn validate_switch_identity(
 }
 
 /// Merge all configs for a single switch
+/// Merge one switch's configs. Also returns which source file each VLAN id
+/// came from, so a name collision across files can name both — the map is
+/// otherwise thrown away by the time validation runs.
 fn merge_single_switch(
     switch_id: String,
     mut configs: Vec<ConfigWithMetadata>,
-) -> Result<SwitchConfig> {
+) -> Result<(SwitchConfig, std::collections::HashMap<u16, std::path::PathBuf>)> {
     use std::collections::BTreeMap;
 
     // Sort by priority (lower number = higher priority)
@@ -796,10 +825,12 @@ fn merge_single_switch(
 
     // Merge VLANs using BTreeMap for priority tracking
     let mut vlans_by_id: BTreeMap<u16, (crate::models::Vlan, u16)> = BTreeMap::new();
+    let mut vlan_sources: std::collections::HashMap<u16, std::path::PathBuf> = std::collections::HashMap::new();
 
     for config in &configs {
         let switch = &config.config.switches[0];
         for vlan in &switch.vlans {
+            vlan_sources.entry(vlan.id).or_insert_with(|| config.source_file.clone());
             vlans_by_id
                 .entry(vlan.id)
                 .or_insert((vlan.clone(), config.merge_priority));
@@ -855,7 +886,7 @@ fn merge_single_switch(
 
     // Credentials already merged above as optional field
 
-    Ok(merged)
+    Ok((merged, vlan_sources))
 }
 
 /// Merge SNMP configurations with sub-component list replacement
@@ -1212,26 +1243,42 @@ fn validate_vlan_references_inner(switch: &mut SwitchConfig, strict: bool) -> Re
 ///
 /// After this runs, all `vlan_name` / `tagged_vlan_refs` fields are cleared and
 /// downstream code only ever sees numeric ids.
+/// Find the first VLAN name that's defined under two different ids, if any.
+/// Returns `(name, first_id_seen, colliding_id)`. Pulled out of
+/// `resolve_vlan_names` so a caller with cross-file context (the multi-source
+/// merge path) can re-run the same check to attribute each id to its source
+/// file in the failure message, without duplicating the detection logic.
+fn find_ambiguous_vlan_name(vlans: &[crate::models::Vlan]) -> Option<(String, u16, u16)> {
+    use std::collections::HashMap;
+
+    let mut name_to_id: HashMap<&str, u16> = HashMap::new();
+    for vlan in vlans {
+        if let Some(existing_id) = name_to_id.insert(vlan.name.as_str(), vlan.id) {
+            if existing_id != vlan.id {
+                return Some((vlan.name.clone(), existing_id, vlan.id));
+            }
+        }
+    }
+    None
+}
+
 pub fn resolve_vlan_names(switch: &mut SwitchConfig, strict: bool) -> Result<()> {
     use std::collections::HashMap;
     use tracing::warn;
 
-    // Build a case-sensitive name -> id map, detecting duplicate names.
-    let mut name_to_id: HashMap<&str, u16> = HashMap::new();
-    for vlan in &switch.vlans {
-        if let Some(existing_id) = name_to_id.insert(vlan.name.as_str(), vlan.id) {
-            if existing_id != vlan.id {
-                anyhow::bail!(
-                    "Switch '{}': VLAN name '{}' is ambiguous — it is defined for both VLAN {} and VLAN {}. \
-                     VLAN names referenced by ports must be unique.",
-                    switch.hostname.as_ref().unwrap_or(&switch.id),
-                    vlan.name,
-                    existing_id,
-                    vlan.id
-                );
-            }
-        }
+    if let Some((name, existing_id, id)) = find_ambiguous_vlan_name(&switch.vlans) {
+        anyhow::bail!(
+            "Switch '{}': VLAN name '{}' is ambiguous — it is defined for both VLAN {} and VLAN {}. \
+             VLAN names referenced by ports must be unique.",
+            switch.hostname.as_ref().unwrap_or(&switch.id),
+            name,
+            existing_id,
+            id
+        );
     }
+
+    // Build a case-sensitive name -> id map for port reference resolution below.
+    let name_to_id: HashMap<&str, u16> = switch.vlans.iter().map(|v| (v.name.as_str(), v.id)).collect();
 
     let hostname_owned = switch.hostname.clone().unwrap_or_else(|| switch.id.clone());
 
@@ -1637,6 +1684,19 @@ mod tests {
         let err = resolve_vlan_names(&mut sw, false).unwrap_err().to_string();
         assert!(err.contains("ambiguous"), "duplicate names should be ambiguous error: {}", err);
         assert!(err.contains("Users"));
+    }
+
+    #[test]
+    fn test_find_ambiguous_vlan_name_detects_collision() {
+        let vlans = vec![vlan(10, "Users"), vlan(20, "Servers"), vlan(99, "Users")];
+        let found = find_ambiguous_vlan_name(&vlans);
+        assert_eq!(found, Some(("Users".to_string(), 10, 99)));
+    }
+
+    #[test]
+    fn test_find_ambiguous_vlan_name_none_when_unique() {
+        let vlans = vec![vlan(10, "Users"), vlan(20, "Servers")];
+        assert_eq!(find_ambiguous_vlan_name(&vlans), None);
     }
 
     #[test]

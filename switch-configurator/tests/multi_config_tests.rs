@@ -463,6 +463,28 @@ mod multi_config_tests {
     }
 
     #[test]
+    fn test_ambiguous_vlan_name_across_files_names_both_sources() {
+        // Setup: main config defines VLAN 10 "users", a folder overlay defines
+        // VLAN 99 "users" for the same switch — same collision that caused the
+        // real IT-90297 incident. The failure error must name which file each
+        // id came from, not just the two ids, or there's no way to know which
+        // file to fix.
+        let main_config = fixtures_path("ambiguous-vlan-name/main.yaml");
+        let folder = fixtures_path("ambiguous-vlan-name/common");
+
+        let result = AppConfig::load_multi(&main_config, &[folder]);
+        assert!(result.is_ok(), "Load should succeed in graceful mode");
+
+        let (_config, failures) = result.unwrap();
+        assert_eq!(failures.len(), 1, "The colliding switch should be skipped with a failure");
+
+        let error = &failures[0].error;
+        assert!(error.contains("ambiguous"), "error should say ambiguous: {}", error);
+        assert!(error.contains("main.yaml"), "error should name the main config file: {}", error);
+        assert!(error.contains("overlay.yaml"), "error should name the overlay file: {}", error);
+    }
+
+    #[test]
     fn test_missing_vlans_in_all_configs_skips_switch() {
         // Setup: No config file provides VLANs for the switch (empty vlans: [])
         // Expected: Switch is skipped (graceful mode) and appears in failures

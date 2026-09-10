@@ -2836,7 +2836,7 @@ mod integration_tests {
 
         // Create a file to delete
         let file_path = config_dir.path().join("test-overlay.yaml");
-        std::fs::write(&file_path, "switches: []").unwrap();
+        std::fs::write(&file_path, "switches:\n  - id: test-sw-01\n").unwrap();
         assert!(file_path.exists());
 
         let app = crate::api::create_router(store);
@@ -2899,6 +2899,135 @@ mod integration_tests {
     }
 
     #[tokio::test]
+    async fn test_update_overlay_success_writes_corrected_content() {
+        let store = create_test_config_store();
+        let config_dir = tempfile::tempdir().unwrap();
+        store.status.set_config_metadata(crate::status::ConfigMetadata {
+            config_file: std::path::PathBuf::from("/tmp/main.yaml"),
+            config_folders: vec![config_dir.path().to_path_buf()],
+            last_loaded: chrono::Utc::now(),
+            switches_count: 1,
+        }).await;
+
+        let file_path = config_dir.path().join("broken.yaml");
+        std::fs::write(&file_path, "merge_priority: 200\nswitches:\n  - id: demo\n    vlans:\n      - id: 10\n        name: users\n      - id: 99\n        name: users\n").unwrap();
+
+        let corrected = "merge_priority: 200\nswitches:\n  - id: demo\n    vlans:\n      - id: 10\n        name: users\n";
+
+        let app = crate::api::create_router(store);
+        let request = Request::builder()
+            .method("PUT")
+            .uri("/switches/demo/overlay/broken.yaml")
+            .header("Content-Type", "text/yaml")
+            .body(Body::from(corrected))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "corrected content should save");
+
+        let saved = std::fs::read_to_string(&file_path).unwrap();
+        assert_eq!(saved, corrected, "file on disk should match the submitted content");
+    }
+
+    #[tokio::test]
+    async fn test_update_overlay_invalid_content_leaves_file_unchanged() {
+        let store = create_test_config_store();
+        let config_dir = tempfile::tempdir().unwrap();
+        store.status.set_config_metadata(crate::status::ConfigMetadata {
+            config_file: std::path::PathBuf::from("/tmp/main.yaml"),
+            config_folders: vec![config_dir.path().to_path_buf()],
+            last_loaded: chrono::Utc::now(),
+            switches_count: 1,
+        }).await;
+
+        let original = "merge_priority: 200\nswitches:\n  - id: demo\n    vlans:\n      - id: 10\n        name: users\n";
+        let file_path = config_dir.path().join("broken.yaml");
+        std::fs::write(&file_path, original).unwrap();
+
+        // Still invalid: duplicate VLAN id within this same file.
+        let still_broken = "merge_priority: 200\nswitches:\n  - id: demo\n    vlans:\n      - id: 10\n        name: users\n      - id: 10\n        name: other\n";
+
+        let app = crate::api::create_router(store);
+        let request = Request::builder()
+            .method("PUT")
+            .uri("/switches/demo/overlay/broken.yaml")
+            .header("Content-Type", "text/yaml")
+            .body(Body::from(still_broken))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "invalid content should be rejected");
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        assert!(text.contains("error"), "response should carry the validation error: {}", text);
+
+        let unchanged = std::fs::read_to_string(&file_path).unwrap();
+        assert_eq!(unchanged, original, "file on disk must not change when the save is rejected");
+    }
+
+    #[tokio::test]
+    async fn test_update_overlay_cannot_target_main_config() {
+        // The lookup only ever searches configured *folders*, never the main
+        // config's own directory (they're separate in every real deployment,
+        // e.g. a nix store path vs /etc/switch-configurator) — so an attempt
+        // to PUT over a file that only exists next to the main config simply
+        // finds nothing, regardless of filename or id.
+        let main_dir = tempfile::tempdir().unwrap();
+        let overlay_dir = tempfile::tempdir().unwrap();
+        let main_file = main_dir.path().join("main.yaml");
+        std::fs::write(&main_file, "merge_priority: 10\nswitches:\n  - id: demo\n").unwrap();
+
+        let store = create_test_config_store();
+        store.status.set_config_metadata(crate::status::ConfigMetadata {
+            config_file: main_file,
+            config_folders: vec![overlay_dir.path().to_path_buf()],
+            last_loaded: chrono::Utc::now(),
+            switches_count: 1,
+        }).await;
+
+        let app = crate::api::create_router(store);
+        let request = Request::builder()
+            .method("PUT")
+            .uri("/switches/demo/overlay/main.yaml")
+            .header("Content-Type", "text/yaml")
+            .body(Body::from("merge_priority: 10\nswitches:\n  - id: demo\n"))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_read_main_config_returns_content() {
+        let store = create_test_config_store();
+        let config_dir = tempfile::tempdir().unwrap();
+        let main_file = config_dir.path().join("main.yaml");
+        std::fs::write(&main_file, "merge_priority: 10\nswitches:\n  - id: sw-01\n").unwrap();
+
+        store.status.set_config_metadata(crate::status::ConfigMetadata {
+            config_file: main_file.clone(),
+            config_folders: vec![],
+            last_loaded: chrono::Utc::now(),
+            switches_count: 1,
+        }).await;
+
+        let app = crate::api::create_router(store);
+        let request = Request::builder()
+            .method("GET")
+            .uri("/config/main-file")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        assert!(text.contains("sw-01"), "should return the main config's own content, got: {}", text);
+    }
+
+    #[tokio::test]
     async fn test_read_overlay_success() {
         let store = create_test_config_store();
         let config_dir = tempfile::tempdir().unwrap();
@@ -2910,7 +3039,7 @@ mod integration_tests {
         }).await;
 
         let file_path = config_dir.path().join("test-overlay.yaml");
-        std::fs::write(&file_path, "switches:\n  - id: test\n").unwrap();
+        std::fs::write(&file_path, "switches:\n  - id: test-sw-01\n").unwrap();
 
         let app = crate::api::create_router(store);
 
@@ -2926,6 +3055,93 @@ mod integration_tests {
         let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let text = String::from_utf8(body.to_vec()).unwrap();
         assert!(text.contains("switches:"), "Should return YAML content");
+    }
+
+    #[tokio::test]
+    async fn test_read_overlay_searches_all_configured_folders() {
+        // Regression test: get_first_config_folder used to always look in the
+        // FIRST configured folder regardless of where the file actually lives.
+        // With two folders, a file that only exists in the second one must
+        // still be found.
+        let store = create_test_config_store();
+        let folder_a = tempfile::tempdir().unwrap();
+        let folder_b = tempfile::tempdir().unwrap();
+        store.status.set_config_metadata(crate::status::ConfigMetadata {
+            config_file: std::path::PathBuf::from("/tmp/main.yaml"),
+            config_folders: vec![folder_a.path().to_path_buf(), folder_b.path().to_path_buf()],
+            last_loaded: chrono::Utc::now(),
+            switches_count: 1,
+        }).await;
+
+        // Only folder_b has this file.
+        std::fs::write(folder_b.path().join("second-folder.yaml"), "switches:\n  - id: sw-b\n").unwrap();
+
+        let app = crate::api::create_router(store);
+        let request = Request::builder()
+            .method("GET")
+            .uri("/switches/sw-b/overlay/second-folder.yaml")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "should find the file in the second folder, not just the first");
+    }
+
+    #[tokio::test]
+    async fn test_read_overlay_rejects_mismatched_switch_id() {
+        // Two different switches each have an overlay file with the SAME
+        // filename in different folders. Requesting one switch's id must
+        // never return the other switch's file just because the filename
+        // matches somewhere.
+        let store = create_test_config_store();
+        let folder_a = tempfile::tempdir().unwrap();
+        let folder_b = tempfile::tempdir().unwrap();
+        store.status.set_config_metadata(crate::status::ConfigMetadata {
+            config_file: std::path::PathBuf::from("/tmp/main.yaml"),
+            config_folders: vec![folder_a.path().to_path_buf(), folder_b.path().to_path_buf()],
+            last_loaded: chrono::Utc::now(),
+            switches_count: 2,
+        }).await;
+
+        std::fs::write(folder_a.path().join("overlay.yaml"), "switches:\n  - id: sw-a\n").unwrap();
+        std::fs::write(folder_b.path().join("overlay.yaml"), "switches:\n  - id: sw-b\n").unwrap();
+
+        let app = crate::api::create_router(store);
+
+        // Asking for sw-a's overlay.yaml must return sw-a's content, from folder_a.
+        let request = Request::builder()
+            .method("GET")
+            .uri("/switches/sw-a/overlay/overlay.yaml")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        assert!(text.contains("sw-a"), "should return sw-a's own file, got: {}", text);
+    }
+
+    #[tokio::test]
+    async fn test_read_overlay_unknown_switch_id_is_not_found() {
+        let store = create_test_config_store();
+        let folder = tempfile::tempdir().unwrap();
+        store.status.set_config_metadata(crate::status::ConfigMetadata {
+            config_file: std::path::PathBuf::from("/tmp/main.yaml"),
+            config_folders: vec![folder.path().to_path_buf()],
+            last_loaded: chrono::Utc::now(),
+            switches_count: 1,
+        }).await;
+
+        std::fs::write(folder.path().join("overlay.yaml"), "switches:\n  - id: sw-a\n").unwrap();
+
+        let app = crate::api::create_router(store);
+        let request = Request::builder()
+            .method("GET")
+            .uri("/switches/sw-does-not-own-this/overlay/overlay.yaml")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

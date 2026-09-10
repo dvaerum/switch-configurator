@@ -1,0 +1,6 @@
+switches:
+  - id: test-sw-01
+    vlans:
+      - id: 99
+        name: users
+    ports: []
