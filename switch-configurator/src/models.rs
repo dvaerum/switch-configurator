@@ -117,7 +117,7 @@ impl SwitchModel {
             Self::Aruba2540_24G => 28,
             Self::Aruba2540_48G_4SFP => 52,
             Self::Aruba2930F => 52, // Max config
-            Self::Fortiswitch124F_FPOE => 26,
+            Self::Fortiswitch124F_FPOE => 28,
             Self::CiscoCatalyst9300_24P_UPOE => 24,
         }
     }
@@ -221,11 +221,11 @@ impl SwitchModel {
 
             // FortiSwitch 124F-FPOE
             // - Ports 1-24: 1G copper with PoE+ (30W)
-            // - Port 25-26: 10G SFP+ uplinks (needs verification)
+            // - Ports 25-28: 10G SFP+ uplinks (confirmed on real hardware)
             Self::Fortiswitch124F_FPOE => {
                 if port_num >= 1 && port_num <= 24 {
                     Some(PortCapabilities::poe_plus_1g_copper(port_num))
-                } else if port_num >= 25 && port_num <= 26 {
+                } else if port_num >= 25 && port_num <= 28 {
                     Some(PortCapabilities::sfp_plus_10g_uplink(port_num))
                 } else {
                     None
@@ -1891,10 +1891,18 @@ mod tests {
         assert!(model.port_capabilities("1").unwrap().supports_poe());
         assert!(model.port_capabilities("24").unwrap().supports_poe());
 
-        // SFP+ uplinks (25-26)
+        // SFP+ uplinks (25-28) — 4 uplink ports, not 2; port 28 is the last
+        // port on real hardware (28 ports total, not 26).
         let port25 = model.port_capabilities("25").unwrap();
         assert_eq!(port25.port_type, PortType::SfpPlus);
         assert!(port25.is_uplink);
+
+        let port28 = model.port_capabilities("28").unwrap();
+        assert_eq!(port28.port_type, PortType::SfpPlus);
+        assert!(port28.is_uplink);
+        assert!(!port28.supports_poe());
+
+        assert!(model.port_capabilities("29").is_none(), "only 28 ports exist");
     }
 
     #[test]
@@ -1905,7 +1913,7 @@ mod tests {
         assert_eq!(SwitchModel::Aruba2540_24G.total_ports(), 28);
         assert_eq!(SwitchModel::Aruba2540_48G_4SFP.total_ports(), 52);
         assert_eq!(SwitchModel::Aruba2930F.total_ports(), 52);
-        assert_eq!(SwitchModel::Fortiswitch124F_FPOE.total_ports(), 26);
+        assert_eq!(SwitchModel::Fortiswitch124F_FPOE.total_ports(), 28);
         assert_eq!(SwitchModel::CiscoCatalyst9300_24P_UPOE.total_ports(), 24);
     }
 
