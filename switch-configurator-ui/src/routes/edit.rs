@@ -182,11 +182,42 @@ pub async fn remove_vlan(
 pub struct EditablePort {
     pub port_id: String,
     pub vlan: u16,
-    pub tagged_vlans: String,
+    pub tagged_vlan_choices: Vec<TaggedVlanChoice>,
     pub description: String,
     pub enabled: bool,
     pub poe_enabled: bool,
     pub speed_duplex: String,
+}
+
+/// A VLAN as offered to the untagged VLAN picker — named by id, so the UI
+/// selects (and, on save, persists) VLANs by name rather than a hand-typed
+/// numeric id.
+#[derive(Debug, Clone)]
+pub struct VlanOption {
+    pub id: u16,
+    pub name: String,
+}
+
+/// A VLAN as offered to one port's tagged-VLAN multi-select, with whether
+/// it's currently selected precomputed — Askama 0.12 has no `contains`/`in`
+/// expression, so membership is resolved here rather than in the template.
+#[derive(Debug, Clone)]
+pub struct TaggedVlanChoice {
+    pub id: u16,
+    pub name: String,
+    pub selected: bool,
+}
+
+fn vlan_options(vlans: &[Vlan]) -> Vec<VlanOption> {
+    vlans.iter().map(|v| VlanOption { id: v.id, name: v.name.clone() }).collect()
+}
+
+fn tagged_vlan_choices(vlans: &[VlanOption], tagged: &[u16]) -> Vec<TaggedVlanChoice> {
+    vlans.iter().map(|v| TaggedVlanChoice {
+        id: v.id,
+        name: v.name.clone(),
+        selected: tagged.contains(&v.id),
+    }).collect()
 }
 
 #[derive(Template)]
@@ -195,6 +226,7 @@ struct EditPortsTemplate {
     switch_id: String,
     hostname: String,
     ports: Vec<EditablePort>,
+    vlans: Vec<VlanOption>,
 }
 
 pub async fn edit_ports(
@@ -206,13 +238,15 @@ pub async fn edit_ports(
         None => return Redirect::to(&format!("/switch/{}", id)).into_response(),
     };
 
-    let mut ports: Vec<EditablePort> = draft.edited.ports.iter().map(|p| port_to_editable(p)).collect();
+    let vlans = vlan_options(&draft.edited.vlans);
+    let mut ports: Vec<EditablePort> = draft.edited.ports.iter().map(|p| port_to_editable(p, &vlans)).collect();
     ports.sort_by(|a, b| natural_sort(&a.port_id, &b.port_id));
 
     EditPortsTemplate {
         switch_id: id,
         hostname: draft.edited.hostname.clone().unwrap_or_default(),
         ports,
+        vlans,
     }.into_response()
 }
 
@@ -221,7 +255,7 @@ pub struct PortForm {
     pub port_id: String,
     pub vlan: u16,
     #[serde(default)]
-    pub tagged_vlans: String,
+    pub tagged_vlans: Vec<u16>,
     #[serde(default)]
     pub description: String,
     #[serde(default)]
@@ -615,14 +649,8 @@ fn parse_port_mode(s: &str) -> PortMode {
     }
 }
 
-fn parse_tagged_vlans(s: &str) -> Vec<u16> {
-    s.split(',')
-        .filter_map(|v| v.trim().parse::<u16>().ok())
-        .collect()
-}
-
 fn form_to_port(form: &PortForm) -> Port {
-    let tagged = parse_tagged_vlans(&form.tagged_vlans);
+    let tagged = form.tagged_vlans.clone();
     Port {
         port_id: form.port_id.clone(),
         mode: if tagged.is_empty() { PortMode::Access } else { PortMode::Trunk },
@@ -646,24 +674,29 @@ fn form_to_port(form: &PortForm) -> Port {
 fn parse_ports_bulk(pairs: Vec<(String, String)>, existing: &[Port]) -> Vec<Port> {
     use std::collections::{BTreeMap, HashMap};
 
-    let mut rows: BTreeMap<usize, HashMap<String, String>> = BTreeMap::new();
+    // A multi-select submits its field key once per selected option (e.g. two
+    // `tagged_vlans.0` pairs for two selected VLANs), so each row collects a
+    // Vec of values per field rather than overwriting on repeat.
+    let mut rows: BTreeMap<usize, HashMap<String, Vec<String>>> = BTreeMap::new();
     for (key, val) in pairs {
         if let Some((field, idx)) = key.rsplit_once('.') {
             if let Ok(i) = idx.parse::<usize>() {
-                rows.entry(i).or_default().insert(field.to_string(), val);
+                rows.entry(i).or_default().entry(field.to_string()).or_default().push(val);
             }
         }
     }
 
     let mut ports = Vec::new();
     for fields in rows.into_values() {
-        let port_id = match fields.get("port_id") {
+        let port_id = match fields.get("port_id").and_then(|v| v.last()) {
             Some(p) if !p.trim().is_empty() => p.clone(),
             _ => continue,
         };
-        let tagged = parse_tagged_vlans(fields.get("tagged_vlans").map(String::as_str).unwrap_or(""));
-        let vlan = fields.get("vlan").and_then(|s| s.parse::<u16>().ok()).unwrap_or(1);
-        let description = fields.get("description").cloned().unwrap_or_default();
+        let tagged: Vec<u16> = fields.get("tagged_vlans")
+            .map(|vs| vs.iter().filter_map(|v| v.parse::<u16>().ok()).collect())
+            .unwrap_or_default();
+        let vlan = fields.get("vlan").and_then(|v| v.last()).and_then(|s| s.parse::<u16>().ok()).unwrap_or(1);
+        let description = fields.get("description").and_then(|v| v.last()).cloned().unwrap_or_default();
         let mac_notify = existing
             .iter()
             .find(|p| p.port_id == port_id)
@@ -679,7 +712,7 @@ fn parse_ports_bulk(pairs: Vec<(String, String)>, existing: &[Port]) -> Vec<Port
             enabled: fields.contains_key("enabled"),
             poe_enabled: fields.contains_key("poe_enabled"),
             mac_notify,
-            speed_duplex: parse_speed_duplex(fields.get("speed_duplex").map(String::as_str).unwrap_or("auto")),
+            speed_duplex: parse_speed_duplex(fields.get("speed_duplex").and_then(|v| v.last()).map(String::as_str).unwrap_or("auto")),
             vlan_name: None,
             tagged_vlan_refs: vec![],
         });
@@ -702,11 +735,11 @@ fn form_to_mirror(form: &MirrorForm) -> PortMirror {
     }
 }
 
-fn port_to_editable(p: &Port) -> EditablePort {
+fn port_to_editable(p: &Port, vlans: &[VlanOption]) -> EditablePort {
     EditablePort {
         port_id: p.port_id.clone(),
         vlan: p.vlan,
-        tagged_vlans: p.tagged_vlans.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(","),
+        tagged_vlan_choices: tagged_vlan_choices(vlans, &p.tagged_vlans),
         description: p.description.clone().unwrap_or_default(),
         enabled: p.enabled,
         poe_enabled: p.poe_enabled,
@@ -813,7 +846,10 @@ mod tests {
         let pairs = vec![
             pair("port_id.0", "10"),
             pair("vlan.0", "5"),
-            pair("tagged_vlans.0", "20,30"),
+            // A multi-select submits the same key once per selected option,
+            // not a comma-joined string.
+            pair("tagged_vlans.0", "20"),
+            pair("tagged_vlans.0", "30"),
             pair("enabled.0", "on"),
             pair("speed_duplex.0", "1000-full"),
             pair("port_id.1", "2"),
@@ -831,5 +867,51 @@ mod tests {
         assert_eq!(p10.speed_duplex, SpeedDuplex::ThousandFull);
         // port 2 had no enabled checkbox -> disabled
         assert!(!ports[0].enabled);
+    }
+
+    #[test]
+    fn test_parse_ports_bulk_no_tagged_vlans_selected() {
+        // Nothing selected in the multi-select means the key is entirely
+        // absent from the submission (same as an unchecked checkbox).
+        let pairs = vec![
+            pair("port_id.0", "1"),
+            pair("vlan.0", "10"),
+            pair("enabled.0", "on"),
+            pair("speed_duplex.0", "auto"),
+        ];
+        let ports = parse_ports_bulk(pairs, &[]);
+        assert!(ports[0].tagged_vlans.is_empty());
+        assert_eq!(ports[0].mode, PortMode::Access);
+    }
+
+    #[test]
+    fn test_form_to_port_uses_vec_tagged_vlans_directly() {
+        // PortForm.tagged_vlans is already Vec<u16> (bound from a multi-select),
+        // so form_to_port shouldn't need any string parsing for it.
+        let form = PortForm {
+            port_id: "5".to_string(),
+            vlan: 10,
+            tagged_vlans: vec![20, 30],
+            description: "test".to_string(),
+            enabled: Some("on".to_string()),
+            poe_enabled: None,
+            speed_duplex: "auto".to_string(),
+        };
+        let port = form_to_port(&form);
+        assert_eq!(port.vlan, 10);
+        assert_eq!(port.tagged_vlans, vec![20, 30]);
+        assert_eq!(port.mode, PortMode::Trunk);
+    }
+
+    #[test]
+    fn test_vlan_options_from_switch_vlans() {
+        let vlans = vec![
+            Vlan { id: 10, name: "users".to_string(), description: None, ip_config: VlanIpConfig::None },
+            Vlan { id: 20, name: "servers".to_string(), description: None, ip_config: VlanIpConfig::None },
+        ];
+        let options = vlan_options(&vlans);
+        assert_eq!(options.len(), 2);
+        assert_eq!(options[0].id, 10);
+        assert_eq!(options[0].name, "users");
     }
 }

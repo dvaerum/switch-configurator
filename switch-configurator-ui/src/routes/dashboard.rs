@@ -46,18 +46,20 @@ pub async fn index(State(state): State<AppState>) -> impl IntoResponse {
 async fn fetch_dashboard_data(state: &AppState) -> (Vec<SwitchCard>, Vec<ValidationFailureView>) {
     let switches = fetch_switch_cards(state).await;
 
-    let status_json = match state.backend.get("/api/status").await {
-        Ok(json) => Some(json),
-        Err(_) => None,
-    };
+    let status_json = state.backend.get("/api/status").await.ok();
+    let failures = status_json.as_ref().map(build_validation_failures).unwrap_or_default();
 
-    let main_config = status_json.as_ref()
-        .and_then(|s| s["config"]["config_file"].as_str())
-        .unwrap_or("")
-        .to_string();
+    (switches, failures)
+}
 
-    let failures = status_json.as_ref()
-        .and_then(|s| s["validation_failures"].as_array())
+/// Turn `/api/status`'s raw JSON into per-switch validation-failure views,
+/// splitting each failure's `config_sources` into the main config (never
+/// offered for view/delete here — deleting it removes the switch's identity
+/// fields entirely, not just an overlay) and genuine overlay files.
+fn build_validation_failures(status_json: &serde_json::Value) -> Vec<ValidationFailureView> {
+    let main_config = status_json["configuration"]["config_file"].as_str().unwrap_or("").to_string();
+
+    status_json["validation_failures"].as_array()
         .map(|arr| arr.iter().map(|f| {
             let config_sources: Vec<String> = f["config_sources"].as_array()
                 .map(|a| a.iter().filter_map(|s| s.as_str().map(|s| s.to_string())).collect())
@@ -84,9 +86,43 @@ async fn fetch_dashboard_data(state: &AppState) -> (Vec<SwitchCard>, Vec<Validat
                 overlay_files,
             }
         }).collect())
-        .unwrap_or_default();
+        .unwrap_or_default()
+}
 
-    (switches, failures)
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_build_validation_failures_excludes_main_config_from_overlay_files() {
+        // Regression test for a bug found while investigating a live incident:
+        // the main config file was showing up alongside genuine overlays with
+        // View/Delete buttons, because this function read config_file from
+        // the wrong JSON path and the exclusion filter silently never matched.
+        let status_json = serde_json::json!({
+            "configuration": {
+                "config_file": "/etc/main.yaml"
+            },
+            "validation_failures": [{
+                "switch_id": "IT-90297",
+                "hostname": "IT-90297",
+                "error": "ambiguous VLAN name",
+                "config_sources": ["/etc/main.yaml", "/etc/switch-configurator/overlay.yaml"]
+            }]
+        });
+
+        let failures = build_validation_failures(&status_json);
+        assert_eq!(failures.len(), 1);
+
+        let overlay_filenames: Vec<&str> = failures[0].overlay_files.iter()
+            .map(|f| f.filename.as_str())
+            .collect();
+
+        assert_eq!(
+            overlay_filenames, vec!["overlay.yaml"],
+            "main config should never be offered as a deletable overlay file"
+        );
+    }
 }
 
 async fn fetch_switch_cards(state: &AppState) -> Vec<SwitchCard> {

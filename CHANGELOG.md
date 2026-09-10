@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **VLAN-by-name in the web UI** (`switch-configurator-ui` 0.2.0): the port editor's untagged VLAN field is now a dropdown of the switch's own VLAN names, and tagged VLANs is a proper multi-select, replacing the old numeric spinbutton and comma-separated text field. Saving now persists VLANs by name (`vlan: "users"`) rather than by numeric id whenever the switch has a name for that VLAN, reusing the existing `VlanRef` name-or-id serialization on the save-overlay path (`switch-configurator` 0.6.0).
+
+### Fixed
+- **Main config file no longer offered for deletion on the dashboard** (`switch-configurator-ui`): the validation-failure banner read the main config's path from the wrong `/api/status` JSON key, so the filter meant to exclude it from the "View/Delete overlay" list silently never matched — every validation failure offered to delete the main config alongside genuine overlays. The main config now only appears informationally under "Config files."
+
 ## [0.5.0] - 2026-08-06
 
 ### Added

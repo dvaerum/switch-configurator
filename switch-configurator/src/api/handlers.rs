@@ -494,10 +494,16 @@ pub async fn save_overlay(
     let config_folder = get_first_config_folder(&store).await?;
 
     // Build the YAML content with merge_priority at the top
+    let yaml_value = prefer_vlan_names_in_yaml(&body.config).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("Failed to serialize config: {}", e)})),
+        )
+    })?;
     let yaml_content = format!(
         "merge_priority: {}\n\n{}",
         body.merge_priority,
-        serde_yaml::to_string(&body.config).map_err(|e| {
+        serde_yaml::to_string(&yaml_value).map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": format!("Failed to serialize config: {}", e)})),
@@ -577,6 +583,61 @@ fn validate_overlay_filename(filename: &str) -> Result<(), (StatusCode, Json<ser
         return Err((StatusCode::BAD_REQUEST, Json(json!({"error": "Filename must end with .yaml or .yml"}))));
     }
     Ok(())
+}
+
+/// Rewrite a port's `vlan`/`tagged_vlans` numeric ids as VLAN names, using
+/// that same switch's own `vlans` list, wherever a name is available.
+///
+/// Written as a post-pass over the generic YAML value tree (rather than a
+/// parallel set of serializable structs) so it doesn't need to track every
+/// other field on `SwitchConfig`/`Port` — only `vlans` and `ports` are
+/// touched, everything else round-trips through `serde_yaml` unchanged.
+fn prefer_vlan_names_in_yaml(config: &AppConfig) -> Result<serde_yaml::Value, serde_yaml::Error> {
+    let mut value = serde_yaml::to_value(config)?;
+
+    if let Some(switches) = value.get_mut("switches").and_then(|s| s.as_sequence_mut()) {
+        for switch in switches {
+            let names: std::collections::HashMap<u64, String> = switch
+                .get("vlans")
+                .and_then(|v| v.as_sequence())
+                .map(|vlans| {
+                    vlans
+                        .iter()
+                        .filter_map(|v| {
+                            let id = v.get("id")?.as_u64()?;
+                            let name = v.get("name")?.as_str()?.to_string();
+                            Some((id, name))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            if names.is_empty() {
+                continue;
+            }
+
+            if let Some(ports) = switch.get_mut("ports").and_then(|p| p.as_sequence_mut()) {
+                for port in ports {
+                    if let Some(vlan) = port.get("vlan").and_then(|v| v.as_u64()) {
+                        if let Some(name) = names.get(&vlan) {
+                            port["vlan"] = serde_yaml::Value::String(name.clone());
+                        }
+                    }
+                    if let Some(tagged) = port.get_mut("tagged_vlans").and_then(|t| t.as_sequence_mut()) {
+                        for entry in tagged {
+                            if let Some(id) = entry.as_u64() {
+                                if let Some(name) = names.get(&id) {
+                                    *entry = serde_yaml::Value::String(name.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(value)
 }
 
 async fn get_first_config_folder(store: &ConfigStore) -> Result<std::path::PathBuf, (StatusCode, Json<serde_json::Value>)> {
