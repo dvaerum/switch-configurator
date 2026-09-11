@@ -20,6 +20,15 @@
     </div>
 </div>
 
+{% match error %}
+{% when Some with (msg) %}
+<div style="background:var(--danger-light);color:var(--danger);padding:0.75rem;border-radius:var(--radius);margin-bottom:0.75rem;font-size:0.85rem;">
+    <strong>Can't remove VLAN:</strong> {{ msg }}
+    <a href="/switch/{{ switch_id }}/edit/ports">Go to Ports tab</a>
+</div>
+{% when None %}
+{% endmatch %}
+
 <div class="card">
     <table>
         <thead>
