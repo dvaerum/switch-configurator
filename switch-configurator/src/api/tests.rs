@@ -2804,6 +2804,58 @@ mod integration_tests {
     }
 
     #[tokio::test]
+    async fn test_config_sources_excludes_files_for_other_switches() {
+        // Regression: config_sources used to list every .yaml/.yml file in
+        // every config folder regardless of whether it actually declared
+        // this switch — a folder holding overlays for multiple switches
+        // would leak unrelated files into this switch's source list (and,
+        // once Config Sources gained a Delete action, would have let one
+        // switch's page delete a file that belongs to a different switch).
+        let store = create_test_config_store();
+        let config_dir = tempfile::tempdir().unwrap();
+        store.status.set_config_metadata(crate::status::ConfigMetadata {
+            config_file: std::path::PathBuf::from("/tmp/main.yaml"),
+            config_folders: vec![config_dir.path().to_path_buf()],
+            last_loaded: chrono::Utc::now(),
+            switches_count: 1,
+        }).await;
+
+        std::fs::write(
+            config_dir.path().join("test-sw-01-overlay.yaml"),
+            "switches:\n  - id: test-sw-01\n",
+        ).unwrap();
+        std::fs::write(
+            config_dir.path().join("other-switch-overlay.yaml"),
+            "switches:\n  - id: some-other-switch\n",
+        ).unwrap();
+
+        let app = crate::api::create_router(store);
+
+        let request = Request::builder()
+            .method("GET")
+            .uri("/switches/test-sw-01/config-sources")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let sources = json["sources"].as_array().unwrap();
+
+        let files: Vec<&str> = sources.iter().map(|s| s["file"].as_str().unwrap()).collect();
+        assert!(
+            files.iter().any(|f| f.contains("test-sw-01-overlay.yaml")),
+            "should list the file that declares this switch: {:?}", files
+        );
+        assert!(
+            !files.iter().any(|f| f.contains("other-switch-overlay.yaml")),
+            "must not list a file that declares a different switch: {:?}", files
+        );
+    }
+
+    #[tokio::test]
     async fn test_preview_diff_switch_not_found() {
         let store = create_test_config_store();
         let app = crate::api::create_router(store);
