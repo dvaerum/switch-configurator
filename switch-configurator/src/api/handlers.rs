@@ -600,6 +600,21 @@ pub async fn delete_overlay(
 /// which always used whichever folder came first regardless of where the
 /// file lived or which switch the URL named (both `read_overlay` and
 /// `delete_overlay` used to ignore the switch id entirely).
+/// Whether a YAML config file's `switches:` list declares a switch with
+/// this id. Used to scope any per-switch file lookup or listing (overlay
+/// View/Delete, Config Sources) to files that actually contribute to this
+/// switch, not just any file that happens to sit in the same folder.
+fn file_declares_switch(path: &std::path::Path, switch_id: &str) -> bool {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|content| serde_yaml::from_str::<serde_yaml::Value>(&content).ok())
+        .and_then(|v| v.get("switches").and_then(|s| s.as_sequence().cloned()))
+        .map(|switches| {
+            switches.iter().any(|s| s.get("id").and_then(|i| i.as_str()) == Some(switch_id))
+        })
+        .unwrap_or(false)
+}
+
 async fn find_switch_overlay_file(
     store: &ConfigStore,
     switch_id: &str,
@@ -611,20 +626,7 @@ async fn find_switch_overlay_file(
 
     for folder in &folders {
         let path = folder.join(filename);
-        if !path.exists() {
-            continue;
-        }
-
-        let declares_switch = std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|content| serde_yaml::from_str::<serde_yaml::Value>(&content).ok())
-            .and_then(|v| v.get("switches").and_then(|s| s.as_sequence().cloned()))
-            .map(|switches| {
-                switches.iter().any(|s| s.get("id").and_then(|i| i.as_str()) == Some(switch_id))
-            })
-            .unwrap_or(false);
-
-        if declares_switch {
+        if path.exists() && file_declares_switch(&path, switch_id) {
             return Ok(path);
         }
     }
@@ -740,12 +742,16 @@ pub async fn config_sources(
             "source_type": "main",
         }));
 
-        // Scan config folders for overlay files
+        // Scan config folders for overlay files that actually declare this
+        // switch — a folder can hold files for other switches too, which
+        // must not be listed (or later offered for deletion) here.
         for folder in &folders {
             if let Ok(entries) = std::fs::read_dir(folder) {
                 for entry in entries.flatten() {
                     let path = entry.path();
-                    if path.extension().map_or(false, |ext| ext == "yaml" || ext == "yml") {
+                    if path.extension().map_or(false, |ext| ext == "yaml" || ext == "yml")
+                        && file_declares_switch(&path, &id)
+                    {
                         // Try to read the merge_priority from the file
                         let priority = std::fs::read_to_string(&path)
                             .ok()

@@ -5,6 +5,7 @@
                 <th>Priority</th>
                 <th>File</th>
                 <th>Type</th>
+                <th style="width:220px;">Actions</th>
             </tr>
         </thead>
         <tbody>
@@ -12,11 +13,25 @@
             <tr>
                 <td>{{ source.priority }}</td>
                 <td><code>{{ source.file }}</code></td>
-                <td><span class="badge {% if source.source_type == "main" %}badge-info{% else %}badge-success{% endif %}">{{ source.source_type }}</span></td>
+                <td><span class="badge {% if source.is_main %}badge-info{% else %}badge-success{% endif %}">{{ source.source_type }}</span></td>
+                <td class="flex gap-1">
+                    {% if source.is_main %}
+                    <a href="/main-config/view" class="btn btn-outline text-sm">View</a>
+                    {% else %}
+                    <form method="POST" action="/draft/{{ switch.id }}/start" style="display:inline;">
+                        <button type="submit" class="btn btn-primary text-sm">Edit</button>
+                    </form>
+                    <a href="/overlay/{{ switch.id }}/{{ source.filename }}/view" class="btn btn-outline text-sm">View</a>
+                    <form method="POST" action="/overlay/{{ switch.id }}/{{ source.filename }}/delete" style="display:inline;"
+                          onsubmit="return confirm('Delete {{ source.filename }}?')">
+                        <button type="submit" class="btn text-sm" style="background:var(--danger);color:white;">Delete</button>
+                    </form>
+                    {% endif %}
+                </td>
             </tr>
             {% endfor %}
             {% if sources.is_empty() %}
-            <tr><td colspan="3" class="text-muted" style="text-align:center;">No config source information available</td></tr>
+            <tr><td colspan="4" class="text-muted" style="text-align:center;">No config source information available</td></tr>
             {% endif %}
         </tbody>
     </table>

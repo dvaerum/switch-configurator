@@ -66,8 +66,12 @@ pub struct SwitchView {
 #[derive(Debug, Clone)]
 pub struct ConfigSourceView {
     pub file: String,
+    /// Just the file's basename — what the View/Delete overlay routes
+    /// (`/overlay/{id}/{filename}/...`) actually key on.
+    pub filename: String,
     pub priority: u64,
     pub source_type: String,
+    pub is_main: bool,
 }
 
 #[derive(Template)]
@@ -276,6 +280,25 @@ fn parse_switch_view(id: &str, json: &serde_json::Value) -> SwitchView {
     }
 }
 
+/// Build one Config Sources row from the backend's raw fields. `filename`
+/// (the basename) is what the existing overlay View/Delete routes
+/// (`/overlay/{id}/{filename}/...`) key on — they take a bare filename, not
+/// a full path.
+fn build_config_source_view(file: &str, priority: u64, source_type: &str) -> ConfigSourceView {
+    let filename = std::path::Path::new(file)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| file.to_string());
+
+    ConfigSourceView {
+        file: file.to_string(),
+        filename,
+        priority,
+        source_type: source_type.to_string(),
+        is_main: source_type == "main",
+    }
+}
+
 async fn fetch_config_sources(state: &AppState, id: &str) -> Vec<ConfigSourceView> {
     match state.backend.get(&format!("/switches/{}/config-sources", id)).await {
         Ok(json) => {
@@ -283,11 +306,11 @@ async fn fetch_config_sources(state: &AppState, id: &str) -> Vec<ConfigSourceVie
                 .as_array()
                 .map(|arr| {
                     arr.iter()
-                        .map(|s| ConfigSourceView {
-                            file: s["file"].as_str().unwrap_or("").to_string(),
-                            priority: s["priority"].as_u64().unwrap_or(0),
-                            source_type: s["source_type"].as_str().unwrap_or("").to_string(),
-                        })
+                        .map(|s| build_config_source_view(
+                            s["file"].as_str().unwrap_or(""),
+                            s["priority"].as_u64().unwrap_or(0),
+                            s["source_type"].as_str().unwrap_or(""),
+                        ))
                         .collect()
                 })
                 .unwrap_or_default()
@@ -296,6 +319,27 @@ async fn fetch_config_sources(state: &AppState, id: &str) -> Vec<ConfigSourceVie
             tracing::error!("Failed to fetch config sources: {}", e);
             vec![]
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_build_config_source_view_extracts_filename_and_is_main() {
+        let view = build_config_source_view("/etc/switch-configurator/Shadow-Switch-1.yaml", 200, "folder");
+        assert_eq!(view.filename, "Shadow-Switch-1.yaml");
+        assert!(!view.is_main);
+    }
+
+    #[test]
+    fn test_build_config_source_view_marks_main_source() {
+        // Nix-store paths have no separate directory component for the hash
+        // prefix — the whole thing is the on-disk filename.
+        let view = build_config_source_view("/nix/store/1c35q4l9-switch-config.yaml", 10, "main");
+        assert_eq!(view.filename, "1c35q4l9-switch-config.yaml");
+        assert!(view.is_main);
     }
 }
 
