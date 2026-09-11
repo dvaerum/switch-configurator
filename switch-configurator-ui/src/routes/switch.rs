@@ -322,9 +322,97 @@ async fn fetch_config_sources(state: &AppState, id: &str) -> Vec<ConfigSourceVie
     }
 }
 
+/// Parse a config file's YAML content and build a read-only `SwitchView`
+/// for every switch it declares — so a raw overlay or main-config file can
+/// be shown with the same structured tables the Edit flow already uses,
+/// instead of only a raw text dump. Each `SwitchView` reflects exactly what
+/// *this file* declares (identity fields it doesn't set stay blank/unknown
+/// — this is not the merged switch).
+pub fn parse_switch_views_from_yaml(yaml_content: &str) -> Vec<SwitchView> {
+    let parsed: switch_configurator::config::AppConfigFile = match serde_yaml::from_str(yaml_content) {
+        Ok(p) => p,
+        Err(_) => return vec![],
+    };
+
+    parsed.config.switches.iter()
+        .filter_map(|switch| {
+            let json = serde_json::to_value(switch).ok()?;
+            Some(parse_switch_view(&switch.id, &json))
+        })
+        .collect()
+}
+
+/// Same as `parse_switch_views_from_yaml`, scoped to one switch id — used
+/// by the overlay view (which is always for a specific switch). `None` if
+/// the file doesn't parse or doesn't declare this switch.
+pub fn parse_switch_view_from_yaml(switch_id: &str, yaml_content: &str) -> Option<SwitchView> {
+    parse_switch_views_from_yaml(yaml_content)
+        .into_iter()
+        .find(|v| v.id == switch_id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const OVERLAY_YAML: &str = r#"
+merge_priority: 200
+switches:
+  - id: IT-90297
+    hostname: IT-90297
+    vlans:
+      - id: 101
+        name: philips-ap-z1
+        description: null
+        ip_config: none
+    ports:
+      - port_id: "1"
+        vlan: 101
+        tagged_vlans: []
+        description: RTX3481 - Zone 1
+        enabled: true
+        poe_enabled: true
+        mac_notify: false
+        speed_duplex: auto
+"#;
+
+    #[test]
+    fn test_parse_switch_view_from_yaml_extracts_declared_switch() {
+        let view = parse_switch_view_from_yaml("IT-90297", OVERLAY_YAML).expect("should parse");
+        assert_eq!(view.vlans.len(), 1);
+        assert_eq!(view.vlans[0].name, "philips-ap-z1");
+        assert_eq!(view.ports.len(), 1);
+        assert_eq!(view.ports[0].port_id, "1");
+    }
+
+    #[test]
+    fn test_parse_switch_view_from_yaml_none_for_unrelated_switch() {
+        assert!(parse_switch_view_from_yaml("some-other-switch", OVERLAY_YAML).is_none());
+    }
+
+    #[test]
+    fn test_parse_switch_view_from_yaml_none_on_invalid_yaml() {
+        assert!(parse_switch_view_from_yaml("IT-90297", "not: [valid, yaml: structure").is_none());
+    }
+
+    #[test]
+    fn test_parse_switch_views_from_yaml_handles_multiple_switches() {
+        let yaml = r#"
+merge_priority: 10
+switches:
+  - id: sw-a
+    hostname: sw-a
+    vlans: []
+    ports: []
+  - id: sw-b
+    hostname: sw-b
+    vlans: []
+    ports: []
+"#;
+        let views = parse_switch_views_from_yaml(yaml);
+        let ids: Vec<&str> = views.iter().map(|v| v.id.as_str()).collect();
+        assert_eq!(ids, vec!["sw-a", "sw-b"]);
+    }
 
     #[test]
     fn test_build_config_source_view_extracts_filename_and_is_main() {

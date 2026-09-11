@@ -1,0 +1,31 @@
+<div class="card">
+    <table>
+        <thead>
+            <tr>
+                <th>Port</th>
+                <th>Untagged VLAN</th>
+                <th>Tagged VLANs</th>
+                <th>Description</th>
+                <th>Enabled</th>
+                <th>PoE</th>
+                <th>Speed</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for port in switch.ports %}
+            <tr>
+                <td>{{ port.port_id }}</td>
+                <td>{{ port.vlan }}</td>
+                <td class="text-muted">{{ port.tagged_display }}</td>
+                <td>{{ port.description.as_deref().unwrap_or("-") }}</td>
+                <td>{% if port.enabled %}Yes{% else %}No{% endif %}</td>
+                <td>{% if port.poe_enabled %}Yes{% else %}-{% endif %}</td>
+                <td class="text-muted">{{ port.speed_display }}</td>
+            </tr>
+            {% endfor %}
+            {% if switch.ports.is_empty() %}
+            <tr><td colspan="7" class="text-muted" style="text-align:center;">No ports configured</td></tr>
+            {% endif %}
+        </tbody>
+    </table>
+</div>

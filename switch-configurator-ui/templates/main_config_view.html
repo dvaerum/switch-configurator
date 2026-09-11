@@ -19,7 +19,19 @@
     {% when None %}
 {% endmatch %}
 
-<div class="card">
-    <pre style="margin:0;white-space:pre-wrap;font-size:0.85rem;line-height:1.5;">{{ content }}</pre>
+{% for switch in switches %}
+<div class="card mb-1" style="padding:0.6rem 0.75rem;background:var(--bg);">
+    <strong>{{ switch.id }}</strong>
+    {% if !switch.hostname.is_empty() %}<span class="text-sm text-muted"> &mdash; {{ switch.hostname }}</span>{% endif %}
 </div>
+{% include "partials/switch_config_snapshot.html" %}
+{% endfor %}
+{% if switches.is_empty() %}
+<p class="text-muted">This file's content couldn't be parsed into a structured view — showing raw YAML only.</p>
+{% endif %}
+
+<details class="card mt-1">
+    <summary style="cursor:pointer;font-weight:600;">View Raw YAML</summary>
+    <pre style="margin:0.75rem 0 0 0;white-space:pre-wrap;font-size:0.85rem;line-height:1.5;">{{ content }}</pre>
+</details>
 {% endblock %}
