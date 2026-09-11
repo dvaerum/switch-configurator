@@ -479,19 +479,30 @@ pub async fn save_overlay(
         ));
     }
 
+    let config_folder = get_first_config_folder(&store).await?;
+    let file_path = config_folder.join(filename);
+
     // Validate the overlay config before saving — checks VLAN references,
     // duplicate IDs, VLAN range, port ranges. Skips identity field checks
-    // since overlays are partial configs.
+    // since overlays are partial configs. A switch's port may reference a
+    // VLAN this overlay doesn't declare itself, as long as some OTHER known
+    // source (main config, another overlay) owns it — see
+    // `known_external_vlan_ids`.
+    let config_paths = store.status.get_config_paths().await;
     for switch in &mut body.config.switches {
-        if let Err(e) = crate::config::validate_overlay_config(switch) {
+        let known_external_vlan_ids = config_paths.as_ref()
+            .map(|(main_config, folders)| {
+                crate::config::AppConfig::known_external_vlan_ids(main_config, folders, &switch.id, &file_path)
+            })
+            .unwrap_or_default();
+
+        if let Err(e) = crate::config::validate_overlay_config(switch, &known_external_vlan_ids) {
             return Err((
                 StatusCode::BAD_REQUEST,
                 Json(json!({"error": format!("Validation failed: {}", e)})),
             ));
         }
     }
-
-    let config_folder = get_first_config_folder(&store).await?;
 
     // Build the YAML content with merge_priority at the top
     let yaml_value = prefer_vlan_names_in_yaml(&body.config).map_err(|e| {
@@ -511,7 +522,6 @@ pub async fn save_overlay(
         })?
     );
 
-    let file_path = config_folder.join(filename);
     std::fs::write(&file_path, &yaml_content).map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,

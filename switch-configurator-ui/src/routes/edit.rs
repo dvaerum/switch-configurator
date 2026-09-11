@@ -111,6 +111,7 @@ struct EditVlansTemplate {
     switch_id: String,
     hostname: String,
     vlans: Vec<EditableVlan>,
+    error: Option<String>,
 }
 
 /// Build the editable VLAN rows for one switch, given its merged vlans, the
@@ -177,6 +178,7 @@ pub async fn edit_vlans(
         switch_id: id,
         hostname: draft.edited.hostname.clone().unwrap_or_default(),
         vlans,
+        error: None,
     }.into_response()
 }
 
@@ -263,6 +265,18 @@ pub async fn add_vlan(
     Redirect::to(&format!("/switch/{}/edit/vlans", id)).into_response()
 }
 
+/// Port ids (by untagged `vlan` or `tagged_vlans`) that still reference
+/// `vlan_id`. Used to refuse removing a VLAN row out from under ports that
+/// depend on it — the exact corruption a real production overlay hit:
+/// removing the disputed duplicate VLAN rows left the ports that used them
+/// pointing at an id that existed nowhere once saved.
+fn ports_referencing_vlan(ports: &[Port], vlan_id: u16) -> Vec<String> {
+    ports.iter()
+        .filter(|p| p.vlan == vlan_id || p.tagged_vlans.contains(&vlan_id))
+        .map(|p| p.port_id.clone())
+        .collect()
+}
+
 pub async fn remove_vlan(
     State(state): State<AppState>,
     Path((id, vlan_id)): Path<(String, u16)>,
@@ -275,6 +289,20 @@ pub async fn remove_vlan(
     let main_config = main_config_path(&state).await;
     if is_main_config_source(draft.vlan_sources.get(&vlan_id), &main_config) {
         return Redirect::to(&format!("/switch/{}/edit/vlans", id)).into_response();
+    }
+
+    let referencing_ports = ports_referencing_vlan(&draft.edited.ports, vlan_id);
+    if !referencing_ports.is_empty() {
+        let vlans = build_editable_vlans(&draft.edited.vlans, &draft.vlan_sources, &main_config);
+        return EditVlansTemplate {
+            switch_id: id,
+            hostname: draft.edited.hostname.clone().unwrap_or_default(),
+            vlans,
+            error: Some(format!(
+                "VLAN {} is still used by port(s) {} — reassign or remove them first.",
+                vlan_id, referencing_ports.join(", ")
+            )),
+        }.into_response();
     }
 
     draft.edited.vlans.retain(|v| v.id != vlan_id);
@@ -1013,6 +1041,40 @@ mod tests {
         assert_eq!(port.vlan, 10);
         assert_eq!(port.tagged_vlans, vec![20, 30]);
         assert_eq!(port.mode, PortMode::Trunk);
+    }
+
+    fn port_on_vlan(port_id: &str, vlan: u16, tagged: &[u16]) -> Port {
+        Port {
+            port_id: port_id.to_string(),
+            mode: PortMode::Access,
+            vlan,
+            tagged_vlans: tagged.to_vec(),
+            description: None,
+            enabled: true,
+            poe_enabled: false,
+            mac_notify: false,
+            speed_duplex: SpeedDuplex::Auto,
+            vlan_name: None,
+            tagged_vlan_refs: vec![],
+        }
+    }
+
+    #[test]
+    fn test_ports_referencing_vlan_finds_untagged_and_tagged() {
+        let ports = vec![
+            port_on_vlan("1", 999, &[]),
+            port_on_vlan("2", 10, &[999]),
+            port_on_vlan("3", 10, &[]),
+        ];
+        let mut hits = ports_referencing_vlan(&ports, 999);
+        hits.sort();
+        assert_eq!(hits, vec!["1".to_string(), "2".to_string()]);
+    }
+
+    #[test]
+    fn test_ports_referencing_vlan_empty_when_unused() {
+        let ports = vec![port_on_vlan("1", 10, &[20])];
+        assert!(ports_referencing_vlan(&ports, 999).is_empty());
     }
 
     #[test]

@@ -235,6 +235,54 @@ impl AppConfig {
         merge_configs(configs)
     }
 
+    /// VLAN ids already declared for `switch_id` by every config source
+    /// EXCEPT `excluding_file` — the main config, plus every other folder
+    /// overlay. Lets `validate_overlay_config` check a saved overlay's port
+    /// references against VLANs it legitimately relies on but doesn't own
+    /// itself (e.g. an overlay that declares no VLANs and references the
+    /// main config's), without needing to skip the check altogether.
+    ///
+    /// Re-reads from disk on every call rather than relying on a cached
+    /// index: it's only used at save time (not a hot path), and reading
+    /// fresh means it can never be stale relative to a file another request
+    /// just wrote. A source file that fails to parse is skipped rather than
+    /// failing the whole lookup — an unrelated broken file elsewhere must
+    /// not block saving a valid overlay for a different switch.
+    pub fn known_external_vlan_ids(
+        main_config_path: &Path,
+        folder_paths: &[PathBuf],
+        switch_id: &str,
+        excluding_file: &Path,
+    ) -> std::collections::HashSet<u16> {
+        let mut ids = std::collections::HashSet::new();
+
+        let mut collect_from = |config: &AppConfig| {
+            for switch in &config.switches {
+                if switch.id == switch_id {
+                    ids.extend(switch.vlans.iter().map(|v| v.id));
+                }
+            }
+        };
+
+        if main_config_path != excluding_file {
+            if let Ok(c) = Self::load_with_metadata(main_config_path, ConfigSourceType::MainConfig) {
+                collect_from(&c.config);
+            }
+        }
+
+        for folder in folder_paths {
+            if let Ok(folder_configs) = scan_config_folder(folder) {
+                for c in folder_configs {
+                    if c.source_file != excluding_file {
+                        collect_from(&c.config);
+                    }
+                }
+            }
+        }
+
+        ids
+    }
+
     /// Save configuration to a YAML file
     #[allow(dead_code)]
     pub fn save(&self, path: &Path) -> Result<()> {
@@ -1425,10 +1473,23 @@ pub fn validate_switch_config(switch: &mut SwitchConfig) -> Result<()> {
 /// Validate a switch config for overlay saving. Skips identity field checks
 /// (hostname, model, etc.) since overlays are partial. Runs:
 /// - Port range expansion
-/// - VLAN reference validation (ports must reference defined VLANs)
+/// - VLAN reference validation (ports must reference defined VLANs, this
+///   overlay's own or `known_external_vlan_ids` — VLANs legitimately owned
+///   by another source, e.g. the main config)
 /// - VLAN ID range check
 /// - Duplicate port/VLAN ID check
-pub fn validate_overlay_config(switch: &mut SwitchConfig) -> Result<()> {
+///
+/// `known_external_vlan_ids` lets an overlay declare no VLANs of its own
+/// and still reference ones owned elsewhere (a supported, common shape —
+/// see `known_external_vlan_ids()` below) without disabling the reference
+/// check altogether. Previously this check was skipped entirely whenever
+/// the submitted overlay had zero VLANs, trusting "must come from
+/// elsewhere" without verifying anywhere — which let a real save reach
+/// disk with ports pointing at ids that existed nowhere at all.
+pub fn validate_overlay_config(
+    switch: &mut SwitchConfig,
+    known_external_vlan_ids: &std::collections::HashSet<u16>,
+) -> Result<()> {
     // Expand port ranges (e.g., "1-5" → individual ports)
     expand_port_ranges(switch)
         .with_context(|| format!("Port range expansion failed for switch '{}'", switch.id))?;
@@ -1458,12 +1519,15 @@ pub fn validate_overlay_config(switch: &mut SwitchConfig) -> Result<()> {
         .with_context(|| format!("VLAN name resolution failed for switch '{}'", switch.id))?;
 
     // Validate port VLAN references strictly — reject any invalid references.
-    // Uses the model's implicit_vlans() if model is set, otherwise only
-    // checks against explicitly defined VLANs.
-    if !switch.vlans.is_empty() {
+    // A VLAN is valid if it's declared by this overlay, owned by another
+    // known source (`known_external_vlan_ids`), or implicit on the model
+    // (e.g. VLAN 1 on all current vendors; defaults to just VLAN 1 when no
+    // model is set). Runs unconditionally — this overlay declaring zero
+    // VLANs of its own is a legitimate shape (it may rely entirely on
+    // externally-owned ones) but is not license to skip verifying anywhere.
+    {
         let mut valid_vlans: std::collections::HashSet<u16> = switch.vlans.iter().map(|v| v.id).collect();
-        // Add implicit VLANs from the model (e.g., VLAN 1 on all current vendors).
-        // When model is not set, default to VLAN 1 since all supported vendors have it.
+        valid_vlans.extend(known_external_vlan_ids);
         match &switch.model {
             Some(model) => {
                 for &v in &model.implicit_vlans() {
@@ -1491,7 +1555,10 @@ pub fn validate_overlay_config(switch: &mut SwitchConfig) -> Result<()> {
             }
         }
 
-        // Check mirror destination ports not in ports list
+        // Check mirror destination ports not in ports list. Unrelated to
+        // VLAN presence — previously nested inside the (now removed) "vlans
+        // non-empty" gate, which meant it was silently skipped too whenever
+        // an overlay declared no VLANs of its own.
         let defined_port_ids: std::collections::HashSet<String> = switch.ports.iter().map(|p| p.port_id.clone()).collect();
         for mirror in &switch.port_mirrors {
             if defined_port_ids.contains(&mirror.destination_port) {
@@ -3610,5 +3677,168 @@ switches:
         assert_eq!(result.valid.len(), 0);
         assert_eq!(result.failures.len(), 1);
         assert_eq!(result.failures[0].switch_id, "bad-sw");
+    }
+
+    // ========== known_external_vlan_ids / validate_overlay_config tests ==========
+    //
+    // Regression coverage for a real production incident: an overlay
+    // (Shadow-Switch-1.yaml on IT-90297) declares no VLANs of its own for
+    // most ports — those ports reference VLAN ids owned by the main config.
+    // That's a legitimate, supported shape. But `validate_overlay_config`
+    // used to skip its port-reference check *entirely* whenever the
+    // submitted overlay had zero VLANs, trusting "must all come from
+    // elsewhere" without checking anywhere. When a user removed a set of
+    // disputed duplicate VLAN rows via the structured editor (a reasonable
+    // way to resolve a collision) without knowing the same ids were still
+    // referenced by other ports, the save happened to end up with an empty
+    // `vlans` list — and the empty-list skip let it through with 13 ports
+    // now pointing at ids that exist nowhere at all, main config included.
+    // `known_external_vlan_ids` closes that hole: it looks at what every
+    // *other* config source actually declares for this switch, so the
+    // check can run unconditionally instead of trusting blindly.
+
+    #[test]
+    fn test_known_external_vlan_ids_collects_other_sources_and_excludes_this_file() {
+        use std::io::Write;
+
+        let dir = tempfile::tempdir().unwrap();
+        let main_path = dir.path().join("main.yaml");
+        let mut main_file = std::fs::File::create(&main_path).unwrap();
+        write!(main_file, r#"
+merge_priority: 10
+switches:
+  - id: sw-1
+    hostname: sw-1
+    model: Aruba2930F
+    management_ip: "10.0.0.1"
+    credentials:
+      username: admin
+      password: admin
+    vlans:
+      - id: 101
+        name: philips-ap-z1
+"#).unwrap();
+
+        let folder = dir.path().join("folder");
+        std::fs::create_dir(&folder).unwrap();
+
+        let other_overlay_path = folder.join("other-overlay.yaml");
+        let mut other_overlay = std::fs::File::create(&other_overlay_path).unwrap();
+        write!(other_overlay, r#"
+merge_priority: 200
+switches:
+  - id: sw-1
+    hostname: sw-1
+    vlans:
+      - id: 500
+        name: from-other-overlay
+"#).unwrap();
+
+        let this_overlay_path = folder.join("this-overlay.yaml");
+        let mut this_overlay = std::fs::File::create(&this_overlay_path).unwrap();
+        write!(this_overlay, r#"
+merge_priority: 200
+switches:
+  - id: sw-1
+    hostname: sw-1
+    vlans:
+      - id: 999
+        name: only-in-this-overlay
+"#).unwrap();
+
+        let known = AppConfig::known_external_vlan_ids(&main_path, &[folder.clone()], "sw-1", &this_overlay_path);
+
+        assert!(known.contains(&101), "should include the main config's own VLAN");
+        assert!(known.contains(&500), "should include another overlay's VLAN");
+        assert!(!known.contains(&999), "must not include the excluded file's own VLAN");
+    }
+
+    #[test]
+    fn test_known_external_vlan_ids_ignores_other_switches() {
+        use std::io::Write;
+
+        let dir = tempfile::tempdir().unwrap();
+        let main_path = dir.path().join("main.yaml");
+        let mut main_file = std::fs::File::create(&main_path).unwrap();
+        write!(main_file, r#"
+merge_priority: 10
+switches:
+  - id: unrelated-switch
+    hostname: unrelated-switch
+    model: Aruba2930F
+    management_ip: "10.0.0.2"
+    credentials:
+      username: admin
+      password: admin
+    vlans:
+      - id: 777
+        name: not-for-sw-1
+"#).unwrap();
+
+        let known = AppConfig::known_external_vlan_ids(&main_path, &[], "sw-1", &dir.path().join("does-not-exist.yaml"));
+
+        assert!(known.is_empty(), "a VLAN declared for a different switch id must not leak in");
+    }
+
+    fn port_numeric(port_id: &str, vlan: u16, tagged: &[u16]) -> crate::models::Port {
+        crate::models::Port {
+            port_id: port_id.to_string(),
+            mode: crate::models::PortMode::Access,
+            vlan,
+            tagged_vlans: tagged.to_vec(),
+            description: None,
+            enabled: true,
+            poe_enabled: false,
+            mac_notify: false,
+            speed_duplex: crate::models::SpeedDuplex::Auto,
+            vlan_name: None,
+            tagged_vlan_refs: vec![],
+        }
+    }
+
+    #[test]
+    fn test_validate_overlay_config_accepts_port_referencing_known_external_vlan() {
+        // The legitimate shape: this overlay declares no VLANs of its own,
+        // but its port references a VLAN owned by the main config. Must
+        // still pass now that the check runs unconditionally.
+        let mut switch = switch_with(vec![], vec![port_numeric("1", 101, &[])]);
+        let mut known_external = std::collections::HashSet::new();
+        known_external.insert(101u16);
+
+        assert!(validate_overlay_config(&mut switch, &known_external).is_ok());
+    }
+
+    #[test]
+    fn test_validate_overlay_config_rejects_port_referencing_truly_unknown_vlan() {
+        // The bug this regresses: an overlay with zero VLANs of its own
+        // whose port references an id that isn't declared ANYWHERE (not by
+        // this overlay, not by any other source) must be rejected, not
+        // silently accepted because "vlans is empty".
+        let mut switch = switch_with(vec![], vec![port_numeric("1", 999, &[])]);
+        let known_external = std::collections::HashSet::new();
+
+        let result = validate_overlay_config(&mut switch, &known_external);
+        assert!(result.is_err(), "a port referencing a truly undefined VLAN must be rejected");
+        assert!(result.unwrap_err().to_string().contains("999"));
+    }
+
+    #[test]
+    fn test_validate_overlay_config_rejects_tagged_vlan_referencing_truly_unknown_vlan() {
+        let mut switch = switch_with(vec![], vec![port_numeric("1", 101, &[999])]);
+        let mut known_external = std::collections::HashSet::new();
+        known_external.insert(101u16);
+
+        let result = validate_overlay_config(&mut switch, &known_external);
+        assert!(result.is_err(), "a tagged VLAN referencing a truly undefined VLAN must be rejected");
+    }
+
+    #[test]
+    fn test_validate_overlay_config_still_accepts_its_own_declared_vlans() {
+        // Unchanged behavior: an overlay that declares its own VLAN and
+        // references it needs no external help.
+        let mut switch = switch_with(vec![vlan(10, "users")], vec![port_numeric("1", 10, &[])]);
+        let known_external = std::collections::HashSet::new();
+
+        assert!(validate_overlay_config(&mut switch, &known_external).is_ok());
     }
 }
