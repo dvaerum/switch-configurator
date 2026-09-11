@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - **FortiSwitch 124F-FPOE port count was wrong** (`switch-configurator` 0.8.1): registered as 26 total ports (24× PoE+ copper + 2× SFP+ uplinks); real hardware has 28 ports — the same 24 PoE+ copper ports plus 4 SFP+ uplinks (25-28), not 2. `total_ports()` and `port_capabilities()` now reflect this.
+- **VLAN dropdowns on the Ports edit page truncated long names** (`switch-configurator-ui` 0.5.1): the untagged-VLAN and tagged-VLANs `<select>` elements had a hardcoded `width: 130px`/`150px`, too narrow for names like `philips-apc-z1 (120)` to render in full. Both now use `width: auto` with a `min-width`/`max-width` range so the box sizes to its content instead of clipping it.
 
 ### Added
 - **VLAN-by-name in the web UI** (`switch-configurator-ui` 0.2.0): the port editor's untagged VLAN field is now a dropdown of the switch's own VLAN names, and tagged VLANs is a proper multi-select, replacing the old numeric spinbutton and comma-separated text field. Saving now persists VLANs by name (`vlan: "users"`) rather than by numeric id whenever the switch has a name for that VLAN, reusing the existing `VlanRef` name-or-id serialization on the save-overlay path (`switch-configurator` 0.6.0).

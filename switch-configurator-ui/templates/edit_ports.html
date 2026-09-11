@@ -39,14 +39,14 @@
                     <input type="hidden" name="port_id.{{ loop.index0 }}" value="{{ port.port_id }}">
                 </td>
                 <td>
-                    <select name="vlan.{{ loop.index0 }}" style="width:130px;padding:0.2rem;border:1px solid var(--border);border-radius:4px;">
+                    <select name="vlan.{{ loop.index0 }}" style="width:auto;min-width:150px;max-width:220px;padding:0.2rem;border:1px solid var(--border);border-radius:4px;">
                         {% for v in vlans %}
                         <option value="{{ v.id }}"{% if v.id == port.vlan %} selected{% endif %}>{{ v.name }} ({{ v.id }})</option>
                         {% endfor %}
                     </select>
                 </td>
                 <td>
-                    <select name="tagged_vlans.{{ loop.index0 }}" multiple style="width:150px;height:4.5rem;padding:0.2rem;border:1px solid var(--border);border-radius:4px;">
+                    <select name="tagged_vlans.{{ loop.index0 }}" multiple style="width:auto;min-width:170px;max-width:260px;height:4.5rem;padding:0.2rem;border:1px solid var(--border);border-radius:4px;">
                         {% for v in port.tagged_vlan_choices %}
                         <option value="{{ v.id }}"{% if v.selected %} selected{% endif %}>{{ v.name }} ({{ v.id }})</option>
                         {% endfor %}
@@ -87,12 +87,12 @@
     <strong>Add Port</strong>
     <div class="flex gap-1 items-center mt-1" style="flex-wrap:wrap;">
         <input type="text" name="port_id" placeholder="Port (e.g. 5)" required style="width:90px;padding:0.3rem;border:1px solid var(--border);border-radius:4px;">
-        <select name="vlan" style="width:130px;padding:0.3rem;border:1px solid var(--border);border-radius:4px;">
+        <select name="vlan" style="width:auto;min-width:150px;max-width:220px;padding:0.3rem;border:1px solid var(--border);border-radius:4px;">
             {% for v in vlans %}
             <option value="{{ v.id }}">{{ v.name }} ({{ v.id }})</option>
             {% endfor %}
         </select>
-        <select name="tagged_vlans" multiple style="width:150px;height:4.5rem;padding:0.3rem;border:1px solid var(--border);border-radius:4px;">
+        <select name="tagged_vlans" multiple style="width:auto;min-width:170px;max-width:260px;height:4.5rem;padding:0.3rem;border:1px solid var(--border);border-radius:4px;">
             {% for v in vlans %}
             <option value="{{ v.id }}">{{ v.name }} ({{ v.id }})</option>
             {% endfor %}
