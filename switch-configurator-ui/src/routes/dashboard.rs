@@ -252,12 +252,19 @@ struct OverlayViewTemplate {
     switch_id: String,
     filename: String,
     content: String,
+    /// What this file declares for `switch_id`, rendered as the same
+    /// structured tables the Edit flow uses — `None` if the file doesn't
+    /// parse or doesn't declare this switch, in which case only the raw
+    /// YAML below is shown.
+    switch: Option<super::switch::SwitchView>,
     error: Option<String>,
 }
 
-/// Read-only raw dump of an overlay file — useful to double-check exactly
-/// what's on disk, but resolving a broken switch happens through the
-/// structured VLAN/port editor (`edit.rs`'s draft flow, seeded from
+/// Shows an overlay file's declared VLANs/ports/mirrors/SNMP the same way
+/// the Edit flow does — structured tables, not just raw text — with the
+/// raw YAML still available (collapsed) to double-check exactly what's on
+/// disk. Resolving a broken switch still happens through the structured
+/// VLAN/port editor (`edit.rs`'s draft flow, seeded from
 /// `/switches/{id}/merge-preview`), not by editing this raw text.
 pub async fn view_overlay(
     State(state): State<AppState>,
@@ -269,10 +276,13 @@ pub async fn view_overlay(
         Err(e) => (String::new(), Some(format!("Failed to load overlay: {}", e))),
     };
 
+    let switch = super::switch::parse_switch_view_from_yaml(&switch_id, &content);
+
     OverlayViewTemplate {
         switch_id,
         filename,
         content,
+        switch,
         error,
     }
 }
@@ -281,6 +291,9 @@ pub async fn view_overlay(
 #[template(path = "main_config_view.html")]
 struct MainConfigViewTemplate {
     content: String,
+    /// One structured snapshot per switch the main config declares — empty
+    /// if the file doesn't parse, in which case only the raw YAML is shown.
+    switches: Vec<super::switch::SwitchView>,
     error: Option<String>,
 }
 
@@ -288,11 +301,16 @@ struct MainConfigViewTemplate {
 /// here. It carries a switch's identity fields, not a disposable overlay, but
 /// the ambiguous-VLAN-name error can name it as one side of a collision, so
 /// it needs to be inspectable from the dashboard even though it's never
-/// editable from here.
+/// editable from here. Renders the same structured tables the Edit flow
+/// uses for each switch the file declares, with the raw YAML still
+/// available (collapsed) below.
 pub async fn view_main_config(State(state): State<AppState>) -> impl IntoResponse {
     match state.backend.get_text("/config/main-file").await {
-        Ok(content) => MainConfigViewTemplate { content, error: None },
-        Err(e) => MainConfigViewTemplate { content: String::new(), error: Some(format!("Failed to load main config: {}", e)) },
+        Ok(content) => {
+            let switches = super::switch::parse_switch_views_from_yaml(&content);
+            MainConfigViewTemplate { content, switches, error: None }
+        }
+        Err(e) => MainConfigViewTemplate { content: String::new(), switches: vec![], error: Some(format!("Failed to load main config: {}", e)) },
     }
 }
 
