@@ -233,8 +233,117 @@ impl SerialClient {
         Ok(())
     }
 
+    /// True if the switch is presenting FortiOS's forced-password-change
+    /// prompt (seen on a factory-reset FortiSwitch whose blank/default
+    /// password fails the device's enforced password policy). Confirmed on
+    /// real 108F-POE serial console hardware: this text — and the
+    /// "New Password:" prompt itself — arrive together, tacked onto the
+    /// normal login exchange with no way to decline.
+    fn is_forced_password_change_prompt(text: &str) -> bool {
+        text.contains("New Password:")
+    }
+
+    /// True if the switch is asking to re-enter the new password to confirm it.
+    fn is_password_confirm_prompt(text: &str) -> bool {
+        text.contains("Re-enter New Password:")
+    }
+
+    /// True if FortiOS rejected the password-change attempt (mismatched
+    /// confirmation, or the new password itself violates the policy).
+    fn is_password_change_rejected(text: &str) -> bool {
+        text.contains("doesn't match") || text.contains("doesn't conform")
+    }
+
+    /// Complete FortiOS's forced-password-change flow if the switch is
+    /// presenting it, using `new_password` for both the "New Password:" and
+    /// "Re-enter New Password:" prompts.
+    ///
+    /// This exists because a factory-reset (or otherwise policy-noncompliant)
+    /// FortiSwitch account demands a password change *during* the login
+    /// exchange itself — there's no separate opt-out step. We answer it with
+    /// the switch's own configured password rather than inventing one: that
+    /// is the value the device will expect on every subsequent login, so
+    /// this doubles as the one-time bootstrap that makes the configured
+    /// credentials valid going forward. If the configured password doesn't
+    /// meet the device's policy (FortiOS's default requires at least 8
+    /// characters), we fail loudly rather than guess at a replacement —
+    /// guessing passwords against real hardware risks an account lockout.
+    async fn maybe_complete_forced_password_change(
+        &mut self,
+        new_password: &str,
+        state_after_login: &str,
+    ) -> Result<()> {
+        let mut state = state_after_login.to_string();
+
+        // The policy-violation banner can arrive fractionally before the
+        // "New Password:" prompt line itself on slower serial links.
+        if !Self::is_forced_password_change_prompt(&state) && state.contains("password policy") {
+            state = self.check_current_state(Duration::from_secs(2)).await?;
+        }
+
+        if !Self::is_forced_password_change_prompt(&state) {
+            return Ok(());
+        }
+
+        info!("FortiOS forced password-change prompt detected on first login, completing it");
+
+        if new_password.len() < 8 {
+            anyhow::bail!(
+                "Switch demands a password change on first login (its password policy \
+                 rejected the current/default password), but the configured password is \
+                 only {} character(s). FortiOS's default policy requires at least 8. \
+                 Set a compliant password in the switch credentials and try again — this \
+                 tool will not invent or guess a replacement password.",
+                new_password.len()
+            );
+        }
+
+        self.send_raw(&format!("{}\r", new_password)).await?;
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        let confirm_state = self.check_current_state(Duration::from_secs(2)).await?;
+
+        if !Self::is_password_confirm_prompt(&confirm_state) {
+            anyhow::bail!(
+                "Expected FortiOS's 'Re-enter New Password:' confirmation prompt after \
+                 sending the new password, got: {:?}",
+                confirm_state.chars().take(200).collect::<String>()
+            );
+        }
+
+        self.send_raw(&format!("{}\r", new_password)).await?;
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        let result_state = self.check_current_state(Duration::from_secs(3)).await?;
+
+        if Self::is_password_change_rejected(&result_state) {
+            anyhow::bail!(
+                "FortiOS rejected the password change (mismatched confirmation, or the \
+                 password itself violates the device's policy). Last state: {:?}",
+                result_state.chars().take(200).collect::<String>()
+            );
+        }
+
+        info!("Password change completed; switch will expect the configured password from now on");
+        Ok(())
+    }
+
     /// Send login credentials
     pub async fn login(&mut self, username: &str, password: &str) -> Result<()> {
+        self.login_inner(username, password, password).await
+    }
+
+    /// Log in, using `current_password` to answer the device's login
+    /// prompt and `new_password_if_forced` as the replacement if FortiOS's
+    /// forced-password-change flow appears. Separate from `login`'s public
+    /// signature so `login_with_factory_default_fallback` can attempt a
+    /// blank current password while still bootstrapping the *configured*
+    /// password as the device's new one, rather than accidentally setting
+    /// a blank new password too.
+    async fn login_inner(
+        &mut self,
+        username: &str,
+        current_password: &str,
+        new_password_if_forced: &str,
+    ) -> Result<()> {
         info!("Logging in as user: {}", username);
 
         // NOTE: Login is always performed, even in dry-run mode.
@@ -274,10 +383,13 @@ impl SerialClient {
             tokio::time::sleep(Duration::from_millis(500)).await;
 
             // Send password (password prompt should appear)
-            self.send_raw(&format!("{}\r", password)).await?;
+            self.send_raw(&format!("{}\r", current_password)).await?;
 
             // Wait for command prompt after login
             tokio::time::sleep(Duration::from_secs(2)).await;
+
+            let post_login_state = self.check_current_state(Duration::from_secs(2)).await?;
+            self.maybe_complete_forced_password_change(new_password_if_forced, &post_login_state).await?;
         } else if state_check.contains('#') || state_check.contains('>') {
             // Already at a prompt — but check if we're in config mode and need to exit
             let ansi_stripped = regex::Regex::new(r"\x1b\[[0-9;?]*[A-Za-z]")
@@ -344,8 +456,11 @@ impl SerialClient {
                     debug!("Login prompt appeared on attempt {}, logging in...", attempt);
                     self.send_raw(&format!("{}\r", username)).await?;
                     tokio::time::sleep(Duration::from_millis(500)).await;
-                    self.send_raw(&format!("{}\r", password)).await?;
+                    self.send_raw(&format!("{}\r", current_password)).await?;
                     tokio::time::sleep(Duration::from_secs(2)).await;
+
+                    let post_login_state = self.check_current_state(Duration::from_secs(2)).await?;
+                    self.maybe_complete_forced_password_change(new_password_if_forced, &post_login_state).await?;
                     logged_in = true;
                     break;
                 } else if state_check.contains('#') || state_check.contains('>') {
@@ -374,6 +489,52 @@ impl SerialClient {
         self.verify_connectivity().await?;
 
         Ok(())
+    }
+
+    /// Log in, retrying once with a blank password if the configured one is
+    /// rejected — to handle FortiOS's factory-default admin account, which
+    /// has no password set at all until the forced-password-change flow (see
+    /// `maybe_complete_forced_password_change`) bootstraps one.
+    ///
+    /// This is a single, vendor-documented fallback value (FortiOS ships
+    /// with a blank admin password out of the box), not a guessed
+    /// credential — it is attempted exactly once, and only when the first
+    /// attempt's failure is specifically "wrong password" (login completed,
+    /// landed back on a login/password prompt), never for connectivity or
+    /// other errors. This keeps it from turning into repeated login
+    /// attempts against real hardware.
+    pub async fn login_with_factory_default_fallback(
+        &mut self,
+        username: &str,
+        password: &str,
+    ) -> Result<()> {
+        let first_err = match self.login(username, password).await {
+            Ok(()) => return Ok(()),
+            Err(e) => e,
+        };
+
+        if password.is_empty() || !first_err.to_string().contains("not authenticated") {
+            return Err(first_err);
+        }
+
+        warn!(
+            "Configured password was rejected; retrying once with FortiOS's blank \
+             factory-default password (switch may be factory-reset and awaiting its \
+             forced password-change flow)"
+        );
+
+        // Blank current password (the presumed factory default), but the
+        // *configured* password as the new one to set if the forced-change
+        // flow appears — otherwise we'd bootstrap the account to a blank
+        // password too, defeating the point.
+        self.login_inner(username, "", password).await.map_err(|fallback_err| {
+            anyhow::anyhow!(
+                "Login failed with the configured password ({}); factory-default \
+                 fallback also failed: {}",
+                first_err,
+                fallback_err
+            )
+        })
     }
 
     /// Enter privileged exec mode if we're in user mode (Cisco switches)
@@ -845,7 +1006,13 @@ impl SerialClient {
             || command.trim() == "terminal length 0"
             || command.trim() == "terminal pager 0"
             || command.trim() == "enable"
-            || command.trim() == "end";  // FortiSwitch: exit config mode
+            || command.trim() == "end"  // FortiSwitch: exit config mode
+            // FortiSwitch pagination control (see `connect()` in fortiswitch.rs):
+            // must still run in dry-run mode, or `show` commands issued right
+            // after skip straight into an unanswered "--More--" pager prompt
+            // and hang until the read times out. Confirmed on real hardware.
+            || command.trim() == "config system console"
+            || command.trim() == "set output standard";
 
         if self.dry_run && !self.auth_mode && !is_readonly && !is_session_setting {
             info!("   🔍 [DRY-RUN] Would execute (skipped)");
@@ -1265,6 +1432,91 @@ mod tests {
     }
 
     // ============================================================================
+    // FortiOS Forced Password-Change Prompt Detection
+    // Fixtures are the exact bytes captured from a real, factory-reset
+    // FortiSwitch 108F-POE serial console (device S108FPTV21002683).
+    // ============================================================================
+
+    #[test]
+    fn test_detects_forced_password_change_prompt() {
+        let real_hardware_prompt = "admin\r\nPassword: \r\nYour password doesn't conform to the password policy enforced on this device.\r\nAccording to the password policy enforced on this device, please change your password!\r\nNew password must conform to the following policy:\r\nminimum-length=8\r\n\r\nNew Password:";
+
+        assert!(SerialClient::is_forced_password_change_prompt(real_hardware_prompt));
+
+        // A normal, already-successful login should not trigger it
+        assert!(!SerialClient::is_forced_password_change_prompt("S108FPTV21002683 # "));
+        assert!(!SerialClient::is_forced_password_change_prompt(""));
+    }
+
+    #[test]
+    fn test_detects_password_confirm_prompt() {
+        let real_hardware_confirm = "\r\nRe-enter New Password:\r\n";
+        assert!(SerialClient::is_password_confirm_prompt(real_hardware_confirm));
+        assert!(!SerialClient::is_password_confirm_prompt("New Password:"));
+    }
+
+    #[test]
+    fn test_detects_password_change_rejected() {
+        let real_hardware_mismatch =
+            "ClaudeTest123!\r\n\r\nNew passwords doesn't match\r\nLogin incorrect\r\n\r\n\r\n";
+        assert!(SerialClient::is_password_change_rejected(real_hardware_mismatch));
+
+        let policy_violation = "Your password doesn't conform to the password policy enforced on this device.";
+        assert!(SerialClient::is_password_change_rejected(policy_violation));
+
+        assert!(!SerialClient::is_password_change_rejected("S108FPTV21002683 # "));
+    }
+
+    #[tokio::test]
+    async fn test_forced_password_change_rejects_short_password_without_touching_wire() {
+        // A password under FortiOS's 8-char minimum must never be sent to the
+        // device as an attempted new password — that would mean guessing/
+        // mutating credentials on real hardware. It must fail immediately.
+        let mut client = SerialClient::new("/dev/nonexistent_for_unit_test".to_string(), 9600);
+        let prompt = "New Password:";
+
+        let result = client.maybe_complete_forced_password_change("short", prompt).await;
+
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("at least 8"), "Expected policy-length error, got: {}", msg);
+    }
+
+    #[tokio::test]
+    async fn test_factory_default_fallback_does_not_retry_on_non_auth_errors() {
+        // A device that never exists should fail with a connection error, not
+        // an auth error — the fallback must not retry with a blank password
+        // in that case (it would just be a second pointless failure, and the
+        // whole point is to only special-case "wrong password").
+        let mut client = SerialClient::new("/dev/nonexistent_for_unit_test".to_string(), 9600);
+
+        let result = client
+            .login_with_factory_default_fallback("admin", "configured-password")
+            .await;
+
+        assert!(result.is_err());
+        // Only one underlying attempt should have been possible here since
+        // `login()` itself bails immediately with "Not connected" (no serial
+        // port open) rather than the "not authenticated" text that gates a
+        // retry.
+        let msg = result.unwrap_err().to_string();
+        assert!(!msg.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_forced_password_change_noop_when_not_prompted() {
+        // Normal (non-first-login) state must be a complete no-op: no serial
+        // I/O attempted, since `self.port` is None in this unit test.
+        let mut client = SerialClient::new("/dev/nonexistent_for_unit_test".to_string(), 9600);
+
+        let result = client
+            .maybe_complete_forced_password_change("irrelevant-password", "S108FPTV21002683 # ")
+            .await;
+
+        assert!(result.is_ok());
+    }
+
+    // ============================================================================
     // Device Lock Tests (Existing)
     // ============================================================================
 
@@ -1509,6 +1761,8 @@ mod tests {
                 || cmd.trim() == "terminal pager 0"
                 || cmd.trim() == "enable"
                 || cmd.trim() == "end"
+                || cmd.trim() == "config system console"
+                || cmd.trim() == "set output standard"
         }
 
         fn is_readonly(cmd: &str) -> bool {
@@ -1521,6 +1775,15 @@ mod tests {
         assert!(is_session_setting("terminal pager 0"), "'terminal pager 0' is a session setting");
         assert!(is_session_setting("enable"), "'enable' is a session setting");
         assert!(is_session_setting("end"), "'end' is a session setting");
+        assert!(
+            is_session_setting("config system console"),
+            "'config system console' must run in dry-run too (FortiSwitch pagination \
+             control) or 'show' commands right after hang on an unanswered '--More--' prompt"
+        );
+        assert!(
+            is_session_setting("set output standard"),
+            "'set output standard' must run in dry-run too, same reason as above"
+        );
 
         // Read-only commands: allowed during dry-run
         assert!(is_readonly("show running-config"), "'show running-config' is readonly");

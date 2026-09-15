@@ -3342,6 +3342,68 @@ mod integration_tests {
         assert_eq!(json["data"]["detail"], "3");
     }
 
+    fn create_fortiswitch_test_store() -> ConfigStore {
+        let switch = SwitchConfig {
+            id: "test-sw-forti".to_string(),
+            hostname: Some("test-fortiswitch".to_string()),
+            model: Some(SwitchModel::Fortiswitch124F_FPOE),
+            management_ip: Some("192.168.1.4".to_string()),
+            credentials: Some(Credentials {
+                username: "admin".to_string(),
+                password: Some("password".to_string()),
+                ssh_key_path: None,
+                port: 22,
+                connection_type: ConnectionType::Ssh,
+                serial_device: None,
+                baud_rate: 9600,
+                jump_hosts: None,
+                enable_secret: None,
+            }),
+            vlans: vec![Vlan {
+                id: 10,
+                name: "vlan10".to_string(),
+                description: None,
+                ip_config: VlanIpConfig::None,
+            }],
+            ports: vec![Port {
+                port_id: "1".to_string(),
+                mode: PortMode::Access,
+                vlan: 10,
+                tagged_vlans: vec![],
+                description: None,
+                enabled: true,
+                poe_enabled: true,
+                mac_notify: false,
+                speed_duplex: SpeedDuplex::Auto,
+                vlan_name: None,
+                tagged_vlan_refs: vec![],
+            }],
+            port_mirrors: vec![],
+            snmp: None,
+            validation: None,
+            settings: Settings::default(),
+            vendor_specific: std::collections::HashMap::new(),
+            management_vlan: None,
+        };
+
+        ConfigStore::new(AppConfig { switches: vec![switch] }, 4003)
+    }
+
+    #[tokio::test]
+    async fn test_poe_reset_fortiswitch_returns_202() {
+        // FortiSwitch PoE reset is now supported (native poe_disable/enable
+        // commands added to FortiswitchSwitch); previously this vendor was
+        // rejected outright with "PoE reset not yet supported".
+        let store = create_fortiswitch_test_store();
+        let response = poe_reset(
+            axum::extract::State(store),
+            axum::extract::Path(("test-sw-forti".to_string(), "1".to_string())),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+    }
+
     #[tokio::test]
     async fn test_poe_reset_unsupported_vendor() {
         // test-sw-02 is Cisco — not yet supported
