@@ -1,6 +1,10 @@
 use super::traits::{SwitchVendor, VendorError};
 use crate::config::RuntimeConfig;
-use crate::models::{ConfigResult, MirrorDirection, Port, PortMirror, PortMode, StateDiff, SwitchConfig, SwitchState, Vlan, VlanIpConfig, ConnectionType};
+use crate::models::{
+    ConfigResult, MirrorDirection, Port, PortMirror, PortMode, SnmpAccess, SnmpCommunity,
+    SnmpConfig, SnmpTrapReceiver, SpeedDuplex, StateDiff, SwitchConfig, SwitchState, TrapType,
+    Vlan, VlanIpConfig, ConnectionType,
+};
 use crate::ssh::{ConnectionClient, SerialClient, SshClient};
 use async_trait::async_trait;
 use tracing::{debug, info, warn};
@@ -11,6 +15,47 @@ pub struct FortiswitchSwitch {
     client: Option<ConnectionClient>,
     enforce_port_config: bool,
     current_state: Option<SwitchState>,
+}
+
+/// Raw `show` output for every FortiOS CLI block `parse_current_state` reads.
+struct FortiSwitchConfigBlocks {
+    system_interface: String,
+    switch_vlan: String,
+    switch_interface: String,
+    physical_port: String,
+    switch_mirror: String,
+    snmp_community: String,
+}
+
+/// A VLAN's Layer-3 interface details, when it has one (see `parse_svi_details`).
+#[derive(Debug, Clone, Default, PartialEq)]
+struct SviDetails {
+    ip_config: VlanIpConfig,
+    description: Option<String>,
+}
+
+/// One port's VLAN membership, from `config switch interface` (see
+/// `parse_switch_interface_ports`).
+#[derive(Debug, Clone, Default, PartialEq)]
+struct PortInterfaceInfo {
+    description: Option<String>,
+    native_vlan: Option<u16>,
+    allowed_vlans: Vec<u16>,
+}
+
+/// One port's physical properties, from `config switch physical-port` (see
+/// `parse_physical_ports`).
+#[derive(Debug, Clone, PartialEq)]
+struct PhysicalPortInfo {
+    enabled: bool,
+    poe_enabled: bool,
+    speed_duplex: SpeedDuplex,
+}
+
+impl Default for PhysicalPortInfo {
+    fn default() -> Self {
+        Self { enabled: true, poe_enabled: false, speed_duplex: SpeedDuplex::Auto }
+    }
 }
 
 impl FortiswitchSwitch {
@@ -746,40 +791,83 @@ impl SwitchVendor for FortiswitchSwitch {
     }
 
     async fn parse_current_state(&mut self) -> Result<SwitchState, VendorError> {
-        let config = self.get_running_config().await?;
-        let lines: Vec<&str> = config.lines().collect();
+        let raw = self.get_running_config_blocks().await?;
+
+        // Serial connections commonly carry ANSI escape sequences; strip them
+        // before parsing, same as the Aruba parser does.
+        let ansi_regex = regex::Regex::new(r"\x1b\[[0-9;?]*[A-Za-z]").unwrap();
+        let clean = |s: &str| ansi_regex.replace_all(s, "").to_string();
+        let system_interface = clean(&raw.system_interface);
+        let switch_vlan = clean(&raw.switch_vlan);
+        let switch_interface = clean(&raw.switch_interface);
+        let physical_port = clean(&raw.physical_port);
+        let switch_mirror = clean(&raw.switch_mirror);
+        let snmp_community = clean(&raw.snmp_community);
+
+        let system_interface_lines: Vec<&str> = system_interface.lines().collect();
 
         // Parse management VLAN (detect VLAN interfaces with IP and allowaccess)
-        let management_vlan = self.parse_management_vlan(&lines);
+        let management_vlan = self.parse_management_vlan(&system_interface_lines);
 
-        debug!("Parsed FortiSwitch state: Management VLAN: {:?}", management_vlan);
+        // Every other VLAN detail (ip_config, description) the device can
+        // actually tell us also comes from this same block.
+        let svi_details = self.parse_svi_details(&system_interface_lines);
 
-        // Add management VLAN to vlans vec if it exists, to prevent diff from re-adding it
-        let mut vlans = vec![];
-        if let Some(vlan_id) = management_vlan {
-            // Find the VLAN config to get the full details
-            if let Some(vlan_config) = self.config.vlans.iter().find(|v| v.id == vlan_id) {
-                vlans.push(vlan_config.clone());
-                debug!("Added management VLAN {} to parsed state to prevent re-configuration", vlan_id);
-            }
+        // The VLAN database (`config switch vlan`) is the only place a VLAN
+        // with no Layer-3 interface still shows up — and the only reliable
+        // source of "does this id exist on the device at all".
+        let vlan_ids = self.parse_switch_vlan_ids(&switch_vlan.lines().collect::<Vec<&str>>());
+
+        // FortiSwitch never persists a VLAN's *name* to the device (see
+        // `generate_vlan_commands`) — only its numeric id, and optionally a
+        // Layer-3 interface description. So a VLAN's name always comes from
+        // the desired config when we know it; the id itself is the one
+        // thing genuinely read back from hardware.
+        let mut vlans = Vec::new();
+        for id in vlan_ids {
+            let svi = svi_details.get(&id);
+            let desired = self.config.vlans.iter().find(|v| v.id == id);
+
+            let name = desired
+                .map(|v| v.name.clone())
+                .or_else(|| svi.and_then(|s| s.description.clone()))
+                .unwrap_or_else(|| format!("vlan{}", id));
+            let description = svi
+                .and_then(|s| s.description.clone())
+                .or_else(|| desired.and_then(|v| v.description.clone()));
+            let ip_config = svi
+                .map(|s| s.ip_config.clone())
+                .unwrap_or(VlanIpConfig::None);
+
+            vlans.push(Vlan { id, name, description, ip_config });
         }
+
+        let interfaces = self.parse_switch_interface_ports(&switch_interface.lines().collect::<Vec<&str>>());
+        let physical = self.parse_physical_ports(&physical_port.lines().collect::<Vec<&str>>());
+        let ports = self.build_ports(interfaces, physical);
+
+        let port_mirrors = self.parse_switch_mirrors(&switch_mirror.lines().collect::<Vec<&str>>());
+        let snmp = self.parse_snmp_community(&snmp_community.lines().collect::<Vec<&str>>());
 
         // Verify hardware model by running "get system status"
         // This returns lines like "Version: FortiSwitch-108F-POE v7.2.8,build0660,..."
         let warnings = self.detect_hardware_model().await;
 
-        // TODO: Implement full state parsing (VLANs, ports, mirrors, SNMP)
-        // For now, we only parse management_vlan for idempotency
-        warn!(
-            "FortiSwitch state parsing partially implemented for {}. Only management_vlan is parsed.",
-            self.config.hostname()
+        debug!(
+            "Parsed FortiSwitch state for {}: {} VLANs, {} ports, {} mirrors, SNMP: {}, Management VLAN: {:?}",
+            self.config.hostname(),
+            vlans.len(),
+            ports.len(),
+            port_mirrors.len(),
+            if snmp.is_some() { "configured" } else { "not configured" },
+            management_vlan
         );
 
         Ok(SwitchState {
             vlans,
-            ports: vec![],
-            port_mirrors: vec![],
-            snmp: None,
+            ports,
+            port_mirrors,
+            snmp,
             management_vlan,
             warnings,
         })
@@ -1205,6 +1293,71 @@ impl SwitchVendor for FortiswitchSwitch {
 
 // Additional helper methods for FortiswitchSwitch
 impl FortiswitchSwitch {
+    /// Every FortiOS CLI block `parse_current_state` needs, fetched with one
+    /// `show` command per block. FortiOS's `show` output for a config path
+    /// mirrors the `config ... edit ... set ... next ... end` syntax used to
+    /// write it (already relied on by `parse_management_vlan` for `show
+    /// system interface`), so each block below is parsed with the same
+    /// nested-`config`/`end` walk.
+    ///
+    /// Distinct from the `get_running_config` trait method (a single-string
+    /// "show me the raw config" used elsewhere, e.g. the dashboard's raw
+    /// config view) — that one keeps its original single-command behavior
+    /// unchanged; this is only for `parse_current_state`'s own use.
+    async fn get_running_config_blocks(&mut self) -> Result<FortiSwitchConfigBlocks, VendorError> {
+        let client = self
+            .client
+            .as_mut()
+            .ok_or_else(|| VendorError::SshError("Not connected".to_string()))?;
+
+        // "show system interface" includes VLAN Layer-3 interfaces
+        // (show full-configuration doesn't include dynamically created VLAN interfaces).
+        let system_interface = client
+            .execute_command("show system interface")
+            .await
+            .map_err(|e| VendorError::CommandError(e.to_string()))?;
+
+        // The VLAN database — the only place a VLAN with no Layer-3
+        // interface still shows up.
+        let switch_vlan = client
+            .execute_command("show switch vlan")
+            .await
+            .map_err(|e| VendorError::CommandError(e.to_string()))?;
+
+        // Per-port VLAN membership (native/allowed VLANs, description).
+        let switch_interface = client
+            .execute_command("show switch interface")
+            .await
+            .map_err(|e| VendorError::CommandError(e.to_string()))?;
+
+        // Per-port physical properties (status, PoE, speed).
+        let physical_port = client
+            .execute_command("show switch physical-port")
+            .await
+            .map_err(|e| VendorError::CommandError(e.to_string()))?;
+
+        // Port mirror (SPAN) sessions.
+        let switch_mirror = client
+            .execute_command("show switch mirror")
+            .await
+            .map_err(|e| VendorError::CommandError(e.to_string()))?;
+
+        // SNMP communities, trap receivers, and enabled trap events.
+        let snmp_community = client
+            .execute_command("show system snmp community")
+            .await
+            .map_err(|e| VendorError::CommandError(e.to_string()))?;
+
+        Ok(FortiSwitchConfigBlocks {
+            system_interface,
+            switch_vlan,
+            switch_interface,
+            physical_port,
+            switch_mirror,
+            snmp_community,
+        })
+    }
+
     /// Detect hardware model by running "get system status" and comparing
     /// the version string against known product identifiers.
     async fn detect_hardware_model(&mut self) -> Vec<String> {
@@ -1232,6 +1385,590 @@ impl FortiswitchSwitch {
                 Vec::new()
             }
         }
+    }
+
+    /// Extract the VLAN id from a `config system interface` edit line,
+    /// accepting both `edit vlan77` and `edit "vlan77"` (FortiOS quotes
+    /// interface names in some config/show contexts). Duplicates the
+    /// equivalent logic already inlined in `parse_management_vlan` rather
+    /// than factoring it out — that function is delicate and already has
+    /// extensive test coverage; a shared helper isn't worth the risk of
+    /// touching it.
+    fn parse_vlan_interface_edit_id(trimmed: &str) -> Option<u16> {
+        if let Some(rest) = trimmed.strip_prefix("edit vlan") {
+            return rest.split_whitespace().next()?.parse().ok();
+        }
+        if let Some(rest) = trimmed.strip_prefix("edit ") {
+            let rest = rest.trim();
+            if let Some(inner) = rest.strip_prefix("\"vlan").and_then(|s| s.strip_suffix('"')) {
+                return inner.parse().ok();
+            }
+        }
+        None
+    }
+
+    /// Parse every VLAN Layer-3 interface declared under `config system
+    /// interface`, returning ip_config/description per VLAN id — the same
+    /// block `parse_management_vlan` walks, but collecting details for every
+    /// VLAN interface found, not just the one that looks like a management
+    /// VLAN.
+    fn parse_svi_details(&self, lines: &[&str]) -> std::collections::HashMap<u16, SviDetails> {
+        let mut result = std::collections::HashMap::new();
+        let mut in_system_interface = false;
+        let mut nesting_depth = 0;
+        let mut current_vlan_id: Option<u16> = None;
+        let mut current = SviDetails::default();
+
+        for line in lines {
+            let trimmed = line.trim();
+
+            if trimmed == "config system interface" {
+                in_system_interface = true;
+                nesting_depth = 1;
+                continue;
+            }
+
+            if !in_system_interface {
+                continue;
+            }
+
+            if trimmed.starts_with("config ") {
+                nesting_depth += 1;
+                continue;
+            }
+
+            if trimmed == "end" {
+                nesting_depth -= 1;
+                if nesting_depth == 0 {
+                    if let Some(id) = current_vlan_id.take() {
+                        result.insert(id, current.clone());
+                    }
+                    in_system_interface = false;
+                }
+                continue;
+            }
+
+            if nesting_depth != 1 {
+                continue;
+            }
+
+            if let Some(vlan_id) = Self::parse_vlan_interface_edit_id(trimmed) {
+                if let Some(prev_id) = current_vlan_id.take() {
+                    result.insert(prev_id, current.clone());
+                }
+                current_vlan_id = Some(vlan_id);
+                current = SviDetails::default();
+                continue;
+            }
+
+            if current_vlan_id.is_none() {
+                continue;
+            }
+
+            if let Some(desc) = trimmed.strip_prefix("set description ") {
+                current.description = Some(desc.trim_matches('"').to_string());
+            } else if let Some(rest) = trimmed.strip_prefix("set ip ") {
+                let parts: Vec<&str> = rest.split_whitespace().collect();
+                if parts.len() == 2 {
+                    current.ip_config = VlanIpConfig::Static {
+                        address: parts[0].to_string(),
+                        netmask: parts[1].to_string(),
+                    };
+                }
+            } else if trimmed == "set mode dhcp" {
+                current.ip_config = VlanIpConfig::Dhcp;
+            } else if trimmed == "next" {
+                if let Some(id) = current_vlan_id.take() {
+                    result.insert(id, current.clone());
+                }
+                current = SviDetails::default();
+            }
+        }
+
+        if let Some(id) = current_vlan_id.take() {
+            result.insert(id, current);
+        }
+
+        result
+    }
+
+    /// Parse the VLAN database (`config switch vlan`) and return every VLAN
+    /// id declared there. This is the only place FortiSwitch persists a
+    /// VLAN's existence when it has no Layer-3 interface — VLAN names are
+    /// never written to the device at all (see `generate_vlan_commands`), so
+    /// a VLAN's name always comes from the desired config, never from here.
+    fn parse_switch_vlan_ids(&self, lines: &[&str]) -> Vec<u16> {
+        let mut ids = Vec::new();
+        let mut in_block = false;
+        let mut depth = 0;
+
+        for line in lines {
+            let trimmed = line.trim();
+
+            if trimmed == "config switch vlan" {
+                in_block = true;
+                depth = 1;
+                continue;
+            }
+
+            if !in_block {
+                continue;
+            }
+
+            if trimmed.starts_with("config ") {
+                depth += 1;
+                continue;
+            }
+
+            if trimmed == "end" {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+                continue;
+            }
+
+            if depth == 1 {
+                if let Some(rest) = trimmed.strip_prefix("edit ") {
+                    if let Ok(id) = rest.trim().trim_matches('"').parse::<u16>() {
+                        ids.push(id);
+                    }
+                }
+            }
+        }
+
+        ids
+    }
+
+    /// Parse per-port VLAN membership from `config switch interface`
+    /// (description, native VLAN, allowed VLANs). `set untagged-vlans` is
+    /// intentionally not parsed — `generate_port_commands` always sets it to
+    /// match the native VLAN, so it carries no information `native-vlan`
+    /// doesn't already have.
+    fn parse_switch_interface_ports(&self, lines: &[&str]) -> std::collections::HashMap<String, PortInterfaceInfo> {
+        let mut result = std::collections::HashMap::new();
+        let mut in_block = false;
+        let mut depth = 0;
+        let mut current_port: Option<String> = None;
+        let mut current = PortInterfaceInfo::default();
+
+        for line in lines {
+            let trimmed = line.trim();
+
+            if trimmed == "config switch interface" {
+                in_block = true;
+                depth = 1;
+                continue;
+            }
+
+            if !in_block {
+                continue;
+            }
+
+            if trimmed.starts_with("config ") {
+                depth += 1;
+                continue;
+            }
+
+            if trimmed == "end" {
+                depth -= 1;
+                if depth == 0 {
+                    if let Some(port_id) = current_port.take() {
+                        result.insert(port_id, current.clone());
+                    }
+                    in_block = false;
+                }
+                continue;
+            }
+
+            if depth != 1 {
+                continue;
+            }
+
+            if let Some(rest) = trimmed.strip_prefix("edit ") {
+                if let Some(prev) = current_port.take() {
+                    result.insert(prev, current.clone());
+                }
+                current_port = Some(rest.trim().trim_matches('"').to_string());
+                current = PortInterfaceInfo::default();
+                continue;
+            }
+
+            if current_port.is_none() {
+                continue;
+            }
+
+            if let Some(desc) = trimmed.strip_prefix("set description ") {
+                current.description = Some(desc.trim_matches('"').to_string());
+            } else if let Some(rest) = trimmed.strip_prefix("set native-vlan ") {
+                current.native_vlan = rest.trim().parse().ok();
+            } else if let Some(rest) = trimmed.strip_prefix("set allowed-vlans ") {
+                current.allowed_vlans = rest.split_whitespace().filter_map(|v| v.parse().ok()).collect();
+            } else if trimmed == "next" {
+                if let Some(port_id) = current_port.take() {
+                    result.insert(port_id, current.clone());
+                }
+                current = PortInterfaceInfo::default();
+            }
+        }
+
+        if let Some(port_id) = current_port.take() {
+            result.insert(port_id, current);
+        }
+
+        result
+    }
+
+    /// Parse per-port physical properties from `config switch physical-port`
+    /// (link status, PoE, speed/duplex).
+    fn parse_physical_ports(&self, lines: &[&str]) -> std::collections::HashMap<String, PhysicalPortInfo> {
+        let mut result = std::collections::HashMap::new();
+        let mut in_block = false;
+        let mut depth = 0;
+        let mut current_port: Option<String> = None;
+        let mut current = PhysicalPortInfo::default();
+
+        for line in lines {
+            let trimmed = line.trim();
+
+            if trimmed == "config switch physical-port" {
+                in_block = true;
+                depth = 1;
+                continue;
+            }
+
+            if !in_block {
+                continue;
+            }
+
+            if trimmed.starts_with("config ") {
+                depth += 1;
+                continue;
+            }
+
+            if trimmed == "end" {
+                depth -= 1;
+                if depth == 0 {
+                    if let Some(port_id) = current_port.take() {
+                        result.insert(port_id, current.clone());
+                    }
+                    in_block = false;
+                }
+                continue;
+            }
+
+            if depth != 1 {
+                continue;
+            }
+
+            if let Some(rest) = trimmed.strip_prefix("edit ") {
+                if let Some(prev) = current_port.take() {
+                    result.insert(prev, current.clone());
+                }
+                current_port = Some(rest.trim().trim_matches('"').to_string());
+                current = PhysicalPortInfo::default();
+                continue;
+            }
+
+            if current_port.is_none() {
+                continue;
+            }
+
+            if trimmed == "set status up" {
+                current.enabled = true;
+            } else if trimmed == "set status down" {
+                current.enabled = false;
+            } else if trimmed == "set poe-status enable" {
+                current.poe_enabled = true;
+            } else if trimmed == "set poe-status disable" {
+                current.poe_enabled = false;
+            } else if let Some(rest) = trimmed.strip_prefix("set speed ") {
+                current.speed_duplex = Self::parse_speed_from_fortiswitch(rest.trim());
+            } else if trimmed == "next" {
+                if let Some(port_id) = current_port.take() {
+                    result.insert(port_id, current.clone());
+                }
+                current = PhysicalPortInfo::default();
+            }
+        }
+
+        if let Some(port_id) = current_port.take() {
+            result.insert(port_id, current);
+        }
+
+        result
+    }
+
+    /// Merge per-port VLAN membership and physical properties into the
+    /// `Port` list the diff engine expects. A port present in only one of
+    /// the two blocks (shouldn't normally happen — both are written
+    /// together by `generate_port_commands`) falls back to that struct's
+    /// defaults for the missing half.
+    fn build_ports(
+        &self,
+        interfaces: std::collections::HashMap<String, PortInterfaceInfo>,
+        physical: std::collections::HashMap<String, PhysicalPortInfo>,
+    ) -> Vec<Port> {
+        let mut port_ids: std::collections::BTreeSet<String> = interfaces.keys().cloned().collect();
+        port_ids.extend(physical.keys().cloned());
+
+        port_ids
+            .into_iter()
+            .map(|interface_id| {
+                let iface = interfaces.get(&interface_id).cloned().unwrap_or_default();
+                let phys = physical.get(&interface_id).cloned().unwrap_or_default();
+
+                let native = iface.native_vlan.unwrap_or(1);
+                let tagged: Vec<u16> = iface
+                    .allowed_vlans
+                    .iter()
+                    .copied()
+                    .filter(|&v| v != native)
+                    .collect();
+
+                Port {
+                    port_id: Self::denormalize_port_id(&interface_id),
+                    mode: if tagged.is_empty() { PortMode::Access } else { PortMode::Trunk },
+                    vlan: native,
+                    tagged_vlans: tagged,
+                    description: iface.description,
+                    enabled: phys.enabled,
+                    poe_enabled: phys.poe_enabled,
+                    mac_notify: false,
+                    speed_duplex: phys.speed_duplex,
+                    vlan_name: None,
+                    tagged_vlan_refs: vec![],
+                }
+            })
+            .collect()
+    }
+
+    /// Parse port mirror (SPAN) sessions from `config switch mirror`.
+    fn parse_switch_mirrors(&self, lines: &[&str]) -> Vec<PortMirror> {
+        let mut mirrors = Vec::new();
+        let mut in_block = false;
+        let mut depth = 0;
+        let mut session_id: Option<String> = None;
+        let mut dst: Option<String> = None;
+        let mut ingress: Vec<String> = Vec::new();
+        let mut egress: Vec<String> = Vec::new();
+
+        for line in lines {
+            let trimmed = line.trim();
+
+            if trimmed == "config switch mirror" {
+                in_block = true;
+                depth = 1;
+                continue;
+            }
+
+            if !in_block {
+                continue;
+            }
+
+            if trimmed.starts_with("config ") {
+                depth += 1;
+                continue;
+            }
+
+            if trimmed == "end" {
+                depth -= 1;
+                if depth == 0 {
+                    Self::flush_mirror(&mut session_id, &mut dst, &mut ingress, &mut egress, &mut mirrors);
+                    in_block = false;
+                }
+                continue;
+            }
+
+            if depth != 1 {
+                continue;
+            }
+
+            if let Some(rest) = trimmed.strip_prefix("edit ") {
+                Self::flush_mirror(&mut session_id, &mut dst, &mut ingress, &mut egress, &mut mirrors);
+                session_id = Some(rest.trim().trim_matches('"').to_string());
+                continue;
+            }
+
+            if session_id.is_none() {
+                continue;
+            }
+
+            if let Some(rest) = trimmed.strip_prefix("set dst ") {
+                dst = Some(rest.trim().to_string());
+            } else if let Some(rest) = trimmed.strip_prefix("set src-ingress ") {
+                ingress = rest.split_whitespace().map(|s| s.to_string()).collect();
+            } else if let Some(rest) = trimmed.strip_prefix("set src-egress ") {
+                egress = rest.split_whitespace().map(|s| s.to_string()).collect();
+            } else if trimmed == "next" {
+                Self::flush_mirror(&mut session_id, &mut dst, &mut ingress, &mut egress, &mut mirrors);
+            }
+        }
+
+        Self::flush_mirror(&mut session_id, &mut dst, &mut ingress, &mut egress, &mut mirrors);
+
+        mirrors
+    }
+
+    /// Emit one `PortMirror` from an in-progress mirror-session edit block,
+    /// if it has both a destination and at least one source direction, then
+    /// reset the per-session accumulators for the next `edit`.
+    fn flush_mirror(
+        session_id: &mut Option<String>,
+        dst: &mut Option<String>,
+        ingress: &mut Vec<String>,
+        egress: &mut Vec<String>,
+        mirrors: &mut Vec<PortMirror>,
+    ) {
+        if let (Some(id), Some(d)) = (session_id.take(), dst.take()) {
+            if !ingress.is_empty() || !egress.is_empty() {
+                let direction = match (!ingress.is_empty(), !egress.is_empty()) {
+                    (true, true) => MirrorDirection::Both,
+                    (true, false) => MirrorDirection::Rx,
+                    (false, true) => MirrorDirection::Tx,
+                    (false, false) => MirrorDirection::Both,
+                };
+                let source_ports = if !ingress.is_empty() { ingress.clone() } else { egress.clone() };
+                mirrors.push(PortMirror {
+                    session_id: id,
+                    source_ports: source_ports.iter().map(|p| Self::denormalize_port_id(p)).collect(),
+                    destination_port: Self::denormalize_port_id(&d),
+                    direction,
+                });
+            }
+        }
+        ingress.clear();
+        egress.clear();
+    }
+
+    /// Parse SNMP communities, trap receivers, and enabled trap events from
+    /// `config system snmp community`.
+    fn parse_snmp_community(&self, lines: &[&str]) -> Option<SnmpConfig> {
+        let mut communities = Vec::new();
+        let mut trap_receivers = Vec::new();
+        let mut enabled_traps: Vec<TrapType> = Vec::new();
+
+        let mut in_block = false;
+        let mut depth = 0;
+        let mut in_community = false;
+        let mut community_name: Option<String> = None;
+        let mut in_hosts = false;
+        let mut current_host_ip: Option<String> = None;
+
+        for line in lines {
+            let trimmed = line.trim();
+
+            if trimmed == "config system snmp community" {
+                in_block = true;
+                depth = 1;
+                continue;
+            }
+
+            if !in_block {
+                continue;
+            }
+
+            if trimmed == "config hosts" {
+                in_hosts = true;
+                depth += 1;
+                continue;
+            }
+
+            if trimmed.starts_with("config ") {
+                depth += 1;
+                continue;
+            }
+
+            if trimmed == "end" {
+                depth -= 1;
+                if in_hosts && depth == 1 {
+                    in_hosts = false;
+                    continue;
+                }
+                if depth == 0 {
+                    in_block = false;
+                }
+                continue;
+            }
+
+            if in_hosts {
+                if let Some(rest) = trimmed.strip_prefix("set ip ") {
+                    current_host_ip = Some(rest.trim().to_string());
+                } else if trimmed == "next" {
+                    if let (Some(ip), Some(name)) = (current_host_ip.take(), community_name.clone()) {
+                        trap_receivers.push(SnmpTrapReceiver {
+                            host: ip,
+                            community: name,
+                            version: None,
+                        });
+                    }
+                }
+                continue;
+            }
+
+            if depth != 1 {
+                continue;
+            }
+
+            if trimmed.starts_with("edit ") {
+                in_community = true;
+                community_name = None;
+                continue;
+            }
+
+            if !in_community {
+                continue;
+            }
+
+            if let Some(name) = trimmed.strip_prefix("set name ") {
+                community_name = Some(name.trim_matches('"').to_string());
+            } else if let Some(rest) = trimmed.strip_prefix("set events ") {
+                enabled_traps = rest
+                    .split_whitespace()
+                    .filter_map(Self::parse_trap_type_from_fortiswitch)
+                    .collect();
+            } else if trimmed == "next" {
+                if let Some(name) = community_name.take() {
+                    communities.push(SnmpCommunity { name, access: SnmpAccess::default() });
+                }
+                in_community = false;
+            }
+        }
+
+        if communities.is_empty() && trap_receivers.is_empty() {
+            return None;
+        }
+
+        Some(SnmpConfig { communities, trap_receivers, enabled_traps })
+    }
+
+    /// Reverse of `convert_trap_type_to_fortiswitch`.
+    fn parse_trap_type_from_fortiswitch(s: &str) -> Option<TrapType> {
+        match s {
+            "mac-notify" => Some(TrapType::MacNotify),
+            "link-up-down" => Some(TrapType::LinkChange),
+            "all" => Some(TrapType::All),
+            _ => None,
+        }
+    }
+
+    /// Reverse of `convert_speed_to_fortiswitch`.
+    fn parse_speed_from_fortiswitch(s: &str) -> SpeedDuplex {
+        match s {
+            "10half" => SpeedDuplex::TenHalf,
+            "10full" => SpeedDuplex::TenFull,
+            "100half" => SpeedDuplex::HundredHalf,
+            "100full" => SpeedDuplex::HundredFull,
+            "1000full" => SpeedDuplex::ThousandFull,
+            "10000full" => SpeedDuplex::TenGFull,
+            _ => SpeedDuplex::Auto,
+        }
+    }
+
+    /// Reverse of `normalize_port_id`: `port1` -> `1`. Anything without the
+    /// `port` prefix is returned unchanged.
+    fn denormalize_port_id(interface: &str) -> String {
+        interface.strip_prefix("port").unwrap_or(interface).to_string()
     }
 
     /// Reset ports to default state (disabled, VLAN 1, access mode, no description)
@@ -2717,5 +3454,427 @@ mod tests {
         assert!(commands.contains(&"config switch physical-port".to_string()));
         assert!(commands.contains(&"set status up".to_string()));
         assert!(commands.contains(&"set speed auto".to_string()));
+    }
+
+    // ========== Full State Parsing Tests ==========
+    //
+    // Regression coverage for the incident on IT-02876: `parse_current_state`
+    // used to only ever extract `management_vlan`, so it always reported an
+    // empty state — tripping the "parsed state completely empty but desired
+    // config is not" safety check on every single reconcile, forever. These
+    // tests exercise the parsers against hand-built FortiOS CLI output
+    // matching this file's own command generators exactly (see
+    // `generate_vlan_commands`/`generate_port_commands`/etc.) — the same
+    // round-trip already relied on by `parse_management_vlan`.
+
+    fn create_test_switch_with_vlans(vlans: Vec<Vlan>) -> FortiswitchSwitch {
+        let mut config = create_test_config();
+        config.vlans = vlans;
+        FortiswitchSwitch::new(config, RuntimeConfig::default(), false)
+    }
+
+    #[test]
+    fn test_parse_switch_vlan_ids_multiple() {
+        let switch = create_test_switch();
+        let lines = vec![
+            "config switch vlan",
+            "    edit 1",
+            "    next",
+            "    edit 101",
+            "    next",
+            "    edit 102",
+            "    next",
+            "end",
+        ];
+        assert_eq!(switch.parse_switch_vlan_ids(&lines), vec![1, 101, 102]);
+    }
+
+    #[test]
+    fn test_parse_switch_vlan_ids_empty_block() {
+        let switch = create_test_switch();
+        let lines = vec!["config switch vlan", "end"];
+        assert!(switch.parse_switch_vlan_ids(&lines).is_empty());
+    }
+
+    #[test]
+    fn test_parse_switch_vlan_ids_no_block() {
+        let switch = create_test_switch();
+        let lines = vec!["config system interface", "end"];
+        assert!(switch.parse_switch_vlan_ids(&lines).is_empty());
+    }
+
+    #[test]
+    fn test_parse_svi_details_static_ip_and_description() {
+        let switch = create_test_switch();
+        let lines = vec![
+            "config system interface",
+            "    edit vlan101",
+            "        set vlanid 101",
+            "        set description \"Setup 1\"",
+            "        set ip 192.168.101.1 255.255.255.0",
+            "    next",
+            "end",
+        ];
+        let details = switch.parse_svi_details(&lines);
+        let d = details.get(&101).expect("vlan101 should be present");
+        assert_eq!(d.description, Some("Setup 1".to_string()));
+        assert_eq!(d.ip_config, VlanIpConfig::Static {
+            address: "192.168.101.1".to_string(),
+            netmask: "255.255.255.0".to_string(),
+        });
+    }
+
+    #[test]
+    fn test_parse_svi_details_dhcp() {
+        let switch = create_test_switch();
+        let lines = vec![
+            "config system interface",
+            "    edit vlan42",
+            "        set mode dhcp",
+            "    next",
+            "end",
+        ];
+        let details = switch.parse_svi_details(&lines);
+        assert_eq!(details.get(&42).unwrap().ip_config, VlanIpConfig::Dhcp);
+    }
+
+    #[test]
+    fn test_parse_svi_details_multiple_interfaces() {
+        let switch = create_test_switch();
+        let lines = vec![
+            "config system interface",
+            "    edit vlan42",
+            "        set mode dhcp",
+            "    next",
+            "    edit \"vlan101\"",
+            "        set ip 192.168.101.1 255.255.255.0",
+            "    next",
+            "end",
+        ];
+        let details = switch.parse_svi_details(&lines);
+        assert_eq!(details.len(), 2);
+        assert_eq!(details.get(&42).unwrap().ip_config, VlanIpConfig::Dhcp);
+        assert!(matches!(details.get(&101).unwrap().ip_config, VlanIpConfig::Static { .. }));
+    }
+
+    #[test]
+    fn test_parse_svi_details_none_when_no_interfaces() {
+        let switch = create_test_switch();
+        let lines = vec!["config system interface", "end"];
+        assert!(switch.parse_svi_details(&lines).is_empty());
+    }
+
+    #[test]
+    fn test_parse_current_state_vlans_name_from_desired_config() {
+        // The device never stores a VLAN's name (see generate_vlan_commands) —
+        // only its id, so the name must come from the desired config when we
+        // have one for that id.
+        let switch = create_test_switch_with_vlans(vec![
+            Vlan { id: 101, name: "setup-1".to_string(), description: None, ip_config: VlanIpConfig::None },
+        ]);
+        let switch_vlan_lines = vec!["config switch vlan", "    edit 101", "    next", "end"];
+        let svi_details = switch.parse_svi_details(&["config system interface", "end"]);
+        let vlan_ids = switch.parse_switch_vlan_ids(&switch_vlan_lines);
+
+        assert_eq!(vlan_ids, vec![101]);
+        assert!(svi_details.is_empty(), "no SVI for a VLAN with ip_config: none");
+    }
+
+    #[test]
+    fn test_parse_switch_interface_ports_access_port() {
+        let switch = create_test_switch();
+        let lines = vec![
+            "config switch interface",
+            "    edit port1",
+            "        set description \"RTX3481\"",
+            "        set native-vlan 101",
+            "        set allowed-vlans 101",
+            "        set untagged-vlans 101",
+            "    next",
+            "end",
+        ];
+        let ports = switch.parse_switch_interface_ports(&lines);
+        let p = ports.get("port1").expect("port1 should be present");
+        assert_eq!(p.description, Some("RTX3481".to_string()));
+        assert_eq!(p.native_vlan, Some(101));
+        assert_eq!(p.allowed_vlans, vec![101]);
+    }
+
+    #[test]
+    fn test_parse_switch_interface_ports_trunk_port() {
+        let switch = create_test_switch();
+        let lines = vec![
+            "config switch interface",
+            "    edit port26",
+            "        set description \"Router\"",
+            "        set native-vlan 666",
+            "        set allowed-vlans 42 101 102 666",
+            "        set untagged-vlans 666",
+            "    next",
+            "end",
+        ];
+        let ports = switch.parse_switch_interface_ports(&lines);
+        let p = ports.get("port26").unwrap();
+        assert_eq!(p.native_vlan, Some(666));
+        assert_eq!(p.allowed_vlans, vec![42, 101, 102, 666]);
+    }
+
+    #[test]
+    fn test_parse_switch_interface_ports_multiple_ports() {
+        let switch = create_test_switch();
+        let lines = vec![
+            "config switch interface",
+            "    edit port1",
+            "        set native-vlan 101",
+            "        set allowed-vlans 101",
+            "    next",
+            "    edit port2",
+            "        set native-vlan 102",
+            "        set allowed-vlans 102",
+            "    next",
+            "end",
+        ];
+        let ports = switch.parse_switch_interface_ports(&lines);
+        assert_eq!(ports.len(), 2);
+        assert_eq!(ports.get("port1").unwrap().native_vlan, Some(101));
+        assert_eq!(ports.get("port2").unwrap().native_vlan, Some(102));
+    }
+
+    #[test]
+    fn test_parse_physical_ports_enabled_poe_speed() {
+        let switch = create_test_switch();
+        let lines = vec![
+            "config switch physical-port",
+            "    edit port1",
+            "        set status up",
+            "        set poe-status enable",
+            "        set speed auto",
+            "    next",
+            "    edit port2",
+            "        set status down",
+            "        set poe-status disable",
+            "        set speed 1000full",
+            "    next",
+            "end",
+        ];
+        let ports = switch.parse_physical_ports(&lines);
+        let p1 = ports.get("port1").unwrap();
+        assert!(p1.enabled);
+        assert!(p1.poe_enabled);
+        assert_eq!(p1.speed_duplex, SpeedDuplex::Auto);
+
+        let p2 = ports.get("port2").unwrap();
+        assert!(!p2.enabled);
+        assert!(!p2.poe_enabled);
+        assert_eq!(p2.speed_duplex, SpeedDuplex::ThousandFull);
+    }
+
+    #[test]
+    fn test_build_ports_merges_interface_and_physical_access_mode() {
+        let switch = create_test_switch();
+        let mut interfaces = std::collections::HashMap::new();
+        interfaces.insert("port1".to_string(), PortInterfaceInfo {
+            description: Some("RTX3481".to_string()),
+            native_vlan: Some(101),
+            allowed_vlans: vec![101],
+        });
+        let mut physical = std::collections::HashMap::new();
+        physical.insert("port1".to_string(), PhysicalPortInfo {
+            enabled: true,
+            poe_enabled: true,
+            speed_duplex: SpeedDuplex::Auto,
+        });
+
+        let ports = switch.build_ports(interfaces, physical);
+        assert_eq!(ports.len(), 1);
+        let p = &ports[0];
+        assert_eq!(p.port_id, "1");
+        assert_eq!(p.vlan, 101);
+        assert!(p.tagged_vlans.is_empty());
+        assert_eq!(p.mode, PortMode::Access);
+        assert!(p.enabled);
+        assert!(p.poe_enabled);
+        assert_eq!(p.description, Some("RTX3481".to_string()));
+    }
+
+    #[test]
+    fn test_build_ports_trunk_mode_excludes_native_from_tagged() {
+        let switch = create_test_switch();
+        let mut interfaces = std::collections::HashMap::new();
+        interfaces.insert("port26".to_string(), PortInterfaceInfo {
+            description: None,
+            native_vlan: Some(666),
+            allowed_vlans: vec![42, 101, 102, 666],
+        });
+        let ports = switch.build_ports(interfaces, std::collections::HashMap::new());
+        let p = &ports[0];
+        assert_eq!(p.port_id, "26");
+        assert_eq!(p.vlan, 666);
+        assert_eq!(p.tagged_vlans, vec![42, 101, 102]);
+        assert_eq!(p.mode, PortMode::Trunk);
+    }
+
+    #[test]
+    fn test_build_ports_missing_physical_falls_back_to_defaults() {
+        let switch = create_test_switch();
+        let mut interfaces = std::collections::HashMap::new();
+        interfaces.insert("port5".to_string(), PortInterfaceInfo {
+            description: None,
+            native_vlan: Some(10),
+            allowed_vlans: vec![10],
+        });
+        let ports = switch.build_ports(interfaces, std::collections::HashMap::new());
+        let p = &ports[0];
+        assert!(p.enabled, "default physical state should be enabled");
+        assert!(!p.poe_enabled);
+        assert_eq!(p.speed_duplex, SpeedDuplex::Auto);
+    }
+
+    #[test]
+    fn test_parse_switch_mirrors_both_direction() {
+        let switch = create_test_switch();
+        let lines = vec![
+            "config switch mirror",
+            "    edit 1",
+            "        set status active",
+            "        set dst port22",
+            "        set src-ingress port15",
+            "        set src-egress port15",
+            "    next",
+            "end",
+        ];
+        let mirrors = switch.parse_switch_mirrors(&lines);
+        assert_eq!(mirrors.len(), 1);
+        let m = &mirrors[0];
+        assert_eq!(m.session_id, "1");
+        assert_eq!(m.destination_port, "22");
+        assert_eq!(m.source_ports, vec!["15".to_string()]);
+        assert_eq!(m.direction, MirrorDirection::Both);
+    }
+
+    #[test]
+    fn test_parse_switch_mirrors_rx_only() {
+        let switch = create_test_switch();
+        let lines = vec![
+            "config switch mirror",
+            "    edit 1",
+            "        set dst port22",
+            "        set src-ingress port15 port16",
+            "    next",
+            "end",
+        ];
+        let mirrors = switch.parse_switch_mirrors(&lines);
+        assert_eq!(mirrors[0].direction, MirrorDirection::Rx);
+        assert_eq!(mirrors[0].source_ports, vec!["15".to_string(), "16".to_string()]);
+    }
+
+    #[test]
+    fn test_parse_switch_mirrors_ignores_incomplete_session() {
+        // A session with no dst/src configured yet (or only a status line)
+        // must not be reported as a real mirror.
+        let switch = create_test_switch();
+        let lines = vec![
+            "config switch mirror",
+            "    edit 1",
+            "        set status active",
+            "    next",
+            "end",
+        ];
+        assert!(switch.parse_switch_mirrors(&lines).is_empty());
+    }
+
+    #[test]
+    fn test_parse_switch_mirrors_none_when_no_sessions() {
+        let switch = create_test_switch();
+        let lines = vec!["config switch mirror", "end"];
+        assert!(switch.parse_switch_mirrors(&lines).is_empty());
+    }
+
+    #[test]
+    fn test_parse_snmp_community_with_trap_receivers_and_events() {
+        let switch = create_test_switch();
+        let lines = vec![
+            "config system snmp community",
+            "    edit 1",
+            "        set name \"public\"",
+            "        set status enable",
+            "        set query-v1-status enable",
+            "        set query-v2c-status enable",
+            "        set trap-v1-status enable",
+            "        set trap-v2c-status enable",
+            "        set events mac-notify link-up-down",
+            "        config hosts",
+            "            edit 1",
+            "                set ip 192.168.1.1",
+            "                set interface internal",
+            "            next",
+            "        end",
+            "    next",
+            "end",
+        ];
+        let snmp = switch.parse_snmp_community(&lines).expect("SNMP should be configured");
+        assert_eq!(snmp.communities.len(), 1);
+        assert_eq!(snmp.communities[0].name, "public");
+        assert_eq!(snmp.trap_receivers.len(), 1);
+        assert_eq!(snmp.trap_receivers[0].host, "192.168.1.1");
+        assert_eq!(snmp.trap_receivers[0].community, "public");
+        assert_eq!(snmp.enabled_traps, vec![TrapType::MacNotify, TrapType::LinkChange]);
+    }
+
+    #[test]
+    fn test_parse_snmp_community_multiple_communities_no_traps() {
+        let switch = create_test_switch();
+        let lines = vec![
+            "config system snmp community",
+            "    edit 1",
+            "        set name \"public\"",
+            "        set status enable",
+            "    next",
+            "    edit 2",
+            "        set name \"private\"",
+            "        set status enable",
+            "    next",
+            "end",
+        ];
+        let snmp = switch.parse_snmp_community(&lines).unwrap();
+        let names: Vec<&str> = snmp.communities.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["public", "private"]);
+        assert!(snmp.trap_receivers.is_empty());
+    }
+
+    #[test]
+    fn test_parse_snmp_community_none_when_not_configured() {
+        let switch = create_test_switch();
+        let lines = vec!["config system snmp community", "end"];
+        assert!(switch.parse_snmp_community(&lines).is_none());
+    }
+
+    #[test]
+    fn test_denormalize_port_id() {
+        assert_eq!(FortiswitchSwitch::denormalize_port_id("port1"), "1");
+        assert_eq!(FortiswitchSwitch::denormalize_port_id("port24"), "24");
+        assert_eq!(FortiswitchSwitch::denormalize_port_id("1"), "1");
+    }
+
+    #[test]
+    fn test_parse_speed_from_fortiswitch_round_trips() {
+        let switch = create_test_switch();
+        for speed in [
+            SpeedDuplex::Auto, SpeedDuplex::TenHalf, SpeedDuplex::TenFull,
+            SpeedDuplex::HundredHalf, SpeedDuplex::HundredFull,
+            SpeedDuplex::ThousandFull, SpeedDuplex::TenGFull,
+        ] {
+            let written = switch.convert_speed_to_fortiswitch(&speed);
+            assert_eq!(FortiswitchSwitch::parse_speed_from_fortiswitch(&written), speed);
+        }
+    }
+
+    #[test]
+    fn test_parse_trap_type_from_fortiswitch_round_trips() {
+        let switch = create_test_switch();
+        for trap in [TrapType::MacNotify, TrapType::LinkChange, TrapType::All] {
+            let written = switch.convert_trap_type_to_fortiswitch(&trap);
+            assert_eq!(FortiswitchSwitch::parse_trap_type_from_fortiswitch(&written), Some(trap));
+        }
     }
 }
