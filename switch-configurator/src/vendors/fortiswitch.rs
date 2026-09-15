@@ -482,6 +482,33 @@ impl FortiswitchSwitch {
         format!("port{}", port_id)
     }
 
+    /// Commands to disable PoE on a single port (for the operational PoE-reset
+    /// action), mirroring the per-port syntax used by `generate_port_commands`.
+    pub fn poe_disable_commands(&self, port_id: &str) -> Vec<String> {
+        let interface = self.normalize_port_id(port_id);
+        vec![
+            "config switch physical-port".to_string(),
+            format!("edit {}", interface),
+            "set poe-status disable".to_string(),
+            "next".to_string(),
+            "end".to_string(),
+        ]
+    }
+
+    /// Commands to re-enable PoE on a single port (for the operational
+    /// PoE-reset action), mirroring the per-port syntax used by
+    /// `generate_port_commands`.
+    pub fn poe_enable_commands(&self, port_id: &str) -> Vec<String> {
+        let interface = self.normalize_port_id(port_id);
+        vec![
+            "config switch physical-port".to_string(),
+            format!("edit {}", interface),
+            "set poe-status enable".to_string(),
+            "next".to_string(),
+            "end".to_string(),
+        ]
+    }
+
     fn generate_remove_vlan_commands(&self, vlan_ids: &[u16]) -> Vec<String> {
         let mut commands = vec!["config switch vlan".to_string()];
 
@@ -768,10 +795,18 @@ impl SwitchVendor for FortiswitchSwitch {
                     .await
                     .map_err(|e| VendorError::SshError(e.to_string()))?;
 
-                // Login via serial
+                // Login via serial. Uses the factory-default fallback: if the
+                // configured password is rejected, FortiOS's admin account
+                // may still be at its blank factory default (never
+                // bootstrapped), so a single retry with a blank password is
+                // attempted — completing the forced password-change prompt
+                // with the configured password if the switch presents it.
                 if let Some(password) = &self.config.credentials().password {
                     serial_client
-                        .login(&self.config.credentials().username, password)
+                        .login_with_factory_default_fallback(
+                            &self.config.credentials().username,
+                            password,
+                        )
                         .await
                         .map_err(|e| VendorError::SshError(e.to_string()))?;
                 } else {
@@ -2341,6 +2376,41 @@ mod tests {
         let switch = create_test_switch();
         assert_eq!(switch.normalize_port_id("GigabitEthernet1/0/1"), "port1");
         assert_eq!(switch.normalize_port_id("1/0/24"), "port24");
+    }
+
+    // ========== PoE Reset Command Tests ==========
+
+    #[test]
+    fn test_poe_disable_commands() {
+        let switch = create_test_switch();
+        let cmds = switch.poe_disable_commands("5");
+        assert_eq!(cmds, vec![
+            "config switch physical-port",
+            "edit port5",
+            "set poe-status disable",
+            "next",
+            "end",
+        ]);
+    }
+
+    #[test]
+    fn test_poe_enable_commands() {
+        let switch = create_test_switch();
+        let cmds = switch.poe_enable_commands("5");
+        assert_eq!(cmds, vec![
+            "config switch physical-port",
+            "edit port5",
+            "set poe-status enable",
+            "next",
+            "end",
+        ]);
+    }
+
+    #[test]
+    fn test_poe_commands_normalize_port_id() {
+        let switch = create_test_switch();
+        let cmds = switch.poe_disable_commands("GigabitEthernet1/0/5");
+        assert_eq!(cmds[1], "edit port5");
     }
 
     // ========== Speed Conversion Tests ==========

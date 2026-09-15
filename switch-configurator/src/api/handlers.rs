@@ -1570,7 +1570,7 @@ pub async fn poe_reset(
             .into_response();
     }
 
-    if model.vendor() != Vendor::Aruba {
+    if !matches!(model.vendor(), Vendor::Aruba | Vendor::Fortiswitch) {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({"error": format!("PoE reset not yet supported for {:?} switches", model.vendor())})),
@@ -1672,13 +1672,30 @@ async fn poe_reset_impl(
         .await
         .map_err(|e| format!("Connection failed: {}", e))?;
 
-    let aruba = vendors::aruba::ArubaSwitch::new(
-        switch_config.clone(),
-        crate::config::RuntimeConfig::default(),
-        false,
-    );
-    let disable_cmds = aruba.poe_disable_commands(port_id);
-    let enable_cmds = aruba.poe_enable_commands(port_id);
+    let (disable_cmds, enable_cmds) = match switch_config.model().vendor() {
+        Vendor::Fortiswitch => {
+            let fortiswitch = vendors::fortiswitch::FortiswitchSwitch::new(
+                switch_config.clone(),
+                crate::config::RuntimeConfig::default(),
+                false,
+            );
+            (
+                fortiswitch.poe_disable_commands(port_id),
+                fortiswitch.poe_enable_commands(port_id),
+            )
+        }
+        _ => {
+            let aruba = vendors::aruba::ArubaSwitch::new(
+                switch_config.clone(),
+                crate::config::RuntimeConfig::default(),
+                false,
+            );
+            (
+                aruba.poe_disable_commands(port_id),
+                aruba.poe_enable_commands(port_id),
+            )
+        }
+    };
 
     emit("disabling", None);
     if let Err(e) = vendor.execute_raw_commands(&disable_cmds).await {

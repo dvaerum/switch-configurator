@@ -424,7 +424,14 @@ impl SshClient {
         let is_readonly = command.trim().starts_with("show ");
         let is_session_setting = command.trim() == "no page"
             || command.trim() == "terminal length 0"
-            || command.trim() == "terminal pager 0";
+            || command.trim() == "terminal pager 0"
+            || command.trim() == "end"  // FortiSwitch: exit config mode
+            // FortiSwitch pagination control (see `connect()` in fortiswitch.rs):
+            // must still run in dry-run mode, or `show` commands issued right
+            // after skip straight into an unanswered "--More--" pager prompt
+            // and hang until the read times out. Confirmed on real hardware.
+            || command.trim() == "config system console"
+            || command.trim() == "set output standard";
 
         if self.dry_run && !is_readonly && !is_session_setting {
             info!("   🔍 [DRY-RUN] Would execute (skipped)");
@@ -849,6 +856,34 @@ mod tests {
         let client = SshClient::new("192.168.1.1".to_string(), 22)
             .with_dry_run(true);
         assert!(client.dry_run);
+    }
+
+    #[test]
+    fn test_session_setting_classification() {
+        // Mirrors the exact classification used in execute_command()'s
+        // dry-run gate. "config system console" / "set output standard" must
+        // run even in dry-run mode: skipping them (as used to happen) means
+        // FortiSwitch's pager is never disabled, so a subsequent "show"
+        // command hangs on an unanswered "--More--" prompt. Confirmed on
+        // real hardware (108F-POE, over serial — same code path SSH shares).
+        fn is_session_setting(cmd: &str) -> bool {
+            cmd.trim() == "no page"
+                || cmd.trim() == "terminal length 0"
+                || cmd.trim() == "terminal pager 0"
+                || cmd.trim() == "end"
+                || cmd.trim() == "config system console"
+                || cmd.trim() == "set output standard"
+        }
+
+        assert!(is_session_setting("no page"));
+        assert!(is_session_setting("terminal length 0"));
+        assert!(is_session_setting("terminal pager 0"));
+        assert!(is_session_setting("end"));
+        assert!(is_session_setting("config system console"));
+        assert!(is_session_setting("set output standard"));
+
+        assert!(!is_session_setting("configure terminal"));
+        assert!(!is_session_setting("vlan 42"));
     }
 
     // Tests for connect_with_retry behavior
