@@ -7,7 +7,7 @@ use crate::models::{
 };
 use crate::ssh::{ConnectionClient, SerialClient, SshClient};
 use async_trait::async_trait;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, trace, warn};
 
 pub struct FortiswitchSwitch {
     config: SwitchConfig,
@@ -814,6 +814,15 @@ impl SwitchVendor for FortiswitchSwitch {
         let physical_port = clean(&raw.physical_port);
         let switch_mirror = clean(&raw.switch_mirror);
         let snmp_community = clean(&raw.snmp_community);
+
+        // TEMP DIAGNOSTIC: full raw block content, to debug real-hardware
+        // parsing discrepancies. Trace level only (not printed by default).
+        trace!("RAW show system interface:\n{}", system_interface);
+        trace!("RAW show switch vlan:\n{}", switch_vlan);
+        trace!("RAW show switch interface:\n{}", switch_interface);
+        trace!("RAW show switch physical-port:\n{}", physical_port);
+        trace!("RAW show switch mirror:\n{}", switch_mirror);
+        trace!("RAW show system snmp community:\n{}", snmp_community);
 
         let system_interface_lines: Vec<&str> = system_interface.lines().collect();
 
