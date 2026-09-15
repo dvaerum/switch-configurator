@@ -716,11 +716,17 @@ impl SwitchVendor for FortiswitchSwitch {
                 let _ = ssh_client.execute_command("end").await;
                 let _ = ssh_client.execute_command("end").await; // Second end in case nested
 
-                // FortiSwitch pagination control
-                // Note: Most FortiSwitch models handle output without pagination issues.
-                // If "--More--" prompts appear, the correct command sequence is:
-                // config system console -> set output standard -> end
-                // However, this may not be supported on all models.
+                // FortiSwitch pagination control: a long `show` response (e.g.
+                // `show switch interface` on a switch with many ports) triggers
+                // a "--More--" pager prompt that the client never advances past,
+                // hanging until the read times out. Confirmed on real hardware
+                // (FortiSwitch 124F-FPOE) once `parse_current_state` started
+                // issuing multi-block `show` commands. Best-effort: some models
+                // may not support this exact command, so failures are ignored,
+                // same as the "end" calls above.
+                let _ = ssh_client.execute_command("config system console").await;
+                let _ = ssh_client.execute_command("set output standard").await;
+                let _ = ssh_client.execute_command("end").await;
 
                 ConnectionClient::Ssh(ssh_client)
             }
@@ -764,12 +770,17 @@ impl SwitchVendor for FortiswitchSwitch {
                 let _ = serial_client.execute_command("end").await;
                 let _ = serial_client.execute_command("end").await; // Second end in case nested
 
-                // FortiSwitch pagination control
-                // Note: FortiSwitch serial connections typically don't require pagination disabling
-                // as they output full responses without "--More--" prompts. If pagination becomes
-                // an issue, the correct FortiSwitch command would be:
-                // config system console -> set output standard -> end
-                // However, this command may not be supported on all models and can cause timeouts.
+                // FortiSwitch pagination control: a long `show` response (e.g.
+                // `show switch interface` on a switch with many ports) triggers
+                // a "--More--" pager prompt that the client never advances past,
+                // hanging until the read times out. Confirmed on real hardware
+                // (FortiSwitch 124F-FPOE) once `parse_current_state` started
+                // issuing multi-block `show` commands. Best-effort: some models
+                // may not support this exact command, so failures are ignored,
+                // same as the "end" calls above.
+                let _ = serial_client.execute_command("config system console").await;
+                let _ = serial_client.execute_command("set output standard").await;
+                let _ = serial_client.execute_command("end").await;
 
                 ConnectionClient::Serial(serial_client)
             }
