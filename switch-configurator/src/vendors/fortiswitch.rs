@@ -15,6 +15,14 @@ pub struct FortiswitchSwitch {
     client: Option<ConnectionClient>,
     enforce_port_config: bool,
     current_state: Option<SwitchState>,
+    /// Community name -> numeric `edit <N>` index, from the most recent
+    /// `parse_current_state`. FortiOS's `config system snmp community` is
+    /// index-based; a community's name is just a `set name` field inside
+    /// the entry, not something `delete` accepts. Confirmed on real
+    /// hardware: `delete <name>` is silently a no-op — the community is
+    /// still there on the next read. `apply_snmp_diff` needs this to issue
+    /// `delete <index>` instead.
+    snmp_community_indices: std::collections::HashMap<String, u16>,
 }
 
 /// Raw `show` output for every FortiOS CLI block `parse_current_state` reads.
@@ -65,6 +73,7 @@ impl FortiswitchSwitch {
             client: None,
             enforce_port_config,
             current_state: None,
+            snmp_community_indices: std::collections::HashMap::new(),
         }
     }
 
@@ -594,12 +603,19 @@ impl FortiswitchSwitch {
         // FortiSwitch SNMP uses "config system snmp community" -> "edit X" structure
         commands.push("config system snmp community".to_string());
 
-        // Remove communities (by deleting the entry)
+        // Remove communities. FortiSwitch's "config system snmp community"
+        // is index-based — `delete <name>` is silently a no-op (confirmed
+        // on real hardware: the community was still present on the next
+        // read). Delete by the numeric index recorded from the most recent
+        // parse_current_state; fall back to the name if we never saw this
+        // community there (shouldn't happen for something we're trying to
+        // remove, but better than sending nothing).
         for community_name in &snmp_diff.communities_to_remove {
             info!("Removing SNMP community: {}", community_name);
-            // FortiSwitch uses index-based editing, but we can try to delete by name
-            // Note: This may need to be done by finding the index first in real implementation
-            commands.push(format!("delete {}", community_name));
+            let target = self.snmp_community_indices.get(community_name)
+                .map(|idx| idx.to_string())
+                .unwrap_or_else(|| community_name.clone());
+            commands.push(format!("delete {}", target));
             actions.push(format!("removed community '{}'", community_name));
         }
 
@@ -866,7 +882,9 @@ impl SwitchVendor for FortiswitchSwitch {
         let ports = self.build_ports(interfaces, physical);
 
         let port_mirrors = self.parse_switch_mirrors(&switch_mirror.lines().collect::<Vec<&str>>());
-        let snmp = self.parse_snmp_community(&snmp_community.lines().collect::<Vec<&str>>());
+        let snmp_community_lines: Vec<&str> = snmp_community.lines().collect();
+        let snmp = self.parse_snmp_community(&snmp_community_lines);
+        self.snmp_community_indices = Self::parse_snmp_community_indices(&snmp_community_lines);
 
         // Verify hardware model by running "get system status"
         // This returns lines like "Version: FortiSwitch-108F-POE v7.2.8,build0660,..."
@@ -1977,6 +1995,74 @@ impl FortiswitchSwitch {
         }
 
         Some(SnmpConfig { communities, trap_receivers, enabled_traps })
+    }
+
+    /// Map each SNMP community's name to its numeric `edit <N>` index in
+    /// `config system snmp community`. A sibling of `parse_snmp_community`
+    /// (same block walk, duplicated rather than factored in) so removal
+    /// commands can `delete <index>` — FortiOS's own index, not the name —
+    /// without touching that already real-hardware-verified parser.
+    fn parse_snmp_community_indices(lines: &[&str]) -> std::collections::HashMap<String, u16> {
+        let mut indices = std::collections::HashMap::new();
+        let mut in_block = false;
+        let mut depth = 0;
+        let mut in_hosts = false;
+        let mut current_index: Option<u16> = None;
+
+        for line in lines {
+            let trimmed = line.trim();
+
+            if trimmed == "config system snmp community" {
+                in_block = true;
+                depth = 1;
+                continue;
+            }
+
+            if !in_block {
+                continue;
+            }
+
+            if trimmed == "config hosts" {
+                in_hosts = true;
+                depth += 1;
+                continue;
+            }
+
+            if trimmed.starts_with("config ") {
+                depth += 1;
+                continue;
+            }
+
+            if trimmed == "end" {
+                depth -= 1;
+                if in_hosts && depth == 1 {
+                    in_hosts = false;
+                }
+                if depth == 0 {
+                    in_block = false;
+                }
+                continue;
+            }
+
+            if in_hosts || depth != 1 {
+                continue;
+            }
+
+            if let Some(rest) = trimmed.strip_prefix("edit ") {
+                current_index = rest.trim().parse().ok();
+                continue;
+            }
+
+            if let Some(name) = trimmed.strip_prefix("set name ") {
+                if let Some(idx) = current_index {
+                    indices.insert(name.trim_matches('"').to_string(), idx);
+                }
+            } else if trimmed == "next" {
+                current_index = None;
+            }
+        }
+
+        indices
     }
 
     /// Reverse of `convert_trap_type_to_fortiswitch`.
@@ -4061,6 +4147,69 @@ mod tests {
         let switch = create_test_switch();
         let lines = vec!["config system snmp community", "end"];
         assert!(switch.parse_snmp_community(&lines).is_none());
+    }
+
+    #[test]
+    fn test_parse_snmp_community_indices_single() {
+        // Regression: real hardware shipped a factory-default "public"
+        // community at index 1 that our desired config never declared.
+        // Removing it requires `delete 1`, not `delete public` — FortiOS's
+        // `config system snmp community` is index-based, and a bare `delete
+        // <name>` is silently a no-op (confirmed: the community was still
+        // present on the very next read).
+        let lines = vec![
+            "config system snmp community",
+            "    edit 1",
+            "        set name \"public\"",
+            "    next",
+            "end",
+        ];
+        let indices = FortiswitchSwitch::parse_snmp_community_indices(&lines);
+        assert_eq!(indices.get("public"), Some(&1));
+    }
+
+    #[test]
+    fn test_parse_snmp_community_indices_multiple() {
+        let lines = vec![
+            "config system snmp community",
+            "    edit 1",
+            "        set name \"public\"",
+            "    next",
+            "    edit 2",
+            "        set name \"private\"",
+            "    next",
+            "end",
+        ];
+        let indices = FortiswitchSwitch::parse_snmp_community_indices(&lines);
+        assert_eq!(indices.get("public"), Some(&1));
+        assert_eq!(indices.get("private"), Some(&2));
+    }
+
+    #[test]
+    fn test_parse_snmp_community_indices_ignores_host_entries() {
+        // The nested "config hosts" block also has "edit <N>" entries (trap
+        // receiver hosts) that must not be mistaken for community indices.
+        let lines = vec![
+            "config system snmp community",
+            "    edit 1",
+            "        set name \"public\"",
+            "        config hosts",
+            "            edit 1",
+            "                set ip 192.168.1.1",
+            "            next",
+            "        end",
+            "    next",
+            "end",
+        ];
+        let indices = FortiswitchSwitch::parse_snmp_community_indices(&lines);
+        assert_eq!(indices.len(), 1);
+        assert_eq!(indices.get("public"), Some(&1));
+    }
+
+    #[test]
+    fn test_parse_snmp_community_indices_empty_when_not_configured() {
+        let lines = vec!["config system snmp community", "end"];
+        assert!(FortiswitchSwitch::parse_snmp_community_indices(&lines).is_empty());
     }
 
     #[test]
