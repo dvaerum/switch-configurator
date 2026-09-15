@@ -44,18 +44,17 @@ struct PortInterfaceInfo {
 }
 
 /// One port's physical properties, from `config switch physical-port` (see
-/// `parse_physical_ports`).
-#[derive(Debug, Clone, PartialEq)]
+/// `parse_physical_ports`). Each field is `None` when its `set` line simply
+/// never appears in the output — confirmed on real hardware (FortiSwitch
+/// 124F-FPOE): FortiOS's `show` only prints settings that differ from the
+/// device's own default, so "not mentioned" means "at whatever this
+/// switch's default is", not "off". `build_ports` resolves each `None` to
+/// that default rather than to a fixed fallback.
+#[derive(Debug, Clone, Default, PartialEq)]
 struct PhysicalPortInfo {
-    enabled: bool,
-    poe_enabled: bool,
-    speed_duplex: SpeedDuplex,
-}
-
-impl Default for PhysicalPortInfo {
-    fn default() -> Self {
-        Self { enabled: true, poe_enabled: false, speed_duplex: SpeedDuplex::Auto }
-    }
+    enabled: Option<bool>,
+    poe_enabled: Option<bool>,
+    speed_duplex: Option<SpeedDuplex>,
 }
 
 impl FortiswitchSwitch {
@@ -1623,7 +1622,7 @@ impl FortiswitchSwitch {
             } else if let Some(rest) = trimmed.strip_prefix("set native-vlan ") {
                 current.native_vlan = rest.trim().parse().ok();
             } else if let Some(rest) = trimmed.strip_prefix("set allowed-vlans ") {
-                current.allowed_vlans = rest.split_whitespace().filter_map(|v| v.parse().ok()).collect();
+                current.allowed_vlans = Self::parse_vlan_list(rest);
             } else if trimmed == "next" {
                 if let Some(port_id) = current_port.take() {
                     result.insert(port_id, current.clone());
@@ -1695,15 +1694,15 @@ impl FortiswitchSwitch {
             }
 
             if trimmed == "set status up" {
-                current.enabled = true;
+                current.enabled = Some(true);
             } else if trimmed == "set status down" {
-                current.enabled = false;
+                current.enabled = Some(false);
             } else if trimmed == "set poe-status enable" {
-                current.poe_enabled = true;
+                current.poe_enabled = Some(true);
             } else if trimmed == "set poe-status disable" {
-                current.poe_enabled = false;
+                current.poe_enabled = Some(false);
             } else if let Some(rest) = trimmed.strip_prefix("set speed ") {
-                current.speed_duplex = Self::parse_speed_from_fortiswitch(rest.trim());
+                current.speed_duplex = Some(Self::parse_speed_from_fortiswitch(rest.trim()));
             } else if trimmed == "next" {
                 if let Some(port_id) = current_port.take() {
                     result.insert(port_id, current.clone());
@@ -1724,6 +1723,14 @@ impl FortiswitchSwitch {
     /// the two blocks (shouldn't normally happen — both are written
     /// together by `generate_port_commands`) falls back to that struct's
     /// defaults for the missing half.
+    ///
+    /// `PhysicalPortInfo`'s fields are `Option` because FortiOS's `show`
+    /// only prints settings that differ from this switch's own default —
+    /// confirmed on real hardware, where `set poe-status`/`set status` never
+    /// appeared at all for ports already at the (PoE-enabled, up) default.
+    /// A bare `unwrap_or(false)` for `poe_enabled` would misread every such
+    /// port as PoE-disabled forever, so the fallback is model-aware: `true`
+    /// on a port the model itself says is PoE-capable, `false` otherwise.
     fn build_ports(
         &self,
         interfaces: std::collections::HashMap<String, PortInterfaceInfo>,
@@ -1734,9 +1741,17 @@ impl FortiswitchSwitch {
 
         port_ids
             .into_iter()
+            // `show switch interface` lists FortiSwitch's own special
+            // interfaces (e.g. "internal", its CPU/management port)
+            // alongside the real numbered front-panel ports — confirmed on
+            // real hardware. Those aren't configurable ports at all; with
+            // enforce_port_config on, treating "internal" as a stray port
+            // made the diff engine want to "reset" it every single cycle.
+            .filter(|interface_id| Self::is_numbered_port(interface_id))
             .map(|interface_id| {
                 let iface = interfaces.get(&interface_id).cloned().unwrap_or_default();
                 let phys = physical.get(&interface_id).cloned().unwrap_or_default();
+                let port_id = Self::denormalize_port_id(&interface_id);
 
                 let native = iface.native_vlan.unwrap_or(1);
                 let tagged: Vec<u16> = iface
@@ -1746,16 +1761,18 @@ impl FortiswitchSwitch {
                     .filter(|&v| v != native)
                     .collect();
 
+                let poe_capable = self.config.model().port_supports_poe(&port_id);
+
                 Port {
-                    port_id: Self::denormalize_port_id(&interface_id),
+                    port_id,
                     mode: if tagged.is_empty() { PortMode::Access } else { PortMode::Trunk },
                     vlan: native,
                     tagged_vlans: tagged,
                     description: iface.description,
-                    enabled: phys.enabled,
-                    poe_enabled: phys.poe_enabled,
+                    enabled: phys.enabled.unwrap_or(true),
+                    poe_enabled: phys.poe_enabled.unwrap_or(poe_capable),
                     mac_notify: false,
-                    speed_duplex: phys.speed_duplex,
+                    speed_duplex: phys.speed_duplex.unwrap_or(crate::models::SpeedDuplex::Auto),
                     vlan_name: None,
                     tagged_vlan_refs: vec![],
                 }
@@ -1989,6 +2006,37 @@ impl FortiswitchSwitch {
     /// `port` prefix is returned unchanged.
     fn denormalize_port_id(interface: &str) -> String {
         interface.strip_prefix("port").unwrap_or(interface).to_string()
+    }
+
+    /// Whether an interface name from `show switch interface`/`show switch
+    /// physical-port` is a real numbered front-panel port (`port1`,
+    /// `port24`, ...) rather than one of FortiSwitch's own special
+    /// interfaces (e.g. `internal`, its CPU/management port — confirmed
+    /// present in that same listing on real hardware).
+    fn is_numbered_port(interface: &str) -> bool {
+        interface.strip_prefix("port")
+            .map(|rest| !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()))
+            .unwrap_or(false)
+    }
+
+    /// Parse a FortiOS VLAN list, expanding `a-b` ranges. Confirmed on real
+    /// hardware (FortiSwitch 124F-FPOE): `show switch interface` compresses
+    /// `allowed-vlans` into comma-separated ranges, e.g. `42,101-104,501` —
+    /// a bare whitespace split parses that as one invalid token and silently
+    /// drops the entire list. The write side (`generate_port_commands`)
+    /// instead space-separates individual ids; both forms are accepted here.
+    fn parse_vlan_list(s: &str) -> Vec<u16> {
+        s.split(|c: char| c == ',' || c.is_whitespace())
+            .filter(|part| !part.is_empty())
+            .flat_map(|part| {
+                if let Some((start, end)) = part.split_once('-') {
+                    if let (Ok(start), Ok(end)) = (start.trim().parse::<u16>(), end.trim().parse::<u16>()) {
+                        return (start..=end).collect::<Vec<u16>>();
+                    }
+                }
+                part.trim().parse::<u16>().ok().into_iter().collect()
+            })
+            .collect()
     }
 
     /// Reset ports to default state (disabled, VLAN 1, access mode, no description)
@@ -3679,14 +3727,157 @@ mod tests {
         ];
         let ports = switch.parse_physical_ports(&lines);
         let p1 = ports.get("port1").unwrap();
-        assert!(p1.enabled);
-        assert!(p1.poe_enabled);
-        assert_eq!(p1.speed_duplex, SpeedDuplex::Auto);
+        assert_eq!(p1.enabled, Some(true));
+        assert_eq!(p1.poe_enabled, Some(true));
+        assert_eq!(p1.speed_duplex, Some(SpeedDuplex::Auto));
 
         let p2 = ports.get("port2").unwrap();
-        assert!(!p2.enabled);
-        assert!(!p2.poe_enabled);
-        assert_eq!(p2.speed_duplex, SpeedDuplex::ThousandFull);
+        assert_eq!(p2.enabled, Some(false));
+        assert_eq!(p2.poe_enabled, Some(false));
+        assert_eq!(p2.speed_duplex, Some(SpeedDuplex::ThousandFull));
+    }
+
+    #[test]
+    fn test_parse_physical_ports_absent_lines_stay_none() {
+        // Real hardware (FortiSwitch 124F-FPOE): show switch physical-port
+        // never prints set status/set poe-status when they're already at
+        // this switch's own default — only lldp-profile and speed appeared.
+        let switch = create_test_switch();
+        let lines = vec![
+            "config switch physical-port",
+            "    edit \"port1\"",
+            "        set lldp-profile \"default-auto-isl\"",
+            "        set speed auto",
+            "    next",
+            "end",
+        ];
+        let ports = switch.parse_physical_ports(&lines);
+        let p1 = ports.get("port1").unwrap();
+        assert_eq!(p1.enabled, None, "status line never appeared, must not be assumed");
+        assert_eq!(p1.poe_enabled, None, "poe-status line never appeared, must not be assumed");
+        assert_eq!(p1.speed_duplex, Some(SpeedDuplex::Auto));
+    }
+
+    #[test]
+    fn test_parse_vlan_list_comma_separated_with_ranges() {
+        // Real hardware (FortiSwitch 124F-FPOE): `show switch interface`
+        // compressed a trunk's allowed-vlans into exactly this form.
+        assert_eq!(
+            FortiswitchSwitch::parse_vlan_list("42,101-104,501"),
+            vec![42, 101, 102, 103, 104, 501]
+        );
+    }
+
+    #[test]
+    fn test_parse_vlan_list_space_separated_no_ranges() {
+        // The write side (generate_port_commands) uses this form.
+        assert_eq!(FortiswitchSwitch::parse_vlan_list("42 101 102"), vec![42, 101, 102]);
+    }
+
+    #[test]
+    fn test_parse_vlan_list_single_value() {
+        assert_eq!(FortiswitchSwitch::parse_vlan_list("101"), vec![101]);
+    }
+
+    #[test]
+    fn test_parse_switch_interface_ports_trunk_with_range_notation() {
+        // Regression: the original bug found on real hardware — a
+        // whitespace-only split against "42,101-104,501" (no spaces at all)
+        // parsed as a single invalid token and silently dropped everything.
+        let switch = create_test_switch();
+        let lines = vec![
+            "config switch interface",
+            "    edit \"port26\"",
+            "        set native-vlan 666",
+            "        set allowed-vlans 42,101-104,666",
+            "    next",
+            "end",
+        ];
+        let ports = switch.parse_switch_interface_ports(&lines);
+        let p = ports.get("port26").unwrap();
+        assert_eq!(p.allowed_vlans, vec![42, 101, 102, 103, 104, 666]);
+    }
+
+    #[test]
+    fn test_build_ports_poe_capable_port_defaults_to_enabled_when_unmentioned() {
+        // Regression: PhysicalPortInfo::poe_enabled being None (the
+        // set poe-status line never appeared) used to fall back to a flat
+        // `false`, permanently misreporting every already-correct PoE port
+        // as needing reconfiguration. Port "1" on Fortiswitch124F_FPOE is a
+        // PoE-capable copper port (see models.rs port_capabilities), so the
+        // fallback must be `true`, not `false`.
+        let switch = create_test_switch();
+        let mut interfaces = std::collections::HashMap::new();
+        interfaces.insert("port1".to_string(), PortInterfaceInfo {
+            description: None,
+            native_vlan: Some(101),
+            allowed_vlans: vec![101],
+        });
+        let mut physical = std::collections::HashMap::new();
+        physical.insert("port1".to_string(), PhysicalPortInfo {
+            enabled: None,
+            poe_enabled: None,
+            speed_duplex: None,
+        });
+
+        let ports = switch.build_ports(interfaces, physical);
+        let p = &ports[0];
+        assert!(p.enabled, "absent status line should default to up");
+        assert!(p.poe_enabled, "absent poe-status on a PoE-capable port should default to enabled");
+        assert_eq!(p.speed_duplex, SpeedDuplex::Auto);
+    }
+
+    #[test]
+    fn test_is_numbered_port() {
+        assert!(FortiswitchSwitch::is_numbered_port("port1"));
+        assert!(FortiswitchSwitch::is_numbered_port("port24"));
+        assert!(!FortiswitchSwitch::is_numbered_port("internal"));
+        assert!(!FortiswitchSwitch::is_numbered_port("port"));
+        assert!(!FortiswitchSwitch::is_numbered_port("portA"));
+    }
+
+    #[test]
+    fn test_build_ports_excludes_internal_interface() {
+        // Regression: real hardware's `show switch interface` lists
+        // FortiSwitch's own "internal" CPU/management interface alongside
+        // the real numbered ports. Treating it as a stray configurable port
+        // made the diff engine want to "reset" it every reconcile cycle
+        // (enforce_port_config was on) even though it was never a real port.
+        let switch = create_test_switch();
+        let mut interfaces = std::collections::HashMap::new();
+        interfaces.insert("port1".to_string(), PortInterfaceInfo {
+            description: None,
+            native_vlan: Some(101),
+            allowed_vlans: vec![101],
+        });
+        interfaces.insert("internal".to_string(), PortInterfaceInfo {
+            description: None,
+            native_vlan: Some(42),
+            allowed_vlans: vec![42],
+        });
+
+        let ports = switch.build_ports(interfaces, std::collections::HashMap::new());
+        assert_eq!(ports.len(), 1, "the 'internal' interface must be excluded");
+        assert_eq!(ports[0].port_id, "1");
+    }
+
+    #[test]
+    fn test_build_ports_non_poe_port_defaults_to_disabled_when_unmentioned() {
+        // Port "25" on Fortiswitch124F_FPOE is an SFP+ uplink — not
+        // PoE-capable at all — so an absent poe-status line must default to
+        // false there, unlike a copper port.
+        let switch = create_test_switch();
+        let mut interfaces = std::collections::HashMap::new();
+        interfaces.insert("port25".to_string(), PortInterfaceInfo {
+            description: None,
+            native_vlan: Some(666),
+            allowed_vlans: vec![666],
+        });
+        let mut physical = std::collections::HashMap::new();
+        physical.insert("port25".to_string(), PhysicalPortInfo::default());
+
+        let ports = switch.build_ports(interfaces, physical);
+        assert!(!ports[0].poe_enabled);
     }
 
     #[test]
@@ -3700,9 +3891,9 @@ mod tests {
         });
         let mut physical = std::collections::HashMap::new();
         physical.insert("port1".to_string(), PhysicalPortInfo {
-            enabled: true,
-            poe_enabled: true,
-            speed_duplex: SpeedDuplex::Auto,
+            enabled: Some(true),
+            poe_enabled: Some(true),
+            speed_duplex: Some(SpeedDuplex::Auto),
         });
 
         let ports = switch.build_ports(interfaces, physical);
@@ -3736,6 +3927,9 @@ mod tests {
 
     #[test]
     fn test_build_ports_missing_physical_falls_back_to_defaults() {
+        // Port "5" is a PoE-capable copper port on Fortiswitch124F_FPOE, so
+        // with no physical-port data at all the model-aware fallback (see
+        // build_ports) defaults poe_enabled to true, not a flat false.
         let switch = create_test_switch();
         let mut interfaces = std::collections::HashMap::new();
         interfaces.insert("port5".to_string(), PortInterfaceInfo {
@@ -3746,7 +3940,7 @@ mod tests {
         let ports = switch.build_ports(interfaces, std::collections::HashMap::new());
         let p = &ports[0];
         assert!(p.enabled, "default physical state should be enabled");
-        assert!(!p.poe_enabled);
+        assert!(p.poe_enabled, "port 5 is PoE-capable, so the fallback should be enabled");
         assert_eq!(p.speed_duplex, SpeedDuplex::Auto);
     }
 
