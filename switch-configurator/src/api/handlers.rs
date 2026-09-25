@@ -30,6 +30,7 @@ pub async fn events(
                         crate::config::SseEvent::ConfigReload { .. } => "config-reload",
                         crate::config::SseEvent::Warning { .. } => "warning",
                         crate::config::SseEvent::PoeReset { .. } => "poe-reset",
+                        crate::config::SseEvent::PoeSet { .. } => "poe-set",
                     };
                     Some(Ok(axum::response::sse::Event::default()
                         .event(event_name)
@@ -1535,19 +1536,25 @@ pub async fn delete_switch_config(
     }
 }
 
-pub async fn poe_reset(
-    State(store): State<ConfigStore>,
-    Path((id, port_id)): Path<(String, String)>,
-) -> impl IntoResponse {
+/// Shared guard checks for PoE operational endpoints (reset/on/off): switch
+/// exists, its model supports PoE at all, the specific port supports PoE,
+/// the vendor is one with PoE commands implemented, and the switch isn't
+/// already mid-operation. Returns the resolved `SwitchConfig` on success, or
+/// the error response to return immediately.
+async fn poe_op_guard(
+    store: &ConfigStore,
+    id: &str,
+    port_id: &str,
+) -> Result<SwitchConfig, axum::response::Response> {
     let config = store.config.read().await;
     let switch_config = match config.switches.iter().find(|s| s.id == id) {
         Some(cfg) => cfg.clone(),
         None => {
-            return (
+            return Err((
                 StatusCode::NOT_FOUND,
                 Json(json!({"error": format!("Switch '{}' not found", id)})),
             )
-                .into_response();
+                .into_response());
         }
     };
     drop(config);
@@ -1555,36 +1562,216 @@ pub async fn poe_reset(
     let model = switch_config.model();
 
     if !model.supports_poe() {
-        return (
+        return Err((
             StatusCode::BAD_REQUEST,
             Json(json!({"error": format!("Switch model {:?} does not support PoE", model)})),
         )
-            .into_response();
+            .into_response());
     }
 
-    if !model.port_supports_poe(&port_id) {
-        return (
+    if !model.port_supports_poe(port_id) {
+        return Err((
             StatusCode::BAD_REQUEST,
             Json(json!({"error": format!("Port {} does not support PoE on {:?}", port_id, model)})),
         )
-            .into_response();
+            .into_response());
     }
 
     if !matches!(model.vendor(), Vendor::Aruba | Vendor::Fortiswitch) {
-        return (
+        return Err((
             StatusCode::BAD_REQUEST,
-            Json(json!({"error": format!("PoE reset not yet supported for {:?} switches", model.vendor())})),
+            Json(json!({"error": format!("PoE control not yet supported for {:?} switches", model.vendor())})),
         )
-            .into_response();
+            .into_response());
     }
 
-    if store.status.is_switch_busy(&id).await {
-        return (
+    if store.status.is_switch_busy(id).await {
+        return Err((
             StatusCode::CONFLICT,
             Json(json!({"error": format!("Switch '{}' is busy", id), "switch_id": id})),
         )
-            .into_response();
+            .into_response());
     }
+
+    Ok(switch_config)
+}
+
+/// Get the vendor-specific PoE enable/disable command sets for a port.
+fn poe_commands_for(switch_config: &SwitchConfig, port_id: &str) -> (Vec<String>, Vec<String>) {
+    match switch_config.model().vendor() {
+        Vendor::Fortiswitch => {
+            let fortiswitch = vendors::fortiswitch::FortiswitchSwitch::new(
+                switch_config.clone(),
+                crate::config::RuntimeConfig::default(),
+                false,
+            );
+            (
+                fortiswitch.poe_disable_commands(port_id),
+                fortiswitch.poe_enable_commands(port_id),
+            )
+        }
+        _ => {
+            let aruba = vendors::aruba::ArubaSwitch::new(
+                switch_config.clone(),
+                crate::config::RuntimeConfig::default(),
+                false,
+            );
+            (
+                aruba.poe_disable_commands(port_id),
+                aruba.poe_enable_commands(port_id),
+            )
+        }
+    }
+}
+
+/// Persistently turn PoE on or off for a single port (unlike `poe_reset`,
+/// this does not power-cycle — the port is left in the requested state).
+///
+/// POST /switches/{id}/poe-on/{port_id}
+/// POST /switches/{id}/poe-off/{port_id}
+async fn poe_set(
+    store: ConfigStore,
+    id: String,
+    port_id: String,
+    turn_on: bool,
+) -> impl IntoResponse {
+    let switch_config = match poe_op_guard(&store, &id, &port_id).await {
+        Ok(cfg) => cfg,
+        Err(resp) => return resp,
+    };
+
+    store.status.set_currently_configuring(id.clone()).await;
+
+    let action = if turn_on { "on" } else { "off" };
+    let store_bg = store.clone();
+    let id_bg = id.clone();
+    let port_bg = port_id.clone();
+    let action_bg = action.to_string();
+
+    tokio::spawn(async move {
+        let result = poe_set_impl(&store_bg, &id_bg, &switch_config, &port_bg, turn_on).await;
+        match &result {
+            Ok(()) => {
+                store_bg.emit_event(SseEvent::PoeSet {
+                    switch_id: id_bg.clone(),
+                    port_id: port_bg.clone(),
+                    action: action_bg.clone(),
+                    stage: "done".to_string(),
+                    detail: None,
+                });
+                info!("PoE {} completed for {}:{}", action_bg, id_bg, port_bg);
+            }
+            Err(error_msg) => {
+                store_bg.emit_event(SseEvent::PoeSet {
+                    switch_id: id_bg.clone(),
+                    port_id: port_bg.clone(),
+                    action: action_bg.clone(),
+                    stage: "failed".to_string(),
+                    detail: Some(error_msg.clone()),
+                });
+                error!(
+                    "PoE {} failed for {}:{}: {}",
+                    action_bg, id_bg, port_bg, error_msg
+                );
+                store_bg
+                    .status
+                    .record_error(
+                        "PoeSet".to_string(),
+                        error_msg.clone(),
+                        Some(id_bg.clone()),
+                        format!("poe_{}", action_bg),
+                    )
+                    .await;
+            }
+        }
+        store_bg.status.clear_currently_configuring(&id_bg).await;
+    });
+
+    (
+        StatusCode::ACCEPTED,
+        Json(json!({
+            "status": "accepted",
+            "message": format!("PoE {} started for port {} on switch '{}'", action, port_id, id),
+            "switch_id": id,
+            "port_id": port_id,
+            "hint": "Listen on /api/events for poe-set stage events"
+        })),
+    )
+        .into_response()
+}
+
+pub async fn poe_on(
+    State(store): State<ConfigStore>,
+    Path((id, port_id)): Path<(String, String)>,
+) -> impl IntoResponse {
+    poe_set(store, id, port_id, true).await
+}
+
+pub async fn poe_off(
+    State(store): State<ConfigStore>,
+    Path((id, port_id)): Path<(String, String)>,
+) -> impl IntoResponse {
+    poe_set(store, id, port_id, false).await
+}
+
+async fn poe_set_impl(
+    store: &ConfigStore,
+    id: &str,
+    switch_config: &SwitchConfig,
+    port_id: &str,
+    turn_on: bool,
+) -> Result<(), String> {
+    let action = if turn_on { "on" } else { "off" };
+    let emit = |stage: &str, detail: Option<String>| {
+        store.emit_event(SseEvent::PoeSet {
+            switch_id: id.to_string(),
+            port_id: port_id.to_string(),
+            action: action.to_string(),
+            stage: stage.to_string(),
+            detail,
+        });
+    };
+
+    emit("connecting", None);
+
+    let mut vendor = vendors::create_vendor_with_runtime(
+        switch_config,
+        &crate::config::RuntimeConfig::default(),
+        switch_config.settings.enforce_port_config,
+    )
+    .map_err(|e| format!("Failed to create vendor: {}", e))?;
+
+    vendor
+        .connect()
+        .await
+        .map_err(|e| format!("Connection failed: {}", e))?;
+
+    let (disable_cmds, enable_cmds) = poe_commands_for(switch_config, port_id);
+    let commands = if turn_on { &enable_cmds } else { &disable_cmds };
+
+    emit("setting", None);
+    if let Err(e) = vendor.execute_raw_commands(commands).await {
+        let _ = vendor.disconnect().await;
+        return Err(format!(
+            "Failed to turn PoE {} on port {}: {}",
+            action, port_id, e
+        ));
+    }
+
+    info!("PoE turned {} on port {}", action, port_id);
+    let _ = vendor.disconnect().await;
+
+    Ok(())
+}
+
+pub async fn poe_reset(
+    State(store): State<ConfigStore>,
+    Path((id, port_id)): Path<(String, String)>,
+) -> impl IntoResponse {
+    let switch_config = match poe_op_guard(&store, &id, &port_id).await {
+        Ok(cfg) => cfg,
+        Err(resp) => return resp,
+    };
 
     store.status.set_currently_configuring(id.clone()).await;
 
@@ -1672,30 +1859,7 @@ async fn poe_reset_impl(
         .await
         .map_err(|e| format!("Connection failed: {}", e))?;
 
-    let (disable_cmds, enable_cmds) = match switch_config.model().vendor() {
-        Vendor::Fortiswitch => {
-            let fortiswitch = vendors::fortiswitch::FortiswitchSwitch::new(
-                switch_config.clone(),
-                crate::config::RuntimeConfig::default(),
-                false,
-            );
-            (
-                fortiswitch.poe_disable_commands(port_id),
-                fortiswitch.poe_enable_commands(port_id),
-            )
-        }
-        _ => {
-            let aruba = vendors::aruba::ArubaSwitch::new(
-                switch_config.clone(),
-                crate::config::RuntimeConfig::default(),
-                false,
-            );
-            (
-                aruba.poe_disable_commands(port_id),
-                aruba.poe_enable_commands(port_id),
-            )
-        }
-    };
+    let (disable_cmds, enable_cmds) = poe_commands_for(switch_config, port_id);
 
     emit("disabling", None);
     if let Err(e) = vendor.execute_raw_commands(&disable_cmds).await {

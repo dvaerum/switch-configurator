@@ -3422,4 +3422,152 @@ mod integration_tests {
         let json: Value = serde_json::from_slice(&body).unwrap();
         assert!(json["error"].as_str().unwrap().contains("not yet supported"));
     }
+
+    #[tokio::test]
+    async fn test_poe_off_switch_not_found() {
+        let store = create_test_config_store();
+        let response = poe_off(
+            axum::extract::State(store),
+            axum::extract::Path(("nonexistent".to_string(), "1".to_string())),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_poe_off_non_poe_port() {
+        // Port 49 on Aruba2930F is SFP (no PoE)
+        let store = create_test_config_store();
+        let response = poe_off(
+            axum::extract::State(store),
+            axum::extract::Path(("test-sw-01".to_string(), "49".to_string())),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_poe_off_switch_busy() {
+        let store = create_test_config_store();
+        store.status.set_currently_configuring("test-sw-01".to_string()).await;
+
+        let response = poe_off(
+            axum::extract::State(store.clone()),
+            axum::extract::Path(("test-sw-01".to_string(), "1".to_string())),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn test_poe_off_valid_returns_202() {
+        let store = create_test_config_store();
+        let response = poe_off(
+            axum::extract::State(store),
+            axum::extract::Path(("test-sw-01".to_string(), "1".to_string())),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+    }
+
+    #[tokio::test]
+    async fn test_poe_on_valid_returns_202() {
+        let store = create_test_config_store();
+        let response = poe_on(
+            axum::extract::State(store),
+            axum::extract::Path(("test-sw-01".to_string(), "1".to_string())),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+    }
+
+    #[tokio::test]
+    async fn test_poe_off_emits_connecting_then_action_in_stage() {
+        // Unlike poe-reset (disable-wait-enable), poe-off/poe-on emit a
+        // PoeSet event carrying an `action` field distinguishing on/off.
+        let store = create_test_config_store();
+        let mut rx = store.events.subscribe();
+
+        let response = poe_off(
+            axum::extract::State(store.clone()),
+            axum::extract::Path(("test-sw-01".to_string(), "1".to_string())),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+
+        let ev = tokio::time::timeout(std::time::Duration::from_secs(3), rx.recv())
+            .await
+            .expect("timed out waiting for SSE event")
+            .expect("broadcast recv error");
+
+        match ev {
+            SseEvent::PoeSet {
+                stage,
+                port_id,
+                switch_id,
+                action,
+                ..
+            } => {
+                assert_eq!(stage, "connecting");
+                assert_eq!(port_id, "1");
+                assert_eq!(switch_id, "test-sw-01");
+                assert_eq!(action, "off");
+            }
+            other => panic!("expected PoeSet connecting event, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_poe_on_fortiswitch_returns_202() {
+        let store = create_fortiswitch_test_store();
+        let response = poe_on(
+            axum::extract::State(store),
+            axum::extract::Path(("test-sw-forti".to_string(), "1".to_string())),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+    }
+
+    #[tokio::test]
+    async fn test_poe_off_unsupported_vendor() {
+        // test-sw-02 is Cisco — not yet supported
+        let store = create_test_config_store();
+        let response = poe_off(
+            axum::extract::State(store),
+            axum::extract::Path(("test-sw-02".to_string(), "1".to_string())),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&body).unwrap();
+        assert!(json["error"].as_str().unwrap().contains("not yet supported"));
+    }
+
+    #[test]
+    fn test_sse_event_poe_set_serialization() {
+        let ev = SseEvent::PoeSet {
+            switch_id: "sw1".to_string(),
+            port_id: "5".to_string(),
+            action: "off".to_string(),
+            stage: "done".to_string(),
+            detail: None,
+        };
+        let json = serde_json::to_value(&ev).unwrap();
+        assert_eq!(json["event"], "poe-set");
+        assert_eq!(json["data"]["switch_id"], "sw1");
+        assert_eq!(json["data"]["port_id"], "5");
+        assert_eq!(json["data"]["action"], "off");
+        assert_eq!(json["data"]["stage"], "done");
+    }
 }

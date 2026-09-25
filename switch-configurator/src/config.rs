@@ -384,6 +384,19 @@ pub enum SseEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         detail: Option<String>,
     },
+    /// Persistent PoE on/off progress for a specific port (distinct from
+    /// `PoeReset`'s disable-wait-enable cycle: this leaves the port in the
+    /// requested state rather than always ending powered-on). `stage` is one
+    /// of connecting / setting / done / failed; `action` is "on" or "off".
+    #[serde(rename = "poe-set")]
+    PoeSet {
+        switch_id: String,
+        port_id: String,
+        action: String,
+        stage: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
+    },
 }
 
 /// Shared configuration store with status tracking
