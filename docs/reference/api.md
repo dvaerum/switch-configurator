@@ -581,7 +581,7 @@ Query the switch's learned MAC-address table (FDB). Answers "what's physically w
 - `404 NOT FOUND` - Switch not found
 - `400 BAD REQUEST` - Vendor not yet supported
 - `409 CONFLICT` - Switch is busy
-- `500 INTERNAL SERVER ERROR` - Connection or command execution failed
+- `500 INTERNAL SERVER ERROR` - Connection failed, or the switch rejected the underlying CLI command (each vendor's known rejection marker is detected and surfaced as a real error rather than a false empty success — see Verification status below)
 
 **Supported vendors and commands:**
 

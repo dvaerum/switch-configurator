@@ -41,8 +41,21 @@ impl CiscoSwitch {
             .map_err(|e| VendorError::CommandError(e.to_string()))?;
 
         let raw = outputs.join("\n");
+
+        // Cisco IOS reports an unrecognized/rejected command as plain CLI
+        // text on an otherwise-successful transport read, not a
+        // transport-level error (same class of gap FortiSwitch's mac-table
+        // command had — see its get_mac_table comment).
+        if is_command_rejected(&raw) {
+            return Err(VendorError::CommandError(format!(
+                "Switch rejected 'show mac address-table': {}",
+                raw.trim()
+            )));
+        }
+
         Ok((parse_mac_table(&raw), raw))
     }
+
 
     fn generate_vlan_commands(&self, vlans: &[Vlan]) -> Vec<String> {
         let mut commands = vec!["configure terminal".to_string()];
@@ -1330,6 +1343,15 @@ impl CiscoSwitch {
             timestamp: chrono::Utc::now(),
         })
     }
+}
+
+/// Detect Cisco IOS's documented "% Invalid input detected" marker for a
+/// rejected/unrecognized CLI command, so a command failure surfaces as a
+/// real error instead of parsing to a false empty success (the class of
+/// bug found live in FortiSwitch's mac-table command — see
+/// `get_mac_table`'s doc comment).
+fn is_command_rejected(raw: &str) -> bool {
+    raw.contains("% Invalid input detected")
 }
 
 /// Parse Cisco IOS `show mac address-table` output into structured entries.
@@ -2686,5 +2708,17 @@ mod tests {
     #[test]
     fn test_parse_mac_table_empty_input() {
         assert!(parse_mac_table("").is_empty());
+    }
+
+    #[test]
+    fn test_is_command_rejected_detects_invalid_input() {
+        let raw = "show mac address-table\n               ^\n% Invalid input detected at '^' marker.\n";
+        assert!(is_command_rejected(raw));
+    }
+
+    #[test]
+    fn test_is_command_rejected_false_on_normal_output() {
+        let raw = "  10    0011.2233.4455    DYNAMIC     Gi1/0/5\n";
+        assert!(!is_command_rejected(raw));
     }
 }
