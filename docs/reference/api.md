@@ -591,7 +591,7 @@ Query the switch's learned MAC-address table (FDB). Answers "what's physically w
 | Aruba | `show mac-address` | hyphen-grouped (`0011-2233-4455`) | no (`vlan_id` always `null`) |
 | Cisco | `show mac address-table` | dot-grouped (`0011.2233.4455`) | yes |
 
-**⚠️ Verification status:** none of the 3 parsers have been verified against real hardware output yet (built from documented CLI syntax only). Treat `entries` as best-effort until confirmed against a real switch of each vendor — `raw_output` is there specifically so a parsing gap doesn't hide the answer in the meantime.
+**⚠️ Verification status:** FortiSwitch has been confirmed against real hardware (IT-02876-sw1, S124FF firmware, via provision@'s integration testing — both real MAC entries parsed correctly, including port_id). Aruba and Cisco are still unverified, built from documented CLI syntax only — treat their `entries` as best-effort until confirmed against a real switch of each vendor. `raw_output` is always included regardless, so a parsing gap doesn't hide the answer in the meantime.
 
 **Example:**
 

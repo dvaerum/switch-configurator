@@ -2365,22 +2365,35 @@ fn is_command_rejected(raw: &str) -> bool {
 
 /// Parse `diagnose switch mac-address list` output into structured entries.
 ///
-/// Two candidate layouts are handled, since the exact shape hasn't been
-/// confirmed against this firmware yet:
-///   1. Labeled key-value tokens, matching FortiGate-managed mode's
-///      documented `diagnose switch-controller switch-info mac-table`
-///      output (`MAC: <mac>  VLAN: <n>  PORT: <p>` or `... Trunk: <p>`) —
-///      tried first since standalone mode likely mirrors it.
-///   2. A plain whitespace-separated `<MAC> <VLAN> <PORT>` table (the
-///      original guess, kept as a fallback in case this firmware's
-///      standalone output differs from the managed-mode format).
-/// A line is only parsed if a MAC-shaped token (six colon-separated hex
-/// byte groups) is found; anything else (headers, banners, blank lines) is
-/// skipped rather than treated as an error.
+/// Confirmed live against real S124FF firmware (IT-02876-sw1, via
+/// provision@'s integration testing): each line is labeled key-value
+/// tokens, e.g. `MAC: 00:08:7b:20:c6:ff\tVLAN: 101 Port: port2(port-id 2)`.
+/// The port label's value carries both the interface name and a
+/// parenthesized numeric port-id (`port2(port-id 2)`, split across two
+/// whitespace tokens by the `(port-id ` gap) — callers matching against
+/// this codebase's own port-id conventions (e.g. `"1".."6"` port ranges)
+/// need the bare number, not `port2(port-id`, so that's what's extracted.
+/// Falls back to the plain whitespace-table format (the original guess,
+/// kept in case some other firmware/mode differs) if no `MAC:` label is
+/// found on a line.
 fn parse_mac_table(raw: &str) -> Vec<MacTableEntry> {
     fn looks_like_mac(token: &str) -> bool {
         let parts: Vec<&str> = token.split(':').collect();
         parts.len() == 6 && parts.iter().all(|p| p.len() == 2 && p.chars().all(|c| c.is_ascii_hexdigit()))
+    }
+
+    /// Extract the bare numeric port-id from a `Port:`/`Trunk:` label's
+    /// value tokens. Handles both `port2(port-id 2)` (numeric id in the
+    /// following token, parenthesized) and a plain `5` with no parens.
+    fn extract_port_id(tokens: &[&str], label_pos: usize) -> Option<String> {
+        let value = *tokens.get(label_pos + 1)?;
+        if value.contains("port-id") {
+            tokens
+                .get(label_pos + 2)
+                .map(|n| n.trim_end_matches(')').to_string())
+        } else {
+            Some(value.trim_end_matches(')').to_string())
+        }
     }
 
     raw.lines()
@@ -2399,8 +2412,7 @@ fn parse_mac_table(raw: &str) -> Vec<MacTableEntry> {
                     let port_id = tokens
                         .iter()
                         .position(|t| *t == "PORT:" || *t == "Port:" || *t == "Trunk:")
-                        .and_then(|i| tokens.get(i + 1))
-                        .map(|s| s.to_string());
+                        .and_then(|i| extract_port_id(&tokens, i));
                     if let Some(port_id) = port_id {
                         return Some(MacTableEntry {
                             mac_address: mac.to_string(),
@@ -2563,8 +2575,10 @@ mod tests {
     #[test]
     fn test_parse_mac_table_labeled_format() {
         // FortiGate-managed mode's documented output shape
-        // (diagnose switch-controller switch-info mac-table); tried as the
-        // primary candidate for standalone mode's equivalent command.
+        // (diagnose switch-controller switch-info mac-table) with a bare
+        // numeric port value (no parens) -- kept as a secondary shape this
+        // parser also handles, distinct from the parenthesized
+        // "port2(port-id 2)" shape confirmed live below.
         let raw = "Managed Switch : S124FFTF24000746 0\n\
                     MAC: e0:23:ff:fc:bc:07  VLAN: 3 PORT: 5\n\
                     MAC: aa:bb:cc:dd:ee:ff  VLAN: 101 Trunk: 7\n";
@@ -2575,6 +2589,26 @@ mod tests {
         assert_eq!(entries[0].port_id, "5");
         assert_eq!(entries[1].mac_address, "aa:bb:cc:dd:ee:ff");
         assert_eq!(entries[1].port_id, "7");
+    }
+
+    #[test]
+    fn test_parse_mac_table_confirmed_real_hardware_format() {
+        // Exact lines from real S124FF firmware output (IT-02876-sw1),
+        // reported live by provision@: tab between MAC and VLAN, and the
+        // port value split across two tokens as "portN(port-id" + "N)".
+        // The bare numeric port-id (matching this codebase's own port-id
+        // conventions, e.g. "1".."6" port ranges) must be extracted, not
+        // the "portN(port-id" label token.
+        let raw = "MAC: 00:08:7b:20:c6:92\tVLAN: 101 Port: port1(port-id 1)\n\
+                    MAC: 00:08:7b:20:c6:ff\tVLAN: 101 Port: port2(port-id 2)\n";
+        let entries = parse_mac_table(raw);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].mac_address, "00:08:7b:20:c6:92");
+        assert_eq!(entries[0].vlan_id, Some(101));
+        assert_eq!(entries[0].port_id, "1");
+        assert_eq!(entries[1].mac_address, "00:08:7b:20:c6:ff");
+        assert_eq!(entries[1].vlan_id, Some(101));
+        assert_eq!(entries[1].port_id, "2");
     }
 
     #[test]
