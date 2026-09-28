@@ -3570,4 +3570,30 @@ mod integration_tests {
         assert_eq!(json["data"]["action"], "off");
         assert_eq!(json["data"]["stage"], "done");
     }
+
+    #[tokio::test]
+    async fn test_get_mac_table_switch_not_found() {
+        let store = create_test_config_store();
+        let response = get_mac_table(
+            axum::extract::State(store),
+            axum::extract::Path("nonexistent".to_string()),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_get_mac_table_switch_busy() {
+        let store = create_test_config_store();
+        store.status.set_currently_configuring("test-sw-01".to_string()).await;
+
+        let response = get_mac_table(
+            axum::extract::State(store.clone()),
+            axum::extract::Path("test-sw-01".to_string()),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
 }

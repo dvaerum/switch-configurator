@@ -1,6 +1,6 @@
 use super::traits::{SwitchVendor, VendorError};
 use crate::config::RuntimeConfig;
-use crate::models::{ConfigResult, MirrorDirection, Port, PortMirror, PortMode, StateDiff, SwitchConfig, SwitchState, Vlan, ConnectionType};
+use crate::models::{ConfigResult, MacTableEntry, MirrorDirection, Port, PortMirror, PortMode, StateDiff, SwitchConfig, SwitchState, Vlan, ConnectionType};
 use crate::ssh::{ConnectionClient, SerialClient, SshClient};
 use async_trait::async_trait;
 use tracing::{debug, info, warn};
@@ -392,6 +392,28 @@ impl ArubaSwitch {
             "exit".to_string(),
             "exit".to_string(),
         ]
+    }
+
+    /// Query the switch's learned MAC-address table (FDB), connecting for
+    /// the duration of this one command only. ArubaOS-Switch's `show
+    /// mac-address` does not include VLAN in its output (unlike Cisco's
+    /// `show mac address-table`), so `vlan_id` is always `None` here.
+    ///
+    /// UNVERIFIED against real hardware — no Aruba unit was available to
+    /// confirm the exact column layout when this was added; both parsed
+    /// entries and raw output are returned so a parsing gap doesn't hide
+    /// the answer.
+    pub async fn get_mac_table(&mut self) -> Result<(Vec<MacTableEntry>, String), VendorError> {
+        let outputs = self
+            .client
+            .as_mut()
+            .ok_or_else(|| VendorError::SshError("Not connected".to_string()))?
+            .execute_commands(&["show mac-address".to_string()])
+            .await
+            .map_err(|e| VendorError::CommandError(e.to_string()))?;
+
+        let raw = outputs.join("\n");
+        Ok((parse_mac_table(&raw), raw))
     }
 
     fn generate_remove_vlan_commands(&self, vlan_ids: &[u16]) -> Vec<String> {
@@ -2363,6 +2385,40 @@ impl ArubaSwitch {
             timestamp: chrono::Utc::now(),
         })
     }
+}
+
+/// Parse ArubaOS-Switch `show mac-address` output into structured entries.
+///
+/// Expected layout (per HP ProCurve/ArubaOS-Switch CLI docs): a header/
+/// separator block followed by rows of `<MAC Address>  <Port>`, where the
+/// MAC is hyphen-grouped as three 4-hex-digit blocks (e.g.
+/// `0011-2233-4455`). VLAN is not part of this command's output on
+/// ArubaOS-Switch, so `vlan_id` is always `None`. Best-effort: a line is
+/// only parsed if its first token matches that MAC shape; anything else
+/// (headers, separators, blank lines) is skipped.
+///
+/// UNVERIFIED against real hardware — see `get_mac_table` doc comment.
+fn parse_mac_table(raw: &str) -> Vec<MacTableEntry> {
+    fn looks_like_mac(token: &str) -> bool {
+        let parts: Vec<&str> = token.split('-').collect();
+        parts.len() == 3 && parts.iter().all(|p| p.len() == 4 && p.chars().all(|c| c.is_ascii_hexdigit()))
+    }
+
+    raw.lines()
+        .filter_map(|line| {
+            let tokens: Vec<&str> = line.split_whitespace().collect();
+            let mac = *tokens.first()?;
+            if !looks_like_mac(mac) {
+                return None;
+            }
+            let port_id = tokens.get(1)?.to_string();
+            Some(MacTableEntry {
+                mac_address: mac.to_string(),
+                vlan_id: None,
+                port_id,
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -6062,5 +6118,33 @@ interface 48
         let switch = create_test_switch();
         let cmds = switch.poe_disable_commands("GigabitEthernet1/0/5");
         assert_eq!(cmds[1], "interface 5");
+    }
+
+    #[test]
+    fn test_parse_mac_table_basic() {
+        let raw = "  MAC Address     Located on Port\n\
+                    ---------------  ----------------\n\
+                    0011-2233-4455    5\n\
+                    aabb-ccdd-eeff    12\n";
+        let entries = parse_mac_table(raw);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].mac_address, "0011-2233-4455");
+        assert_eq!(entries[0].vlan_id, None);
+        assert_eq!(entries[0].port_id, "5");
+        assert_eq!(entries[1].port_id, "12");
+    }
+
+    #[test]
+    fn test_parse_mac_table_skips_non_mac_lines() {
+        let raw = "Status and Counters - Port Address Table\n\
+                    ---------------  ----------------\n\
+                    0011-2233-4455    5\n";
+        let entries = parse_mac_table(raw);
+        assert_eq!(entries.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_mac_table_empty_input() {
+        assert!(parse_mac_table("").is_empty());
     }
 }

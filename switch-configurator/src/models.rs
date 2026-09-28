@@ -1252,6 +1252,17 @@ pub struct SwitchState {
     pub warnings: Vec<String>,
 }
 
+/// A single learned MAC-address-table (FDB) entry: which MAC is seen on
+/// which port/VLAN. Used to answer "what's physically plugged into port N"
+/// questions that IP-based discovery can't (multiple devices on the same
+/// broadcast domain look identical over IP).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MacTableEntry {
+    pub mac_address: String,
+    pub vlan_id: Option<u16>,
+    pub port_id: String,
+}
+
 /// Granular SNMP state difference for efficient configuration
 /// Instead of replacing all SNMP config, this tracks individual changes
 #[derive(Debug, Clone, Default, Serialize)]

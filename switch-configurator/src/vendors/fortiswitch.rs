@@ -1,7 +1,7 @@
 use super::traits::{SwitchVendor, VendorError};
 use crate::config::RuntimeConfig;
 use crate::models::{
-    ConfigResult, MirrorDirection, Port, PortMirror, PortMode, SnmpAccess, SnmpCommunity,
+    ConfigResult, MacTableEntry, MirrorDirection, Port, PortMirror, PortMode, SnmpAccess, SnmpCommunity,
     SnmpConfig, SnmpTrapReceiver, SpeedDuplex, StateDiff, SwitchConfig, SwitchState, TrapType,
     Vlan, VlanIpConfig, ConnectionType,
 };
@@ -507,6 +507,30 @@ impl FortiswitchSwitch {
             "next".to_string(),
             "end".to_string(),
         ]
+    }
+
+    /// Query the switch's learned MAC-address table (FDB), connecting for
+    /// the duration of this one command only (same connect/execute/disconnect
+    /// lifecycle as `parse_current_state`'s block reads) so this can't
+    /// collide with a concurrent watch-loop reconcile any worse than any
+    /// other on-demand operation already does.
+    ///
+    /// Returns both the parsed entries (best-effort) and the raw command
+    /// output, so a parser gap doesn't hide the answer entirely — this is
+    /// the first real-hardware use of `get switch mac-address list` in this
+    /// codebase, so the exact column layout hasn't been verified yet.
+    pub async fn get_mac_table(&mut self) -> Result<(Vec<MacTableEntry>, String), VendorError> {
+        let client = self
+            .client
+            .as_mut()
+            .ok_or_else(|| VendorError::SshError("Not connected".to_string()))?;
+
+        let raw = client
+            .execute_command("get switch mac-address list")
+            .await
+            .map_err(|e| VendorError::CommandError(e.to_string()))?;
+
+        Ok((parse_mac_table(&raw), raw))
     }
 
     fn generate_remove_vlan_commands(&self, vlan_ids: &[u16]) -> Vec<String> {
@@ -2312,6 +2336,39 @@ impl FortiswitchSwitch {
     }
 }
 
+/// Parse `get switch mac-address list` output into structured entries.
+///
+/// Expected FortiOS layout is a header line followed by rows of
+/// `<MAC>  <VLAN>  <PORT>  ...` (whitespace-separated, extra trailing
+/// columns like type/master ignored). Best-effort: a line is only parsed
+/// if its first token looks like a MAC address (six colon-separated hex
+/// byte groups); anything else (headers, blank lines, banners) is skipped
+/// rather than treated as an error, since the exact column set/ordering
+/// hasn't been confirmed against real hardware output yet.
+fn parse_mac_table(raw: &str) -> Vec<MacTableEntry> {
+    fn looks_like_mac(token: &str) -> bool {
+        let parts: Vec<&str> = token.split(':').collect();
+        parts.len() == 6 && parts.iter().all(|p| p.len() == 2 && p.chars().all(|c| c.is_ascii_hexdigit()))
+    }
+
+    raw.lines()
+        .filter_map(|line| {
+            let tokens: Vec<&str> = line.split_whitespace().collect();
+            let mac = *tokens.first()?;
+            if !looks_like_mac(mac) {
+                return None;
+            }
+            let vlan_id = tokens.get(1).and_then(|v| v.parse::<u16>().ok());
+            let port_id = tokens.get(2)?.to_string();
+            Some(MacTableEntry {
+                mac_address: mac.to_string(),
+                vlan_id,
+                port_id,
+            })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2411,6 +2468,38 @@ mod tests {
         let switch = create_test_switch();
         let cmds = switch.poe_disable_commands("GigabitEthernet1/0/5");
         assert_eq!(cmds[1], "edit port5");
+    }
+
+    // ========== MAC Address Table Parsing Tests ==========
+
+    #[test]
+    fn test_parse_mac_table_basic() {
+        let raw = "MAC                VLAN  PORT\n\
+                    00:11:22:33:44:55  101   port1\n\
+                    aa:bb:cc:dd:ee:ff  101   port2\n";
+        let entries = parse_mac_table(raw);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].mac_address, "00:11:22:33:44:55");
+        assert_eq!(entries[0].vlan_id, Some(101));
+        assert_eq!(entries[0].port_id, "port1");
+        assert_eq!(entries[1].mac_address, "aa:bb:cc:dd:ee:ff");
+        assert_eq!(entries[1].port_id, "port2");
+    }
+
+    #[test]
+    fn test_parse_mac_table_skips_non_mac_lines() {
+        let raw = "some banner text\n\
+                    ------- ---- ----\n\
+                    00:11:22:33:44:55  101   port1\n\
+                    \n";
+        let entries = parse_mac_table(raw);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].mac_address, "00:11:22:33:44:55");
+    }
+
+    #[test]
+    fn test_parse_mac_table_empty_input() {
+        assert!(parse_mac_table("").is_empty());
     }
 
     // ========== Speed Conversion Tests ==========
