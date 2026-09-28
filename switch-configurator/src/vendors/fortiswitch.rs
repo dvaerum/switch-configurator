@@ -537,6 +537,18 @@ impl FortiswitchSwitch {
             .await
             .map_err(|e| VendorError::CommandError(e.to_string()))?;
 
+        // FortiOS returns command failures as plain CLI text on an
+        // otherwise-successful transport read, not a transport-level error
+        // -- found live (0.12.0's wrong command name returned HTTP 200 with
+        // an empty parsed table instead of a real error, masking the
+        // failure as "genuinely nothing connected").
+        if is_command_rejected(&raw) {
+            return Err(VendorError::CommandError(format!(
+                "Switch rejected 'diagnose switch mac-address list': {}",
+                raw.trim()
+            )));
+        }
+
         Ok((parse_mac_table(&raw), raw))
     }
 
@@ -2343,6 +2355,14 @@ impl FortiswitchSwitch {
     }
 }
 
+/// Detect FortiOS's own CLI failure markers (found live: real S124FF
+/// firmware rejecting the wrong command name), so a rejected/malformed
+/// command surfaces as a real error instead of parsing to a false empty
+/// success.
+fn is_command_rejected(raw: &str) -> bool {
+    raw.contains("command parse error") || raw.contains("Command fail. Return code")
+}
+
 /// Parse `diagnose switch mac-address list` output into structured entries.
 ///
 /// Two candidate layouts are handled, since the exact shape hasn't been
@@ -2565,6 +2585,18 @@ mod tests {
         // data.
         let raw = "get switch mac-address list\r\r\n\r\ncommand parse error before 'mac-address'\r\nCommand fail. Return code -61\r\n\r\nS124FFTF24000746 # ";
         assert!(parse_mac_table(raw).is_empty());
+    }
+
+    #[test]
+    fn test_is_command_rejected_detects_real_failure_output() {
+        let raw = "get switch mac-address list\r\r\n\r\ncommand parse error before 'mac-address'\r\nCommand fail. Return code -61\r\n\r\nS124FFTF24000746 # ";
+        assert!(is_command_rejected(raw));
+    }
+
+    #[test]
+    fn test_is_command_rejected_false_on_normal_output() {
+        let raw = "MAC: e0:23:ff:fc:bc:07  VLAN: 3 PORT: 5\n";
+        assert!(!is_command_rejected(raw));
     }
 
     // ========== Speed Conversion Tests ==========
