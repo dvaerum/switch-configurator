@@ -454,6 +454,154 @@ echo "=== Actual ===" && curl -s http://localhost:4002/switches/aruba-office-01/
 
 ---
 
+### PoE Reset
+
+Power-cycle PoE on a single port: disable, wait 3 seconds, re-enable. Always ends powered-on. Runs asynchronously; progress streams over `/api/events`.
+
+**Endpoint:** `POST /switches/{id}/poe-reset/{port_id}`
+
+**Path Parameters:**
+- `id` (string, required): Switch ID
+- `port_id` (string, required): Port identifier (e.g., `"5"`)
+
+**Response:**
+
+**Success:** `202 Accepted`
+
+```json
+{
+  "status": "accepted",
+  "message": "PoE reset started for port 5 on switch 'aruba-office-01'",
+  "switch_id": "aruba-office-01",
+  "port_id": "5",
+  "hint": "Listen on /api/events for poe-reset stage events"
+}
+```
+
+**Errors:**
+
+- `404 NOT FOUND` - Switch not found
+- `400 BAD REQUEST` - Switch model doesn't support PoE, port doesn't support PoE, or vendor not yet supported
+- `409 CONFLICT` - Switch is busy
+
+**SSE progress** (`/api/events`, event name `poe-reset`):
+
+```json
+{"event": "poe-reset", "data": {"switch_id": "aruba-office-01", "port_id": "5", "stage": "waiting", "detail": "2"}}
+```
+
+`stage` is one of `connecting` / `disabling` / `waiting` (with `detail` = seconds remaining) / `enabling` / `done` / `failed` (with `detail` = error message).
+
+**Supported vendors:** Aruba, FortiSwitch. Cisco returns `400 BAD REQUEST` ("PoE reset not yet supported for Cisco switches").
+
+---
+
+### PoE On / PoE Off
+
+Persistently turn PoE on or off for a single port — unlike PoE Reset, this does **not** power-cycle; the port is left in the requested state. Runs asynchronously; progress streams over `/api/events`.
+
+**Endpoints:**
+- `POST /switches/{id}/poe-on/{port_id}`
+- `POST /switches/{id}/poe-off/{port_id}`
+
+**Path Parameters:**
+- `id` (string, required): Switch ID
+- `port_id` (string, required): Port identifier
+
+**Response:**
+
+**Success:** `202 Accepted`
+
+```json
+{
+  "status": "accepted",
+  "message": "PoE off started for port 5 on switch 'aruba-office-01'",
+  "switch_id": "aruba-office-01",
+  "port_id": "5",
+  "hint": "Listen on /api/events for poe-set stage events"
+}
+```
+
+**Errors:** same as PoE Reset (`404`, `400`, `409`).
+
+**SSE progress** (`/api/events`, event name `poe-set`):
+
+```json
+{"event": "poe-set", "data": {"switch_id": "aruba-office-01", "port_id": "5", "action": "off", "stage": "done"}}
+```
+
+`stage` is one of `connecting` / `setting` / `done` / `failed`; `action` is `"on"` or `"off"`.
+
+**Supported vendors:** Aruba, FortiSwitch. Cisco returns `400 BAD REQUEST`.
+
+**Example:**
+
+```bash
+# Power down an unused base station
+curl -X POST http://localhost:4002/switches/it-02876-sw1/poe-off/5
+
+# Bring it back
+curl -X POST http://localhost:4002/switches/it-02876-sw1/poe-on/5
+```
+
+**Notes:**
+- No bulk endpoint — to turn off multiple ports (e.g. a whole test setup's base stations), call this once per port.
+
+---
+
+### MAC Address Table Lookup
+
+Query the switch's learned MAC-address table (FDB). Answers "what's physically wired to this port" — useful when multiple devices on the same VLAN/subnet are indistinguishable over IP alone. Synchronous (no SSE progress; the API waits for the switch and returns the result directly).
+
+**Endpoint:** `GET /switches/{id}/mac-table`
+
+**Path Parameters:**
+- `id` (string, required): Switch ID
+
+**Response:**
+
+**Success:** `200 OK`
+
+```json
+{
+  "switch_id": "it-02876-sw1",
+  "entries": [
+    {"mac_address": "00:11:22:33:44:55", "vlan_id": 101, "port_id": "port1"}
+  ],
+  "raw_output": "MAC                VLAN  PORT\n00:11:22:33:44:55  101   port1\n..."
+}
+```
+
+**Response Fields:**
+- `entries` (array): Best-effort parsed rows. `vlan_id` is `null` on Aruba (ArubaOS-Switch's `show mac-address` has no VLAN column).
+- `raw_output` (string): The unparsed command output, always included — if the parser misses a row or the format differs from what was expected, the raw text is still there to read.
+
+**Errors:**
+
+- `404 NOT FOUND` - Switch not found
+- `400 BAD REQUEST` - Vendor not yet supported
+- `409 CONFLICT` - Switch is busy
+- `500 INTERNAL SERVER ERROR` - Connection or command execution failed
+
+**Supported vendors and commands:**
+
+| Vendor | Raw command | MAC notation | VLAN in output |
+|---|---|---|---|
+| FortiSwitch | `get switch mac-address list` | colon-grouped (`00:11:22:33:44:55`) | yes |
+| Aruba | `show mac-address` | hyphen-grouped (`0011-2233-4455`) | no (`vlan_id` always `null`) |
+| Cisco | `show mac address-table` | dot-grouped (`0011.2233.4455`) | yes |
+
+**⚠️ Verification status:** none of the 3 parsers have been verified against real hardware output yet (built from documented CLI syntax only). Treat `entries` as best-effort until confirmed against a real switch of each vendor — `raw_output` is there specifically so a parsing gap doesn't hide the answer in the meantime.
+
+**Example:**
+
+```bash
+# Find which port a MAC is on
+curl -s http://localhost:4002/switches/it-02876-sw1/mac-table | jq '.entries[] | select(.mac_address == "00:11:22:33:44:55")'
+```
+
+---
+
 ### Reload Configuration (Global)
 
 Reload configuration from YAML files on disk and apply to **all** switches.
