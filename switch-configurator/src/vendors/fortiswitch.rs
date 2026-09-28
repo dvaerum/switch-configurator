@@ -516,9 +516,16 @@ impl FortiswitchSwitch {
     /// other on-demand operation already does.
     ///
     /// Returns both the parsed entries (best-effort) and the raw command
-    /// output, so a parser gap doesn't hide the answer entirely — this is
-    /// the first real-hardware use of `get switch mac-address list` in this
-    /// codebase, so the exact column layout hasn't been verified yet.
+    /// output, so a parser gap doesn't hide the answer entirely.
+    ///
+    /// `get switch mac-address list` (the first guess at this command) was
+    /// rejected outright by real S124FF firmware ("command parse error
+    /// before 'mac-address'", found live against IT-02876-sw1 via
+    /// provision@'s integration testing). `diagnose switch mac-address
+    /// list` is the standalone-mode equivalent of FortiGate-managed mode's
+    /// documented `diagnose switch-controller switch-info mac-table
+    /// <serial>` — still unconfirmed against this exact firmware's output
+    /// shape, hence `parse_mac_table` handling two candidate formats.
     pub async fn get_mac_table(&mut self) -> Result<(Vec<MacTableEntry>, String), VendorError> {
         let client = self
             .client
@@ -526,7 +533,7 @@ impl FortiswitchSwitch {
             .ok_or_else(|| VendorError::SshError("Not connected".to_string()))?;
 
         let raw = client
-            .execute_command("get switch mac-address list")
+            .execute_command("diagnose switch mac-address list")
             .await
             .map_err(|e| VendorError::CommandError(e.to_string()))?;
 
@@ -2336,15 +2343,20 @@ impl FortiswitchSwitch {
     }
 }
 
-/// Parse `get switch mac-address list` output into structured entries.
+/// Parse `diagnose switch mac-address list` output into structured entries.
 ///
-/// Expected FortiOS layout is a header line followed by rows of
-/// `<MAC>  <VLAN>  <PORT>  ...` (whitespace-separated, extra trailing
-/// columns like type/master ignored). Best-effort: a line is only parsed
-/// if its first token looks like a MAC address (six colon-separated hex
-/// byte groups); anything else (headers, blank lines, banners) is skipped
-/// rather than treated as an error, since the exact column set/ordering
-/// hasn't been confirmed against real hardware output yet.
+/// Two candidate layouts are handled, since the exact shape hasn't been
+/// confirmed against this firmware yet:
+///   1. Labeled key-value tokens, matching FortiGate-managed mode's
+///      documented `diagnose switch-controller switch-info mac-table`
+///      output (`MAC: <mac>  VLAN: <n>  PORT: <p>` or `... Trunk: <p>`) —
+///      tried first since standalone mode likely mirrors it.
+///   2. A plain whitespace-separated `<MAC> <VLAN> <PORT>` table (the
+///      original guess, kept as a fallback in case this firmware's
+///      standalone output differs from the managed-mode format).
+/// A line is only parsed if a MAC-shaped token (six colon-separated hex
+/// byte groups) is found; anything else (headers, banners, blank lines) is
+/// skipped rather than treated as an error.
 fn parse_mac_table(raw: &str) -> Vec<MacTableEntry> {
     fn looks_like_mac(token: &str) -> bool {
         let parts: Vec<&str> = token.split(':').collect();
@@ -2354,6 +2366,32 @@ fn parse_mac_table(raw: &str) -> Vec<MacTableEntry> {
     raw.lines()
         .filter_map(|line| {
             let tokens: Vec<&str> = line.split_whitespace().collect();
+
+            // Format 1: labeled key-value tokens.
+            if let Some(mac_pos) = tokens.iter().position(|t| *t == "MAC:") {
+                let mac = *tokens.get(mac_pos + 1)?;
+                if looks_like_mac(mac) {
+                    let vlan_id = tokens
+                        .iter()
+                        .position(|t| *t == "VLAN:")
+                        .and_then(|i| tokens.get(i + 1))
+                        .and_then(|v| v.parse::<u16>().ok());
+                    let port_id = tokens
+                        .iter()
+                        .position(|t| *t == "PORT:" || *t == "Port:" || *t == "Trunk:")
+                        .and_then(|i| tokens.get(i + 1))
+                        .map(|s| s.to_string());
+                    if let Some(port_id) = port_id {
+                        return Some(MacTableEntry {
+                            mac_address: mac.to_string(),
+                            vlan_id,
+                            port_id,
+                        });
+                    }
+                }
+            }
+
+            // Format 2: plain whitespace-separated table.
             let mac = *tokens.first()?;
             if !looks_like_mac(mac) {
                 return None;
@@ -2500,6 +2538,33 @@ mod tests {
     #[test]
     fn test_parse_mac_table_empty_input() {
         assert!(parse_mac_table("").is_empty());
+    }
+
+    #[test]
+    fn test_parse_mac_table_labeled_format() {
+        // FortiGate-managed mode's documented output shape
+        // (diagnose switch-controller switch-info mac-table); tried as the
+        // primary candidate for standalone mode's equivalent command.
+        let raw = "Managed Switch : S124FFTF24000746 0\n\
+                    MAC: e0:23:ff:fc:bc:07  VLAN: 3 PORT: 5\n\
+                    MAC: aa:bb:cc:dd:ee:ff  VLAN: 101 Trunk: 7\n";
+        let entries = parse_mac_table(raw);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].mac_address, "e0:23:ff:fc:bc:07");
+        assert_eq!(entries[0].vlan_id, Some(3));
+        assert_eq!(entries[0].port_id, "5");
+        assert_eq!(entries[1].mac_address, "aa:bb:cc:dd:ee:ff");
+        assert_eq!(entries[1].port_id, "7");
+    }
+
+    #[test]
+    fn test_parse_mac_table_rejects_command_error_output() {
+        // The exact failure real hardware returned for "get switch
+        // mac-address list" (the wrong command, since replaced by
+        // "diagnose switch mac-address list") -- must not be misparsed as
+        // data.
+        let raw = "get switch mac-address list\r\r\n\r\ncommand parse error before 'mac-address'\r\nCommand fail. Return code -61\r\n\r\nS124FFTF24000746 # ";
+        assert!(parse_mac_table(raw).is_empty());
     }
 
     // ========== Speed Conversion Tests ==========
