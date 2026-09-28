@@ -1,6 +1,6 @@
 use super::traits::{SwitchVendor, VendorError};
 use crate::config::RuntimeConfig;
-use crate::models::{ConfigResult, MirrorDirection, Port, PortMirror, PortMode, StateDiff, SwitchConfig, SwitchState, Vlan, VlanIpConfig, ConnectionType};
+use crate::models::{ConfigResult, MacTableEntry, MirrorDirection, Port, PortMirror, PortMode, StateDiff, SwitchConfig, SwitchState, Vlan, VlanIpConfig, ConnectionType};
 use crate::ssh::{ConnectionClient, SerialClient, SshClient};
 use async_trait::async_trait;
 use tracing::{debug, info, warn};
@@ -22,6 +22,26 @@ impl CiscoSwitch {
             current_state: None,
             enforce_port_config,
         }
+    }
+
+    /// Query the switch's learned MAC-address table (FDB), connecting for
+    /// the duration of this one command only.
+    ///
+    /// UNVERIFIED against real hardware — no Cisco unit was available to
+    /// confirm the exact column layout when this was added; both parsed
+    /// entries and raw output are returned so a parsing gap doesn't hide
+    /// the answer.
+    pub async fn get_mac_table(&mut self) -> Result<(Vec<MacTableEntry>, String), VendorError> {
+        let outputs = self
+            .client
+            .as_mut()
+            .ok_or_else(|| VendorError::SshError("Not connected".to_string()))?
+            .execute_commands(&["show mac address-table".to_string()])
+            .await
+            .map_err(|e| VendorError::CommandError(e.to_string()))?;
+
+        let raw = outputs.join("\n");
+        Ok((parse_mac_table(&raw), raw))
     }
 
     fn generate_vlan_commands(&self, vlans: &[Vlan]) -> Vec<String> {
@@ -1310,6 +1330,40 @@ impl CiscoSwitch {
             timestamp: chrono::Utc::now(),
         })
     }
+}
+
+/// Parse Cisco IOS `show mac address-table` output into structured entries.
+///
+/// Expected layout: a header/separator block followed by rows of
+/// `<VLAN> <MAC Address> <Type> <Ports>`, where the MAC is dot-grouped as
+/// three 4-hex-digit blocks (e.g. `0011.2233.4455`) per Cisco's standard
+/// notation. Best-effort: a line is only parsed if its second token matches
+/// that MAC shape; anything else (headers, separators, blank lines,
+/// multi-port "Ports" entries not tied to a single port) is skipped.
+///
+/// UNVERIFIED against real hardware — see `get_mac_table` doc comment.
+fn parse_mac_table(raw: &str) -> Vec<MacTableEntry> {
+    fn looks_like_mac(token: &str) -> bool {
+        let parts: Vec<&str> = token.split('.').collect();
+        parts.len() == 3 && parts.iter().all(|p| p.len() == 4 && p.chars().all(|c| c.is_ascii_hexdigit()))
+    }
+
+    raw.lines()
+        .filter_map(|line| {
+            let tokens: Vec<&str> = line.split_whitespace().collect();
+            let mac = *tokens.get(1)?;
+            if !looks_like_mac(mac) {
+                return None;
+            }
+            let vlan_id = tokens.first().and_then(|v| v.parse::<u16>().ok());
+            let port_id = tokens.get(3)?.to_string();
+            Some(MacTableEntry {
+                mac_address: mac.to_string(),
+                vlan_id,
+                port_id,
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -2602,5 +2656,35 @@ mod tests {
         // Verify the save command constant is "write memory" (Cisco IOS standard)
         let save_command = "write memory";
         assert_eq!(save_command, "write memory");
+    }
+
+    #[test]
+    fn test_parse_mac_table_basic() {
+        let raw = "          Mac Address Table\n\
+                    -------------------------------------------\n\
+                    Vlan    Mac Address       Type        Ports\n\
+                    ----    -----------       --------    -----\n\
+                      10    0011.2233.4455    DYNAMIC     Gi1/0/5\n\
+                      10    aabb.ccdd.eeff    DYNAMIC     Gi1/0/12\n";
+        let entries = parse_mac_table(raw);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].mac_address, "0011.2233.4455");
+        assert_eq!(entries[0].vlan_id, Some(10));
+        assert_eq!(entries[0].port_id, "Gi1/0/5");
+        assert_eq!(entries[1].port_id, "Gi1/0/12");
+    }
+
+    #[test]
+    fn test_parse_mac_table_skips_non_mac_lines() {
+        let raw = "          Mac Address Table\n\
+                    -------------------------------------------\n\
+                      10    0011.2233.4455    DYNAMIC     Gi1/0/5\n";
+        let entries = parse_mac_table(raw);
+        assert_eq!(entries.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_mac_table_empty_input() {
+        assert!(parse_mac_table("").is_empty());
     }
 }

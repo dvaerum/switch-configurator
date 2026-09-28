@@ -116,6 +116,7 @@ pub fn create_router(store: ConfigStore) -> Router {
         .route("/switches/:id/poe-reset/:port_id", post(handlers::poe_reset))
         .route("/switches/:id/poe-on/:port_id", post(handlers::poe_on))
         .route("/switches/:id/poe-off/:port_id", post(handlers::poe_off))
+        .route("/switches/:id/mac-table", get(handlers::get_mac_table))
         // GET retrieves running config from switch hardware via SSH
         .route("/switches/:id/config", get(handlers::get_config))
         // PUT creates/replaces in-memory config, PATCH updates, DELETE removes
