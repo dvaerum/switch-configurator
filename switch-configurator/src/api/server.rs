@@ -27,6 +27,10 @@ pub const API_ENDPOINTS: &[&str] = &[
     "PATCH /switches/:id/desired-config",
     "DELETE /switches/:id/desired-config",
     "POST /config/reload",
+    "POST /switches/:id/poe-reset/:port_id",
+    "POST /switches/:id/poe-on/:port_id",
+    "POST /switches/:id/poe-off/:port_id",
+    "GET /switches/:id/mac-table",
 ];
 
 pub async fn start(store: ConfigStore, socket_path: Option<std::path::PathBuf>) -> anyhow::Result<()> {
