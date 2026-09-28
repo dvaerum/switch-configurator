@@ -587,7 +587,7 @@ Query the switch's learned MAC-address table (FDB). Answers "what's physically w
 
 | Vendor | Raw command | MAC notation | VLAN in output |
 |---|---|---|---|
-| FortiSwitch | `get switch mac-address list` | colon-grouped (`00:11:22:33:44:55`) | yes |
+| FortiSwitch | `diagnose switch mac-address list` | colon-grouped (`00:11:22:33:44:55`) | yes |
 | Aruba | `show mac-address` | hyphen-grouped (`0011-2233-4455`) | no (`vlan_id` always `null`) |
 | Cisco | `show mac address-table` | dot-grouped (`0011.2233.4455`) | yes |
 
