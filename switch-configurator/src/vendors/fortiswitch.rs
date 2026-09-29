@@ -2399,13 +2399,90 @@ fn is_command_rejected(raw: &str) -> bool {
 
 /// Parse `get switch physical-port` output into structured per-port status.
 ///
-/// Expected layout (per a documented `edit portN` / `get` example — the
-/// top-level, non-edit-context shape is unconfirmed): key-value lines
-/// (`key : value`, whitespace around `:` tolerated), with each port's block
-/// starting at a `name :` line and running until the next one. Only
-/// `link-status`, `speed`, `duplex`, and `poe-status` are extracted; other
-/// keys (description, flow-control, lldp-transmit, etc.) are ignored.
+/// Confirmed live against real S124FF firmware (IT-02876-sw1, via
+/// provision@'s integration testing): each port is a `== [ <name> ]`
+/// header line followed by ONE line with all fields space-separated, e.g.
+/// `name: port1    egress-drop-mode: enabled    link-status: up (100Mbps
+/// full-duplex)   status: up`. When link is down, the parenthesized
+/// speed/duplex is simply absent (`link-status: down   status: up`). The
+/// `internal` management interface has a shorter line (no
+/// egress-drop-mode/status fields). No `poe-status` field appears in this
+/// output at all — PoE status may need a separate command; `poe_status`
+/// stays `None` here.
+///
+/// Falls back to an older key-per-line block format (`name :` starting a
+/// block, followed by separate `link-status :` / `speed :` / `duplex :` /
+/// `poe-status :` lines) if no single-line entries are found — that shape
+/// was this parser's original guess, based on a documented `edit portN` /
+/// `get` example; kept in case some other firmware/mode uses it.
 fn parse_port_status(raw: &str) -> Vec<PortStatusEntry> {
+    let single_line = parse_port_status_single_line(raw);
+    if !single_line.is_empty() {
+        return single_line;
+    }
+    parse_port_status_block_format(raw)
+}
+
+/// Real confirmed format: `name: <id> ... link-status: up (<speed>Mbps
+/// <duplex>-duplex)|down ...` all on one line.
+fn parse_port_status_single_line(raw: &str) -> Vec<PortStatusEntry> {
+    raw.lines()
+        .filter_map(|line| {
+            let tokens: Vec<&str> = line.split_whitespace().collect();
+            let name_pos = tokens.iter().position(|t| *t == "name:")?;
+            let port_id = (*tokens.get(name_pos + 1)?).to_string();
+
+            let link_status_pos = tokens.iter().position(|t| *t == "link-status:")?;
+            let link_status = tokens
+                .get(link_status_pos + 1)
+                .map(|v| v.to_string());
+
+            // Speed/duplex only present when link is up, parenthesized
+            // right after the "up" token: "(100Mbps" "full-duplex)".
+            let mut speed = None;
+            let mut duplex = None;
+            if let Some(speed_tok) = tokens
+                .iter()
+                .find(|t| t.starts_with('(') && t.ends_with("Mbps"))
+            {
+                speed = Some(
+                    speed_tok
+                        .trim_start_matches('(')
+                        .trim_end_matches("Mbps")
+                        .to_string(),
+                );
+                if let Some(pos) = tokens.iter().position(|t| t == speed_tok) {
+                    if let Some(duplex_tok) = tokens.get(pos + 1) {
+                        duplex = Some(
+                            duplex_tok
+                                .trim_end_matches(')')
+                                .trim_end_matches("-duplex")
+                                .to_string(),
+                        );
+                    }
+                }
+            }
+
+            let poe_status = tokens
+                .iter()
+                .position(|t| *t == "poe-status:")
+                .and_then(|i| tokens.get(i + 1))
+                .map(|v| v.to_string());
+
+            Some(PortStatusEntry {
+                port_id,
+                link_status,
+                speed,
+                duplex,
+                poe_status,
+            })
+        })
+        .collect()
+}
+
+/// Original guessed format, kept as a fallback — see `parse_port_status`'s
+/// doc comment.
+fn parse_port_status_block_format(raw: &str) -> Vec<PortStatusEntry> {
     fn extract_field<'a>(line: &'a str, key: &str) -> Option<&'a str> {
         let rest = line.trim().strip_prefix(key)?;
         rest.trim_start().strip_prefix(':').map(|v| v.trim())
@@ -2718,7 +2795,48 @@ mod tests {
     // ========== Port Status Parsing Tests ==========
 
     #[test]
-    fn test_parse_port_status_basic() {
+    fn test_parse_port_status_confirmed_real_hardware_format() {
+        // Exact raw_output reported live by provision@ against IT-02876-sw1
+        // (S124FF firmware), trimmed to a few representative ports:
+        // link-up-with-speed/duplex, link-down, and the trailing shorter
+        // "internal" management-interface line.
+        let raw = "get switch physical-port\r\r\n\
+                    == [ port1 ]\r\n\
+                    name: port1    egress-drop-mode: enabled    link-status: up (100Mbps full-duplex)   status: up    \r\n\
+                    == [ port2 ]\r\n\
+                    name: port2    egress-drop-mode: enabled    link-status: up (100Mbps full-duplex)   status: up    \r\n\
+                    == [ port3 ]\r\n\
+                    name: port3    egress-drop-mode: enabled    link-status: down   status: up    \r\n\
+                    == [ internal ]\r\n\
+                    name: internal    link-status: up (1000Mbps full-duplex)   \r\n\
+                    \r\n\
+                    S124FFTF24000746 # ";
+        let entries = parse_port_status(raw);
+        assert_eq!(entries.len(), 4);
+
+        assert_eq!(entries[0].port_id, "port1");
+        assert_eq!(entries[0].link_status.as_deref(), Some("up"));
+        assert_eq!(entries[0].speed.as_deref(), Some("100"));
+        assert_eq!(entries[0].duplex.as_deref(), Some("full"));
+        assert_eq!(entries[0].poe_status, None); // not present in this output
+
+        assert_eq!(entries[2].port_id, "port3");
+        assert_eq!(entries[2].link_status.as_deref(), Some("down"));
+        assert_eq!(entries[2].speed, None);
+        assert_eq!(entries[2].duplex, None);
+
+        assert_eq!(entries[3].port_id, "internal");
+        assert_eq!(entries[3].link_status.as_deref(), Some("up"));
+        assert_eq!(entries[3].speed.as_deref(), Some("1000"));
+        assert_eq!(entries[3].duplex.as_deref(), Some("full"));
+    }
+
+    #[test]
+    fn test_parse_port_status_falls_back_to_block_format() {
+        // The original guessed key-per-line format (unconfirmed against
+        // any real firmware) -- kept as a fallback in case some other
+        // firmware/mode uses it. Single-line extraction must find nothing
+        // here (no "name:"-attached token) before this path is tried.
         let raw = "name : port1\n\
                     description : (null)\n\
                     link-status : up\n\
@@ -2743,7 +2861,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_port_status_ignores_unrecognized_keys() {
+    fn test_parse_port_status_block_format_ignores_unrecognized_keys() {
         let raw = "name : port5\n\
                     flow-control : both\n\
                     lldp-transmit : disable\n\
