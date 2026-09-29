@@ -1263,6 +1263,21 @@ pub struct MacTableEntry {
     pub port_id: String,
 }
 
+/// Live per-port operational status (link/speed/duplex/PoE), distinct from
+/// the *configured* state already exposed via `SwitchState`/`Port` — a port
+/// can be administratively enabled with PoE configured on, and still be
+/// link-down or drawing zero power in reality. Used to distinguish a
+/// switch-side fault (port down, PoE not negotiating) from a fault in the
+/// attached device, when a MAC that should be there isn't showing up.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct PortStatusEntry {
+    pub port_id: String,
+    pub link_status: Option<String>,
+    pub speed: Option<String>,
+    pub duplex: Option<String>,
+    pub poe_status: Option<String>,
+}
+
 /// Granular SNMP state difference for efficient configuration
 /// Instead of replacing all SNMP config, this tracks individual changes
 #[derive(Debug, Clone, Default, Serialize)]
