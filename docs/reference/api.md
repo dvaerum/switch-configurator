@@ -619,15 +619,15 @@ Query live per-port operational status (link/speed/duplex/PoE) — distinct from
 {
   "switch_id": "it-02876-sw1",
   "entries": [
-    {"port_id": "port1", "link_status": "up", "speed": "1000", "duplex": "full", "poe_status": "delivering"},
-    {"port_id": "port2", "link_status": "down", "speed": "0", "duplex": "none", "poe_status": "disabled"}
+    {"port_id": "port1", "link_status": "up", "speed": "100", "duplex": "full", "poe_status": null},
+    {"port_id": "port3", "link_status": "down", "speed": null, "duplex": null, "poe_status": null}
   ],
-  "raw_output": "name : port1\ndescription : (null)\nlink-status : up\n..."
+  "raw_output": "== [ port1 ]\nname: port1    egress-drop-mode: enabled    link-status: up (100Mbps full-duplex)   status: up    \n..."
 }
 ```
 
 **Response Fields:**
-- `entries` (array): Best-effort parsed rows, one per port. Any field the parser didn't find on a given port is `null`.
+- `entries` (array): Best-effort parsed rows, one per port. Any field the parser didn't find on a given port is `null` — note `poe_status` is currently always `null`, since this command's output doesn't include a PoE field at all (confirmed on real hardware); a separate command would be needed for that.
 - `raw_output` (string): The unparsed command output, always included.
 
 **Errors:**
@@ -639,7 +639,7 @@ Query live per-port operational status (link/speed/duplex/PoE) — distinct from
 
 **Supported vendors:** FortiSwitch only (`get switch physical-port`). Added for a live hardware incident where a MAC-table entry was missing on one port with no other way to tell "switch sees no link" from "device isn't sending traffic". Aruba/Cisco not yet implemented.
 
-**⚠️ Verification status:** UNVERIFIED against real hardware — built from a documented `edit portN` / `get` example (key-value block format); the exact top-level, non-edit-context output shape on this firmware hasn't been confirmed yet. `raw_output` is there specifically so a parsing gap doesn't hide the answer.
+**✅ Verification status:** confirmed against real hardware (IT-02876-sw1, S124FF firmware, via provision@'s integration testing) — link-status/speed/duplex parse correctly. `poe_status` is not present in this command's output at all (confirmed), not just unparsed.
 
 **Example:**
 
