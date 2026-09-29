@@ -1773,9 +1773,9 @@ async fn poe_set_impl(
 ///
 /// Implemented for all 3 supported vendors (FortiSwitch, Aruba, Cisco), each
 /// with its own raw command and parser. Returns both parsed entries
-/// (best-effort — none of the 3 parsers have been verified against real
-/// hardware output yet) and the raw command output, so a parsing gap
-/// doesn't hide the answer.
+/// (best-effort — FortiSwitch is confirmed against real hardware
+/// (IT-02876-sw1); Aruba and Cisco are not yet) and the raw command
+/// output, so a parsing gap doesn't hide the answer.
 pub async fn get_mac_table(
     State(store): State<ConfigStore>,
     Path(id): Path<String>,
@@ -1867,6 +1867,91 @@ pub async fn get_mac_table(
             .into_response(),
         Err(e) => {
             error!("MAC table query failed for {}: {}", id, e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": e})),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// Query live per-port operational status (link/speed/duplex/PoE) —
+/// distinct from `GET /switches/{id}/config`'s `parsed_state.ports`, which
+/// reflects *configured* state (admin enabled, PoE enabled) rather than
+/// real-time delivery. Used to distinguish a switch-side fault (port down,
+/// PoE not negotiating) from a fault in the attached device, e.g. when a
+/// MAC that should be there isn't showing up in the mac-table.
+///
+/// GET /switches/{id}/port-status
+///
+/// FortiSwitch only for now (added for a live incident — a MAC-table entry
+/// missing entirely on one port, with no other way to tell "switch sees no
+/// link" from "device isn't sending traffic"). Aruba/Cisco not yet
+/// implemented. UNVERIFIED against real hardware — see
+/// `FortiswitchSwitch::get_port_status`'s doc comment.
+pub async fn get_port_status(
+    State(store): State<ConfigStore>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let config = store.config.read().await;
+    let switch_config = match config.switches.iter().find(|s| s.id == id) {
+        Some(cfg) => cfg.clone(),
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": format!("Switch '{}' not found", id)})),
+            )
+                .into_response();
+        }
+    };
+    drop(config);
+
+    if switch_config.model().vendor() != Vendor::Fortiswitch {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("Port status lookup not yet supported for {:?} switches", switch_config.model().vendor())})),
+        )
+            .into_response();
+    }
+
+    if store.status.is_switch_busy(&id).await {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({"error": format!("Switch '{}' is busy", id), "switch_id": id})),
+        )
+            .into_response();
+    }
+
+    store.status.set_currently_configuring(id.clone()).await;
+
+    let result: Result<(Vec<crate::models::PortStatusEntry>, String), String> = async {
+        let mut vendor = vendors::fortiswitch::FortiswitchSwitch::new(
+            switch_config.clone(),
+            crate::config::RuntimeConfig::default(),
+            switch_config.settings.enforce_port_config,
+        );
+        vendor.connect().await.map_err(|e| format!("Connection failed: {}", e))?;
+        let outcome = vendor.get_port_status().await.map_err(|e| e.to_string());
+        let _ = vendor.disconnect().await;
+        outcome
+    }
+    .await;
+
+    store.status.clear_currently_configuring(&id).await;
+
+    match result {
+        Ok((entries, raw)) => (
+            StatusCode::OK,
+            Json(json!({
+                "switch_id": id,
+                "entries": entries,
+                "raw_output": raw
+            })),
+        )
+            .into_response(),
+        Err(e) => {
+            error!("Port status query failed for {}: {}", id, e);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": e})),

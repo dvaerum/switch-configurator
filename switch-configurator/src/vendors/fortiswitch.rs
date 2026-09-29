@@ -1,7 +1,7 @@
 use super::traits::{SwitchVendor, VendorError};
 use crate::config::RuntimeConfig;
 use crate::models::{
-    ConfigResult, MacTableEntry, MirrorDirection, Port, PortMirror, PortMode, SnmpAccess, SnmpCommunity,
+    ConfigResult, MacTableEntry, MirrorDirection, Port, PortMirror, PortMode, PortStatusEntry, SnmpAccess, SnmpCommunity,
     SnmpConfig, SnmpTrapReceiver, SpeedDuplex, StateDiff, SwitchConfig, SwitchState, TrapType,
     Vlan, VlanIpConfig, ConnectionType,
 };
@@ -550,6 +550,40 @@ impl FortiswitchSwitch {
         }
 
         Ok((parse_mac_table(&raw), raw))
+    }
+
+    /// Query live per-port operational status (link/speed/duplex),
+    /// connecting for the duration of this one command only. Distinct from
+    /// `parse_current_state`'s `show switch physical-port` block (which
+    /// reads back *configured* state — admin enabled/PoE-enabled/speed
+    /// setting); `get switch physical-port` (no "show") is FortiOS's
+    /// operational/live-status equivalent and includes real link-status.
+    ///
+    /// UNVERIFIED against real hardware — built from a documented example
+    /// (`config switch physical-port` / `edit portN` / `get` showing
+    /// `name :` / `link-status :` / `speed :` / `duplex :` key-value
+    /// blocks); the exact top-level (non-edit-context) output shape hasn't
+    /// been confirmed on this firmware. Raw output is always included so a
+    /// parsing gap doesn't hide the answer.
+    pub async fn get_port_status(&mut self) -> Result<(Vec<PortStatusEntry>, String), VendorError> {
+        let client = self
+            .client
+            .as_mut()
+            .ok_or_else(|| VendorError::SshError("Not connected".to_string()))?;
+
+        let raw = client
+            .execute_command("get switch physical-port")
+            .await
+            .map_err(|e| VendorError::CommandError(e.to_string()))?;
+
+        if is_command_rejected(&raw) {
+            return Err(VendorError::CommandError(format!(
+                "Switch rejected 'get switch physical-port': {}",
+                raw.trim()
+            )));
+        }
+
+        Ok((parse_port_status(&raw), raw))
     }
 
     fn generate_remove_vlan_commands(&self, vlan_ids: &[u16]) -> Vec<String> {
@@ -2363,6 +2397,54 @@ fn is_command_rejected(raw: &str) -> bool {
     raw.contains("command parse error") || raw.contains("Command fail. Return code")
 }
 
+/// Parse `get switch physical-port` output into structured per-port status.
+///
+/// Expected layout (per a documented `edit portN` / `get` example — the
+/// top-level, non-edit-context shape is unconfirmed): key-value lines
+/// (`key : value`, whitespace around `:` tolerated), with each port's block
+/// starting at a `name :` line and running until the next one. Only
+/// `link-status`, `speed`, `duplex`, and `poe-status` are extracted; other
+/// keys (description, flow-control, lldp-transmit, etc.) are ignored.
+fn parse_port_status(raw: &str) -> Vec<PortStatusEntry> {
+    fn extract_field<'a>(line: &'a str, key: &str) -> Option<&'a str> {
+        let rest = line.trim().strip_prefix(key)?;
+        rest.trim_start().strip_prefix(':').map(|v| v.trim())
+    }
+
+    let mut entries = Vec::new();
+    let mut current: Option<PortStatusEntry> = None;
+
+    for line in raw.lines() {
+        if let Some(name) = extract_field(line, "name") {
+            if let Some(entry) = current.take() {
+                entries.push(entry);
+            }
+            current = Some(PortStatusEntry {
+                port_id: name.to_string(),
+                ..Default::default()
+            });
+            continue;
+        }
+        let Some(entry) = current.as_mut() else {
+            continue;
+        };
+        if let Some(v) = extract_field(line, "link-status") {
+            entry.link_status = Some(v.to_string());
+        } else if let Some(v) = extract_field(line, "speed") {
+            entry.speed = Some(v.to_string());
+        } else if let Some(v) = extract_field(line, "duplex") {
+            entry.duplex = Some(v.to_string());
+        } else if let Some(v) = extract_field(line, "poe-status") {
+            entry.poe_status = Some(v.to_string());
+        }
+    }
+    if let Some(entry) = current.take() {
+        entries.push(entry);
+    }
+
+    entries
+}
+
 /// Parse `diagnose switch mac-address list` output into structured entries.
 ///
 /// Confirmed live against real S124FF firmware (IT-02876-sw1, via
@@ -2631,6 +2713,51 @@ mod tests {
     fn test_is_command_rejected_false_on_normal_output() {
         let raw = "MAC: e0:23:ff:fc:bc:07  VLAN: 3 PORT: 5\n";
         assert!(!is_command_rejected(raw));
+    }
+
+    // ========== Port Status Parsing Tests ==========
+
+    #[test]
+    fn test_parse_port_status_basic() {
+        let raw = "name : port1\n\
+                    description : (null)\n\
+                    link-status : up\n\
+                    speed : 1000\n\
+                    duplex : full\n\
+                    poe-status : delivering\n\
+                    name : port2\n\
+                    description : (null)\n\
+                    link-status : down\n\
+                    speed : 0\n\
+                    duplex : none\n\
+                    poe-status : disabled\n";
+        let entries = parse_port_status(raw);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].port_id, "port1");
+        assert_eq!(entries[0].link_status.as_deref(), Some("up"));
+        assert_eq!(entries[0].speed.as_deref(), Some("1000"));
+        assert_eq!(entries[0].duplex.as_deref(), Some("full"));
+        assert_eq!(entries[0].poe_status.as_deref(), Some("delivering"));
+        assert_eq!(entries[1].port_id, "port2");
+        assert_eq!(entries[1].link_status.as_deref(), Some("down"));
+    }
+
+    #[test]
+    fn test_parse_port_status_ignores_unrecognized_keys() {
+        let raw = "name : port5\n\
+                    flow-control : both\n\
+                    lldp-transmit : disable\n\
+                    max-frame-size : 16360\n\
+                    link-status : up\n";
+        let entries = parse_port_status(raw);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].link_status.as_deref(), Some("up"));
+        assert_eq!(entries[0].speed, None);
+    }
+
+    #[test]
+    fn test_parse_port_status_empty_input() {
+        assert!(parse_port_status("").is_empty());
     }
 
     // ========== Speed Conversion Tests ==========

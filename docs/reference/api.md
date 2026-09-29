@@ -602,6 +602,54 @@ curl -s http://localhost:4002/switches/it-02876-sw1/mac-table | jq '.entries[] |
 
 ---
 
+### Port Status Lookup
+
+Query live per-port operational status (link/speed/duplex/PoE) — distinct from `GET /switches/{id}/config`'s `parsed_state.ports`, which reflects *configured* state (admin enabled, PoE enabled) rather than real-time delivery. A port can be administratively enabled with PoE configured on and still be link-down or drawing zero power in reality. Useful for distinguishing a switch-side fault (port down, PoE not negotiating) from a fault in the attached device — e.g. when a MAC that should be there isn't showing up in the mac-table.
+
+**Endpoint:** `GET /switches/{id}/port-status`
+
+**Path Parameters:**
+- `id` (string, required): Switch ID
+
+**Response:**
+
+**Success:** `200 OK`
+
+```json
+{
+  "switch_id": "it-02876-sw1",
+  "entries": [
+    {"port_id": "port1", "link_status": "up", "speed": "1000", "duplex": "full", "poe_status": "delivering"},
+    {"port_id": "port2", "link_status": "down", "speed": "0", "duplex": "none", "poe_status": "disabled"}
+  ],
+  "raw_output": "name : port1\ndescription : (null)\nlink-status : up\n..."
+}
+```
+
+**Response Fields:**
+- `entries` (array): Best-effort parsed rows, one per port. Any field the parser didn't find on a given port is `null`.
+- `raw_output` (string): The unparsed command output, always included.
+
+**Errors:**
+
+- `404 NOT FOUND` - Switch not found
+- `400 BAD REQUEST` - Vendor not yet supported (FortiSwitch only, for now)
+- `409 CONFLICT` - Switch is busy
+- `500 INTERNAL SERVER ERROR` - Connection failed, or the switch rejected the underlying command (same rejection-marker detection as mac-table)
+
+**Supported vendors:** FortiSwitch only (`get switch physical-port`). Added for a live hardware incident where a MAC-table entry was missing on one port with no other way to tell "switch sees no link" from "device isn't sending traffic". Aruba/Cisco not yet implemented.
+
+**⚠️ Verification status:** UNVERIFIED against real hardware — built from a documented `edit portN` / `get` example (key-value block format); the exact top-level, non-edit-context output shape on this firmware hasn't been confirmed yet. `raw_output` is there specifically so a parsing gap doesn't hide the answer.
+
+**Example:**
+
+```bash
+# Check whether a port that should have a device on it actually has link
+curl -s http://localhost:4002/switches/it-02876-sw1/port-status | jq '.entries[] | select(.port_id == "port1")'
+```
+
+---
+
 ### Reload Configuration (Global)
 
 Reload configuration from YAML files on disk and apply to **all** switches.

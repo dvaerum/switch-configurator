@@ -3596,4 +3596,49 @@ mod integration_tests {
         .into_response();
         assert_eq!(response.status(), StatusCode::CONFLICT);
     }
+
+    #[tokio::test]
+    async fn test_get_port_status_switch_not_found() {
+        let store = create_test_config_store();
+        let response = get_port_status(
+            axum::extract::State(store),
+            axum::extract::Path("nonexistent".to_string()),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_get_port_status_unsupported_vendor() {
+        // test-sw-01 is Aruba -- port-status is FortiSwitch-only for now.
+        let store = create_test_config_store();
+        let response = get_port_status(
+            axum::extract::State(store),
+            axum::extract::Path("test-sw-01".to_string()),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&body).unwrap();
+        assert!(json["error"].as_str().unwrap().contains("not yet supported"));
+    }
+
+    #[tokio::test]
+    async fn test_get_port_status_switch_busy() {
+        let store = create_fortiswitch_test_store();
+        store.status.set_currently_configuring("test-sw-forti".to_string()).await;
+
+        let response = get_port_status(
+            axum::extract::State(store.clone()),
+            axum::extract::Path("test-sw-forti".to_string()),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
 }
