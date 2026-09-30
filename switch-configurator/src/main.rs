@@ -213,6 +213,12 @@ async fn main() -> Result<()> {
     // Start API server
     let api_handle = tokio::spawn(api::server::start(store.clone(), args.socket.clone()));
 
+    // Background mac-table cache refresher: keeps GET /switches/:id/mac-table
+    // warm so a real caller almost always hits cache instead of paying the
+    // live-fetch latency itself. Not joined below (see its own doc comment
+    // for why a panic in one refresh cycle can't take down the service).
+    tokio::spawn(api::handlers::spawn_mac_table_refresher(store.clone()));
+
     // Start file watcher if enabled
     let watcher_handle = if args.watch {
         Some(tokio::spawn(watcher::start(

@@ -1360,6 +1360,33 @@ mod integration_tests {
     }
 
     #[tokio::test]
+    async fn test_delete_switch_config_prunes_mac_table_cache() {
+        // A deleted switch's cached mac-table entry must not linger in
+        // memory forever, unreachable but never cleaned up.
+        let store = create_test_config_store();
+        store.mac_table_cache.write().await.insert(
+            "test-sw-01".to_string(),
+            crate::config::CachedMacTable {
+                entries: vec![],
+                raw_output: "stale".to_string(),
+                fetched_at: chrono::Utc::now(),
+                generation_id: uuid::Uuid::new_v4(),
+            },
+        );
+
+        let app = api::create_router(store.clone());
+        let request = Request::builder()
+            .method("DELETE")
+            .uri("/switches/test-sw-01/desired-config")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        assert!(!store.mac_table_cache.read().await.contains_key("test-sw-01"));
+    }
+
+    #[tokio::test]
     async fn test_patch_switch_config_add_port() {
         let store = create_test_config_store();
         let app = api::create_router(store.clone());
@@ -3387,6 +3414,87 @@ mod integration_tests {
         };
 
         ConfigStore::new(AppConfig { switches: vec![switch] }, 4003)
+    }
+
+    /// A FortiSwitch fixture using the serial connection type with a
+    /// guaranteed-nonexistent device path, so `connect()` fails fast and
+    /// synchronously (see `SerialClient::connect`'s device-exists check)
+    /// instead of a slow/hanging network attempt -- safe to use in a test
+    /// that needs a real (fast-failing) live-fetch attempt, e.g. the
+    /// mac-table refresher's busy-vs-not-busy behavior.
+    fn create_fortiswitch_serial_test_store() -> ConfigStore {
+        let switch = SwitchConfig {
+            id: "test-sw-forti-serial".to_string(),
+            hostname: Some("test-fortiswitch-serial".to_string()),
+            model: Some(SwitchModel::Fortiswitch124F_FPOE),
+            management_ip: Some("192.168.1.5".to_string()),
+            credentials: Some(Credentials {
+                username: "admin".to_string(),
+                password: Some("password".to_string()),
+                ssh_key_path: None,
+                port: 22,
+                connection_type: ConnectionType::Serial,
+                serial_device: Some("/dev/nonexistent-test-serial-device".to_string()),
+                baud_rate: 9600,
+                jump_hosts: None,
+                enable_secret: None,
+            }),
+            vlans: vec![],
+            ports: vec![],
+            port_mirrors: vec![],
+            snmp: None,
+            validation: None,
+            settings: Settings::default(),
+            vendor_specific: std::collections::HashMap::new(),
+            management_vlan: None,
+        };
+
+        ConfigStore::new(AppConfig { switches: vec![switch] }, 4003)
+    }
+
+    #[tokio::test]
+    async fn test_refresh_all_mac_tables_once_skips_busy_switch() {
+        let store = create_fortiswitch_serial_test_store();
+        store.status.set_currently_configuring("test-sw-forti-serial".to_string()).await;
+
+        // Must return promptly without touching the (nonexistent) serial
+        // device or the cache, since the switch is busy.
+        refresh_all_mac_tables_once(&store).await;
+
+        assert!(!store.mac_table_cache.read().await.contains_key("test-sw-forti-serial"));
+        // Busy flag must be exactly as this test left it -- the refresher
+        // must not have cleared a flag it didn't set itself.
+        assert!(store.status.is_currently_configuring("test-sw-forti-serial").await);
+    }
+
+    #[tokio::test]
+    async fn test_refresh_all_mac_tables_once_releases_guard_on_fetch_failure() {
+        let store = create_fortiswitch_serial_test_store();
+
+        // The switch isn't busy, so the refresher attempts a real fetch --
+        // which fails (nonexistent serial device) rather than populating
+        // the cache. Takes ~10s: connect_with_retry's default 3 attempts
+        // with a 5s delay between them, not a hang -- each individual
+        // attempt itself fails immediately (device-exists check). The key
+        // behavior under test: the busy flag this acquired for the attempt
+        // must be released afterward, not left stuck (exactly the class of
+        // bug fixed by try_acquire_configuring/ConfiguringGuard).
+        refresh_all_mac_tables_once(&store).await;
+
+        assert!(!store.mac_table_cache.read().await.contains_key("test-sw-forti-serial"));
+        assert!(!store.status.is_currently_configuring("test-sw-forti-serial").await);
+    }
+
+    #[tokio::test]
+    async fn test_refresh_all_mac_tables_once_ignores_unsupported_vendor() {
+        // test-sw-01 (create_test_config_store) is Aruba over SSH -- IS a
+        // supported mac-table vendor, so it's not a good "skip" fixture.
+        // Use a config with zero switches instead, to confirm the refresher
+        // handles an empty switch list without error (the simplest possible
+        // "nothing to do" case, still exercising the real code path).
+        let store = ConfigStore::new(AppConfig { switches: vec![] }, 4003);
+        refresh_all_mac_tables_once(&store).await;
+        assert!(store.mac_table_cache.read().await.is_empty());
     }
 
     #[tokio::test]

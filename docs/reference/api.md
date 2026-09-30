@@ -557,21 +557,23 @@ Query the switch's learned MAC-address table (FDB). Answers "what's physically w
 
 **Query Parameters:**
 - `fresh` (bool, optional, default `false`): bypass the cache and always fetch live from the switch.
-- `max_age_seconds` (integer, optional): override the default cache TTL (10s) for this request.
+- `max_age_seconds` (integer, optional): override the default cache TTL (60s) for this request.
 
 **Path Parameters:**
 - `id` (string, required): Switch ID
 
-**Caching** (see [ADR-0001](../decisions/0001-cached-api-response-contract.md)): a live fetch takes ~11-13s on FortiSwitch over serial, expensive enough that a dashboard polling every few seconds would otherwise keep a near-constant session open on the switch's single exclusive serial device. Results are cached per switch for 10s by default. Cache state is communicated via **standard HTTP caching headers**, not a bespoke JSON field — this endpoint follows RFC 9111/RFC 9110 rather than inventing its own contract:
+**Caching** (see [ADR-0001](../decisions/0001-cached-api-response-contract.md)): a live fetch takes ~11-13s on FortiSwitch over serial, expensive enough that a dashboard polling every few seconds would otherwise keep a near-constant session open on the switch's single exclusive serial device. Results are cached per switch for 60s by default, with a background refresher keeping the cache warm on that same interval (see below) so a real caller almost always hits cache instead of paying the live-fetch latency itself. Cache state is communicated via **standard HTTP caching headers**, not a bespoke JSON field — this endpoint follows RFC 9111/RFC 9110 rather than inventing its own contract:
 
 | Header | Meaning |
 |---|---|
 | `ETag` | Opaque id that changes only when the cache entry is actually refreshed. Compare this, not the payload, to detect a real update. |
 | `Age` | Seconds since the data was fetched. `0` on a fresh live fetch. |
-| `Cache-Control: max-age=N` | The freshness lifetime (10s by default, or `?max_age_seconds=` if given). Combine with `Age` to compute remaining freshness. |
+| `Cache-Control: max-age=N` | The freshness lifetime (60s by default, or `?max_age_seconds=` if given). Combine with `Age` to compute remaining freshness. |
 | `Last-Modified` | Absolute fetch timestamp (HTTP-date). |
 
 Send `If-None-Match: "<etag>"` to get a `304 Not Modified` (headers only, no body) if the cache hasn't refreshed since that `ETag` — the standard way to poll cheaply without re-transferring `entries`/`raw_output` when nothing changed. `?fresh=true` always does a real fetch and never returns a `304`, even if `If-None-Match` happens to match.
+
+**Background refresher**: a task proactively re-fetches every switch's mac-table once per TTL (60s), independent of any caller's request. It uses the exact same busy-flag guard as every other operational endpoint (`apply`, `poe-reset`, etc.) — if a switch is busy with something else when the refresher's turn comes, it simply skips that switch for the cycle rather than waiting or erroring; the next real request just pays the live-fetch cost once, same as if the refresher didn't exist. Deleting a switch (`DELETE /switches/:id/desired-config`) or a full config reload removes its cache entry too, so nothing lingers for a switch that no longer exists.
 
 **Response:**
 
