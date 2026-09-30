@@ -17,7 +17,7 @@ use axum_extra::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 /// SSE endpoint for real-time status updates
 pub async fn events(
@@ -978,6 +978,20 @@ pub async fn reload_config(State(store): State<ConfigStore>) -> impl IntoRespons
     // Re-initialize switch statuses with updated configuration
     store.status.initialize_switches(&new_config.switches).await;
 
+    // Prune any mac-table cache entries for switches no longer present --
+    // this full-config reload can drop switches entirely (unlike the
+    // single-switch reload path below), and a dropped switch's cache entry
+    // would otherwise sit in memory forever, unreachable but never removed.
+    {
+        let live_ids: std::collections::HashSet<&str> =
+            new_config.switches.iter().map(|s| s.id.as_str()).collect();
+        store
+            .mac_table_cache
+            .write()
+            .await
+            .retain(|id, _| live_ids.contains(id.as_str()));
+    }
+
     // Track which switches we'll configure and which are busy
     let mut switches_to_configure = Vec::new();
     let mut switches_skipped = Vec::new();
@@ -1533,6 +1547,11 @@ pub async fn delete_switch_config(
     config.switches.retain(|s| s.id != id);
 
     if config.switches.len() < original_len {
+        drop(config);
+        // A deleted switch's cached mac-table entry would otherwise sit in
+        // memory forever -- unreachable (nothing can query a switch that
+        // no longer exists) but never actively removed either.
+        store.mac_table_cache.write().await.remove(&id);
         info!("Deleted switch config for '{}'", id);
         (
             StatusCode::OK,
@@ -1785,7 +1804,14 @@ async fn poe_set_impl(
 /// forced. Chosen to comfortably outlast a dashboard's typical poll
 /// interval (a few seconds) while still being short enough that "which
 /// device is on this port" answers stay meaningfully live.
-const MAC_TABLE_CACHE_DEFAULT_MAX_AGE_SECS: i64 = 10;
+/// Default max-age for a cached mac-table result before a fresh fetch is
+/// forced, and the interval the background refresher (see
+/// `spawn_mac_table_refresher`) re-fetches on. 60s: long enough that the
+/// refresher, not a caller's own request, almost always pays the ~11-13s
+/// live-fetch latency — a caller normally only sees a stale-triggered live
+/// fetch if the refresher itself got skipped (switch busy with something
+/// else) on the immediately preceding cycle.
+pub(crate) const MAC_TABLE_CACHE_DEFAULT_MAX_AGE_SECS: i64 = 60;
 
 /// Query parameters for `GET /switches/{id}/mac-table`.
 #[derive(Debug, Deserialize)]
@@ -1860,12 +1886,163 @@ fn cache_headers(
 /// dashboard polling every few seconds would otherwise keep a near-constant
 /// session open on the switch's single exclusive serial device, competing
 /// with every other operational request for the same busy flag. Results
-/// are cached per switch for `MAC_TABLE_CACHE_DEFAULT_MAX_AGE_SECS` (10s) by
-/// default; a cache hit returns instantly with no serial I/O and no busy-flag
-/// contention at all. `cached`/`cache_age_seconds` in the response say
-/// whether this particular answer came from cache. Use `?fresh=true` to
-/// force a live fetch, or `?max_age_seconds=N` to use a different TTL for
-/// this call only — neither changes what gets cached for the next caller.
+/// are cached per switch for `MAC_TABLE_CACHE_DEFAULT_MAX_AGE_SECS` (60s) by
+/// default, and a background refresher (`spawn_mac_table_refresher`)
+/// proactively re-fetches on that same interval so a real caller's request
+/// almost always hits a cache warmed by the refresher rather than paying
+/// the live-fetch latency itself. Cache facts are reported via standard
+/// HTTP caching headers (`ETag`/`Age`/`Cache-Control`/`Last-Modified`; see
+/// `docs/decisions/0001-cached-api-response-contract.md`), not body
+/// fields. Use `?fresh=true` to force a live fetch, or `?max_age_seconds=N`
+/// to use a different TTL for this call only — neither changes what gets
+/// cached for the next caller or what the refresher does.
+///
+/// Extracted vendor-dispatch fetch logic (`fetch_mac_table_live`) is shared
+/// with the background refresher so the two can never drift.
+async fn fetch_mac_table_live(switch_config: &SwitchConfig) -> Result<(Vec<crate::models::MacTableEntry>, String), String> {
+    // Bounded overall budget as a defense-in-depth safety net: even if some
+    // future bug reintroduces an unbounded wait deeper in the vendor/serial
+    // stack (the actual root cause of a real incident on IT-02876-sw1 —
+    // a check-then-act race let two concurrent mac-table requests both open
+    // a session on the same exclusive serial device, and one hung forever
+    // on an I/O call with no timeout of its own, permanently stuck busy
+    // until the service was restarted), this guarantees a caller (this
+    // function's own caller holds the busy-flag guard) can't be stuck past
+    // this bound.
+    const MAC_TABLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+    match tokio::time::timeout(MAC_TABLE_TIMEOUT, async {
+        match switch_config.model().vendor() {
+            Vendor::Fortiswitch => {
+                let mut vendor = vendors::fortiswitch::FortiswitchSwitch::new(
+                    switch_config.clone(),
+                    crate::config::RuntimeConfig::default(),
+                    switch_config.settings.enforce_port_config,
+                );
+                vendor.connect().await.map_err(|e| format!("Connection failed: {}", e))?;
+                let outcome = vendor.get_mac_table().await.map_err(|e| e.to_string());
+                let _ = vendor.disconnect().await;
+                outcome
+            }
+            Vendor::Aruba => {
+                let mut vendor = vendors::aruba::ArubaSwitch::new(
+                    switch_config.clone(),
+                    crate::config::RuntimeConfig::default(),
+                    switch_config.settings.enforce_port_config,
+                );
+                vendor.connect().await.map_err(|e| format!("Connection failed: {}", e))?;
+                let outcome = vendor.get_mac_table().await.map_err(|e| e.to_string());
+                let _ = vendor.disconnect().await;
+                outcome
+            }
+            Vendor::Cisco => {
+                let mut vendor = vendors::cisco::CiscoSwitch::new(
+                    switch_config.clone(),
+                    crate::config::RuntimeConfig::default(),
+                    switch_config.settings.enforce_port_config,
+                );
+                vendor.connect().await.map_err(|e| format!("Connection failed: {}", e))?;
+                let outcome = vendor.get_mac_table().await.map_err(|e| e.to_string());
+                let _ = vendor.disconnect().await;
+                outcome
+            }
+        }
+    })
+    .await
+    {
+        Ok(inner_result) => inner_result,
+        Err(_elapsed) => Err(format!(
+            "Timed out after {}s waiting for the switch (a stuck underlying I/O call — see StatusTracker::try_acquire_configuring's doc comment for the incident this guards against)",
+            MAC_TABLE_TIMEOUT.as_secs()
+        )),
+    }
+}
+
+/// Background task: proactively re-fetches and caches the mac-table for
+/// every switch with a supported vendor, once per
+/// `MAC_TABLE_CACHE_DEFAULT_MAX_AGE_SECS` (60s). Keeps the cache warm so a
+/// real caller's `GET /switches/:id/mac-table` almost always hits cache
+/// instead of paying the ~11-13s live-fetch latency itself.
+///
+/// Uses the exact same `try_acquire_configuring` atomic guard as every
+/// other operational endpoint — if a switch is already busy (a real
+/// request, a PoE operation, an apply, in flight), this refresher simply
+/// skips that switch for this cycle rather than waiting or erroring. A
+/// skipped cycle just means the *next* real request for that switch pays
+/// the live-fetch cost once, exactly as if the refresher didn't exist —
+/// this can never make anything worse than the pre-refresher behavior, and
+/// specifically can never reintroduce the concurrent-session race that
+/// caused the IT-02876-sw1 incident (see
+/// `StatusTracker::try_acquire_configuring`'s doc comment), since it goes
+/// through the identical atomic acquire path as everything else.
+///
+/// Never returns; intended to be `tokio::spawn`ed once at startup and left
+/// running for the life of the process (not joined — a panic in a single
+/// refresh cycle is caught by `tokio::spawn`'s task boundary and only
+/// drops that one iteration, per Rust's normal task-panic semantics; the
+/// loop itself has no way to panic on its own control flow).
+pub async fn spawn_mac_table_refresher(store: ConfigStore) {
+    let interval = std::time::Duration::from_secs(MAC_TABLE_CACHE_DEFAULT_MAX_AGE_SECS.max(1) as u64);
+    loop {
+        tokio::time::sleep(interval).await;
+        refresh_all_mac_tables_once(&store).await;
+    }
+}
+
+/// One refresh cycle's worth of work, extracted from
+/// `spawn_mac_table_refresher`'s loop so it's directly testable without
+/// waiting a full `MAC_TABLE_CACHE_DEFAULT_MAX_AGE_SECS` interval.
+pub(crate) async fn refresh_all_mac_tables_once(store: &ConfigStore) {
+    let switches: Vec<SwitchConfig> = {
+        let config = store.config.read().await;
+        config
+            .switches
+            .iter()
+            .filter(|s| {
+                matches!(
+                    s.model().vendor(),
+                    Vendor::Fortiswitch | Vendor::Aruba | Vendor::Cisco
+                )
+            })
+            .cloned()
+            .collect()
+    };
+
+    for switch_config in switches {
+        let id = switch_config.id.clone();
+        let guard = match store.status.try_acquire_configuring(id.clone()).await {
+            Some(guard) => guard,
+            None => {
+                debug!("mac-table refresher: '{}' is busy, skipping this cycle", id);
+                continue;
+            }
+        };
+
+        match fetch_mac_table_live(&switch_config).await {
+            Ok((entries, raw)) => {
+                let fetched_at = chrono::Utc::now();
+                let generation_id = uuid::Uuid::new_v4();
+                store.mac_table_cache.write().await.insert(
+                    id.clone(),
+                    crate::config::CachedMacTable {
+                        entries,
+                        raw_output: raw,
+                        fetched_at,
+                        generation_id,
+                    },
+                );
+                debug!("mac-table refresher: refreshed cache for '{}'", id);
+            }
+            Err(e) => {
+                warn!("mac-table refresher: failed to refresh '{}': {}", id, e);
+            }
+        }
+
+        guard.release().await;
+    }
+}
+
+
 pub async fn get_mac_table(
     State(store): State<ConfigStore>,
     Path(id): Path<String>,
@@ -1950,54 +2127,7 @@ pub async fn get_mac_table(
     // on an I/O call with no timeout of its own, permanently stuck busy
     // until the service was restarted), this guarantees the busy flag
     // (held by `guard`, released on drop) can't stay stuck past this bound.
-    const MAC_TABLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
-
-    let result: Result<(Vec<crate::models::MacTableEntry>, String), String> =
-        match tokio::time::timeout(MAC_TABLE_TIMEOUT, async {
-            match switch_config.model().vendor() {
-                Vendor::Fortiswitch => {
-                    let mut vendor = vendors::fortiswitch::FortiswitchSwitch::new(
-                        switch_config.clone(),
-                        crate::config::RuntimeConfig::default(),
-                        switch_config.settings.enforce_port_config,
-                    );
-                    vendor.connect().await.map_err(|e| format!("Connection failed: {}", e))?;
-                    let outcome = vendor.get_mac_table().await.map_err(|e| e.to_string());
-                    let _ = vendor.disconnect().await;
-                    outcome
-                }
-                Vendor::Aruba => {
-                    let mut vendor = vendors::aruba::ArubaSwitch::new(
-                        switch_config.clone(),
-                        crate::config::RuntimeConfig::default(),
-                        switch_config.settings.enforce_port_config,
-                    );
-                    vendor.connect().await.map_err(|e| format!("Connection failed: {}", e))?;
-                    let outcome = vendor.get_mac_table().await.map_err(|e| e.to_string());
-                    let _ = vendor.disconnect().await;
-                    outcome
-                }
-                Vendor::Cisco => {
-                    let mut vendor = vendors::cisco::CiscoSwitch::new(
-                        switch_config.clone(),
-                        crate::config::RuntimeConfig::default(),
-                        switch_config.settings.enforce_port_config,
-                    );
-                    vendor.connect().await.map_err(|e| format!("Connection failed: {}", e))?;
-                    let outcome = vendor.get_mac_table().await.map_err(|e| e.to_string());
-                    let _ = vendor.disconnect().await;
-                    outcome
-                }
-            }
-        })
-        .await
-        {
-            Ok(inner_result) => inner_result,
-            Err(_elapsed) => Err(format!(
-                "Timed out after {}s waiting for the switch (a stuck underlying I/O call — see StatusTracker::try_acquire_configuring's doc comment for the incident this guards against)",
-                MAC_TABLE_TIMEOUT.as_secs()
-            )),
-        };
+    let result = fetch_mac_table_live(&switch_config).await;
 
     guard.release().await;
 

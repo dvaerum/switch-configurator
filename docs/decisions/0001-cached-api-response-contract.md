@@ -105,3 +105,17 @@ already put them.
 - `mac-table` (the only endpoint with a cache today) implements this
   contract — see the corresponding `docs/reference/api.md` section and
   `CHANGELOG.md` entry.
+- A cached entry is only ever *replaced* (on refresh) or *removed*
+  (when its switch is deleted or a full config reload drops it) — nothing
+  proactively expires an entry that's simply gone unused. This is
+  intentional: switch counts are small and bounded (not a user-controlled
+  cache key space), so an unused entry sitting in memory costs nothing
+  worth actively sweeping for.
+- Any endpoint that wants callers to reliably hit a warm cache (rather than
+  the first request after expiry always paying the live-fetch cost) should
+  run a background refresher on the same TTL, using the identical
+  `try_acquire_configuring` guard every other operational endpoint uses —
+  see `mac-table`'s `spawn_mac_table_refresher` for the reference
+  implementation. A skipped refresh cycle (switch busy with something
+  else) must never block or error; it just leaves that one cycle's
+  refresh to the next caller, exactly as if the refresher didn't exist.
