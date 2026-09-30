@@ -3577,6 +3577,8 @@ mod integration_tests {
         let response = get_mac_table(
             axum::extract::State(store),
             axum::extract::Path("nonexistent".to_string()),
+            axum::extract::Query(MacTableQuery { fresh: false, max_age_seconds: None }),
+            None,
         )
         .await
         .into_response();
@@ -3591,10 +3593,141 @@ mod integration_tests {
         let response = get_mac_table(
             axum::extract::State(store.clone()),
             axum::extract::Path("test-sw-01".to_string()),
+            axum::extract::Query(MacTableQuery { fresh: false, max_age_seconds: None }),
+            None,
         )
         .await
         .into_response();
         assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn test_get_mac_table_serves_from_cache_when_fresh() {
+        let store = create_test_config_store();
+        let cached_entries = vec![crate::models::MacTableEntry {
+            mac_address: "00:11:22:33:44:55".to_string(),
+            vlan_id: Some(10),
+            port_id: "5".to_string(),
+        }];
+        store.mac_table_cache.write().await.insert(
+            "test-sw-01".to_string(),
+            crate::config::CachedMacTable {
+                entries: cached_entries.clone(),
+                raw_output: "raw test output".to_string(),
+                fetched_at: chrono::Utc::now(),
+                generation_id: uuid::Uuid::new_v4(),
+            },
+        );
+
+        // Busy-mark the switch too -- a cache hit must be servable even
+        // while the switch is otherwise busy, since it never touches the
+        // switch at all.
+        store.status.set_currently_configuring("test-sw-01".to_string()).await;
+
+        let response = get_mac_table(
+            axum::extract::State(store.clone()),
+            axum::extract::Path("test-sw-01".to_string()),
+            axum::extract::Query(MacTableQuery { fresh: false, max_age_seconds: None }),
+            None,
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Cache facts live in standard HTTP headers (ADR-0001), not the
+        // body -- an ETag/Age/Cache-Control on a cache hit is the contract,
+        // not a bespoke "cached" JSON field.
+        assert!(response.headers().contains_key(axum::http::header::ETAG));
+        assert!(response.headers().contains_key(axum::http::header::AGE));
+        assert!(response.headers().get(axum::http::header::CACHE_CONTROL).unwrap().to_str().unwrap().contains("max-age"));
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["entries"][0]["mac_address"], "00:11:22:33:44:55");
+        assert_eq!(json["raw_output"], "raw test output");
+    }
+
+    #[tokio::test]
+    async fn test_get_mac_table_matching_if_none_match_returns_304() {
+        let store = create_test_config_store();
+        let generation_id = uuid::Uuid::new_v4();
+        store.mac_table_cache.write().await.insert(
+            "test-sw-01".to_string(),
+            crate::config::CachedMacTable {
+                entries: vec![],
+                raw_output: "should not appear in a 304 body".to_string(),
+                fetched_at: chrono::Utc::now(),
+                generation_id,
+            },
+        );
+
+        let if_none_match: axum_extra::headers::IfNoneMatch =
+            format!("\"{}\"", generation_id).parse::<axum_extra::headers::ETag>().unwrap().into();
+
+        let response = get_mac_table(
+            axum::extract::State(store.clone()),
+            axum::extract::Path("test-sw-01".to_string()),
+            axum::extract::Query(MacTableQuery { fresh: false, max_age_seconds: None }),
+            Some(axum_extra::TypedHeader(if_none_match)),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
+        assert!(response.headers().contains_key(axum::http::header::ETAG));
+        // A 304 per RFC 9110 §15.4.5 must not carry a message body.
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert!(body.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_get_mac_table_non_matching_if_none_match_returns_full_response() {
+        let store = create_test_config_store();
+        store.mac_table_cache.write().await.insert(
+            "test-sw-01".to_string(),
+            crate::config::CachedMacTable {
+                entries: vec![],
+                raw_output: "current data".to_string(),
+                fetched_at: chrono::Utc::now(),
+                generation_id: uuid::Uuid::new_v4(),
+            },
+        );
+
+        // A stale/different etag (a UUID that isn't the cache's current one).
+        let if_none_match: axum_extra::headers::IfNoneMatch =
+            format!("\"{}\"", uuid::Uuid::new_v4()).parse::<axum_extra::headers::ETag>().unwrap().into();
+
+        let response = get_mac_table(
+            axum::extract::State(store.clone()),
+            axum::extract::Path("test-sw-01".to_string()),
+            axum::extract::Query(MacTableQuery { fresh: false, max_age_seconds: None }),
+            Some(axum_extra::TypedHeader(if_none_match)),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn test_is_mac_table_cache_fresh_within_window() {
+        let fetched_at = chrono::Utc::now() - chrono::Duration::seconds(3);
+        assert!(is_mac_table_cache_fresh(fetched_at, chrono::Duration::seconds(10)));
+    }
+
+    #[test]
+    fn test_is_mac_table_cache_fresh_past_window() {
+        let fetched_at = chrono::Utc::now() - chrono::Duration::seconds(30);
+        assert!(!is_mac_table_cache_fresh(fetched_at, chrono::Duration::seconds(10)));
+    }
+
+    #[test]
+    fn test_is_mac_table_cache_fresh_zero_max_age_always_stale() {
+        // max_age_seconds=0 (an explicit "always bypass the cache" request
+        // without needing the fresh=true flag) must never be treated as
+        // fresh, even for an entry fetched a moment ago.
+        let fetched_at = chrono::Utc::now();
+        assert!(!is_mac_table_cache_fresh(fetched_at, chrono::Duration::seconds(0)));
     }
 
     #[tokio::test]
