@@ -16,6 +16,45 @@ pub struct StatusTracker {
     inner: Arc<RwLock<StatusTrackerInner>>,
 }
 
+/// RAII guard returned by `StatusTracker::try_acquire_configuring`. Clears
+/// the switch's busy flag when dropped — via a spawned cleanup task, since
+/// `Drop` can't `.await` the tracker's lock directly — so every exit path
+/// (normal return, early return/`?`, or a panic unwinding through this
+/// guard) releases it. See `try_acquire_configuring`'s doc comment for why
+/// this replaces manual set/clear call pairs.
+pub struct ConfiguringGuard {
+    tracker: StatusTracker,
+    switch_id: String,
+    /// Set by `release()` to skip the spawn-on-drop path when the caller
+    /// already released explicitly (avoids a redundant spawned task).
+    released: bool,
+}
+
+impl ConfiguringGuard {
+    /// Release the busy flag now, synchronously, instead of waiting for
+    /// `Drop` to spawn a cleanup task. Prefer this when the caller is
+    /// already in an `async` context and wants the flag cleared before
+    /// doing anything else (e.g. before recording success/failure status
+    /// that itself checks busy state).
+    pub async fn release(mut self) {
+        self.tracker.clear_currently_configuring(&self.switch_id).await;
+        self.released = true;
+    }
+}
+
+impl Drop for ConfiguringGuard {
+    fn drop(&mut self) {
+        if self.released {
+            return;
+        }
+        let tracker = self.tracker.clone();
+        let switch_id = std::mem::take(&mut self.switch_id);
+        tokio::spawn(async move {
+            tracker.clear_currently_configuring(&switch_id).await;
+        });
+    }
+}
+
 struct StatusTrackerInner {
     start_time: Instant,
     config_metadata: Option<ConfigMetadata>,
@@ -141,6 +180,47 @@ impl StatusTracker {
     pub async fn clear_currently_configuring(&self, switch_id: &str) {
         let mut inner = self.inner.write().await;
         inner.currently_configuring.remove(switch_id);
+    }
+
+    /// Atomically check-and-mark a switch as busy, in a single write-lock
+    /// acquisition. Returns `None` if the switch was already busy (matching
+    /// `is_switch_busy`'s definition: currently configuring OR a pending
+    /// reload queued); returns `Some(guard)` if this call marked it busy.
+    ///
+    /// This exists because the separate `is_switch_busy().await` check
+    /// followed by a later `set_currently_configuring().await` call (the
+    /// pattern every operational endpoint used before this) is a
+    /// check-then-act race: two concurrent requests can both observe "not
+    /// busy" before either sets the flag, both proceed to open a second,
+    /// concurrent session on the same exclusive serial device, and one of
+    /// them can hang indefinitely on an I/O call with no timeout of its own
+    /// (`write_all`/`flush`/`clear_buffer` in `SerialClient` have none —
+    /// only the read side, in `wait_for_prompt`, is bounded). A hung task
+    /// never reaches its own cleanup code, so the busy flag it set stays
+    /// stuck until the whole service is restarted — confirmed as the real
+    /// cause of a live incident on IT-02876-sw1 (currently_configuring
+    /// stuck for hours, no corresponding "finished processing request" log
+    /// line ever appeared for the hung request).
+    ///
+    /// The returned `ConfiguringGuard` clears the flag on drop (via a
+    /// spawned cleanup task, since `Drop` can't `.await`), so *every* exit
+    /// path — normal return, early return, and a Rust panic unwinding
+    /// through the guard — releases it. This replaces manual
+    /// `set_currently_configuring`/`clear_currently_configuring` call pairs,
+    /// which require every call site to also handle every panic path by
+    /// hand (nothing in Rust does that automatically without an RAII type).
+    pub async fn try_acquire_configuring(&self, switch_id: String) -> Option<ConfiguringGuard> {
+        let mut inner = self.inner.write().await;
+        if inner.currently_configuring.contains(&switch_id) || inner.pending_config_reload.contains(&switch_id) {
+            return None;
+        }
+        inner.currently_configuring.insert(switch_id.clone());
+        drop(inner);
+        Some(ConfiguringGuard {
+            tracker: self.clone(),
+            switch_id,
+            released: false,
+        })
     }
 
     /// Check if a specific switch is currently being configured
@@ -355,5 +435,103 @@ impl StatusTracker {
 impl Default for StatusTracker {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_try_acquire_configuring_succeeds_when_free() {
+        let tracker = StatusTracker::new();
+        let guard = tracker.try_acquire_configuring("sw1".to_string()).await;
+        assert!(guard.is_some());
+        assert!(tracker.is_currently_configuring("sw1").await);
+    }
+
+    #[tokio::test]
+    async fn test_try_acquire_configuring_fails_when_already_configuring() {
+        let tracker = StatusTracker::new();
+        let _guard1 = tracker.try_acquire_configuring("sw1".to_string()).await;
+        let guard2 = tracker.try_acquire_configuring("sw1".to_string()).await;
+        assert!(guard2.is_none(), "second acquire must fail while the first guard is still held");
+    }
+
+    #[tokio::test]
+    async fn test_try_acquire_configuring_fails_when_pending_reload_queued() {
+        let tracker = StatusTracker::new();
+        tracker.queue_pending_reload("sw1".to_string()).await;
+        let guard = tracker.try_acquire_configuring("sw1".to_string()).await;
+        assert!(guard.is_none(), "must not acquire while a pending reload is queued");
+    }
+
+    #[tokio::test]
+    async fn test_try_acquire_configuring_independent_per_switch() {
+        let tracker = StatusTracker::new();
+        let _guard1 = tracker.try_acquire_configuring("sw1".to_string()).await;
+        let guard2 = tracker.try_acquire_configuring("sw2".to_string()).await;
+        assert!(guard2.is_some(), "a different switch id must not be blocked");
+    }
+
+    #[tokio::test]
+    async fn test_guard_release_clears_flag_immediately() {
+        let tracker = StatusTracker::new();
+        let guard = tracker.try_acquire_configuring("sw1".to_string()).await.unwrap();
+        guard.release().await;
+        assert!(!tracker.is_currently_configuring("sw1").await);
+    }
+
+    #[tokio::test]
+    async fn test_guard_drop_clears_flag_eventually() {
+        let tracker = StatusTracker::new();
+        {
+            let _guard = tracker.try_acquire_configuring("sw1".to_string()).await;
+            assert!(tracker.is_currently_configuring("sw1").await);
+            // _guard drops here, spawning a cleanup task.
+        }
+        // Drop's cleanup runs in a spawned task, not synchronously on scope
+        // exit -- poll briefly instead of asserting immediately.
+        for _ in 0..50 {
+            if !tracker.is_currently_configuring("sw1").await {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("guard drop never cleared the busy flag within 500ms");
+    }
+
+    #[tokio::test]
+    async fn test_reacquire_after_release_succeeds() {
+        let tracker = StatusTracker::new();
+        let guard = tracker.try_acquire_configuring("sw1".to_string()).await.unwrap();
+        guard.release().await;
+        let guard2 = tracker.try_acquire_configuring("sw1".to_string()).await;
+        assert!(guard2.is_some(), "must be able to re-acquire after release");
+    }
+
+    /// Regression test for the actual race this guard closes: with the old
+    /// separate is_switch_busy()-then-set_currently_configuring() pattern,
+    /// two concurrent callers could both observe "not busy" and both
+    /// proceed. try_acquire_configuring folds the check and the set into
+    /// one write-lock acquisition, so exactly one of any number of
+    /// concurrent callers can ever succeed for the same switch id.
+    #[tokio::test]
+    async fn test_concurrent_acquire_only_one_winner() {
+        let tracker = StatusTracker::new();
+        let mut handles = Vec::new();
+        for _ in 0..20 {
+            let tracker = tracker.clone();
+            handles.push(tokio::spawn(async move {
+                tracker.try_acquire_configuring("sw1".to_string()).await.is_some()
+            }));
+        }
+        let mut successes = 0;
+        for h in handles {
+            if h.await.unwrap() {
+                successes += 1;
+            }
+        }
+        assert_eq!(successes, 1, "exactly one concurrent acquire should have won");
     }
 }

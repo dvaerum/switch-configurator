@@ -158,19 +158,24 @@ async fn apply_all_configurations(config: &AppConfig, status: &StatusTracker) ->
     for switch_config in &config.switches {
         let switch_id = &switch_config.id;
 
-        // Check if this switch is already being configured (e.g., by API)
-        if status.is_currently_configuring(switch_id).await {
-            // Queue this switch for later instead of skipping
-            info!(
-                "Switch '{}' ({}) is busy, queuing for later",
-                switch_id, switch_config.hostname()
-            );
-            status.queue_pending_reload(switch_id.clone()).await;
-            continue;
-        }
+        // Atomically check-and-mark busy (closes the check-then-act race
+        // this used to have against a concurrent API request for the same
+        // switch — see StatusTracker::try_acquire_configuring's doc
+        // comment). Queue for later instead of skipping if already busy.
+        let guard = match status.try_acquire_configuring(switch_id.clone()).await {
+            Some(guard) => guard,
+            None => {
+                info!(
+                    "Switch '{}' ({}) is busy, queuing for later",
+                    switch_id, switch_config.hostname()
+                );
+                status.queue_pending_reload(switch_id.clone()).await;
+                continue;
+            }
+        };
 
         // Apply configuration to this switch (handles pending reloads internally)
-        match apply_switch_with_pending(switch_config, status).await {
+        match apply_switch_with_pending(switch_config, status, guard).await {
             Ok(()) => success_count += 1,
             Err(_) => failure_count += 1,
         }
@@ -198,11 +203,9 @@ async fn apply_all_configurations(config: &AppConfig, status: &StatusTracker) ->
 async fn apply_switch_with_pending(
     switch_config: &crate::models::SwitchConfig,
     status: &StatusTracker,
+    guard: crate::status::ConfiguringGuard,
 ) -> Result<()> {
     let switch_id = &switch_config.id;
-
-    // Mark switch as being configured
-    status.set_currently_configuring(switch_id.clone()).await;
 
     info!("Configuring switch: {} ({})", switch_id, switch_config.hostname());
 
@@ -258,8 +261,9 @@ async fn apply_switch_with_pending(
         }
     }
 
-    // Always clear the configuring status when done
-    status.clear_currently_configuring(switch_id).await;
+    // Release the busy flag now that we're done (rather than waiting for
+    // the guard to drop at function end — same effect here, but explicit).
+    guard.release().await;
 
     // Return result (map Ok(Vec<String>) to Ok(()))
     result.map(|_| ()).map_err(|e| anyhow::anyhow!("{}", e))
