@@ -399,6 +399,23 @@ pub enum SseEvent {
     },
 }
 
+/// A cached mac-table (or similar read-only diagnostic) result for one
+/// switch, plus when it was fetched. Used to serve repeated polling (e.g.
+/// a dashboard refreshing every few seconds) without re-opening a session
+/// on the switch's exclusive serial device for every single request.
+#[derive(Debug, Clone)]
+pub struct CachedMacTable {
+    pub entries: Vec<crate::models::MacTableEntry>,
+    pub raw_output: String,
+    pub fetched_at: chrono::DateTime<chrono::Utc>,
+    /// Fresh UUID generated at write time (every live fetch, never on a
+    /// cache hit). See docs/decisions/0001-cached-api-response-contract.md
+    /// -- two responses sharing this id are guaranteed to be the same
+    /// underlying snapshot; a different id means a refresh happened, even
+    /// if the payload content is byte-identical to the previous fetch.
+    pub generation_id: uuid::Uuid,
+}
+
 /// Shared configuration store with status tracking
 #[derive(Clone)]
 pub struct ConfigStore {
@@ -407,6 +424,10 @@ pub struct ConfigStore {
     pub api_port: u16,
     pub events: Arc<tokio::sync::broadcast::Sender<SseEvent>>,
     pub validation_failures: Arc<RwLock<Vec<SwitchValidationFailure>>>,
+    /// Per-switch mac-table cache, keyed by switch id. See
+    /// `handlers::get_mac_table`'s doc comment for the caching policy
+    /// (default max-age, `?fresh=true` bypass).
+    pub mac_table_cache: Arc<RwLock<std::collections::HashMap<String, CachedMacTable>>>,
 }
 
 impl ConfigStore {
@@ -419,6 +440,7 @@ impl ConfigStore {
             api_port,
             events: Arc::new(tx),
             validation_failures: Arc::new(RwLock::new(Vec::new())),
+            mac_table_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
         }
     }
 

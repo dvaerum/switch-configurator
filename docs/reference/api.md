@@ -555,13 +555,34 @@ Query the switch's learned MAC-address table (FDB). Answers "what's physically w
 
 **Endpoint:** `GET /switches/{id}/mac-table`
 
+**Query Parameters:**
+- `fresh` (bool, optional, default `false`): bypass the cache and always fetch live from the switch.
+- `max_age_seconds` (integer, optional): override the default cache TTL (10s) for this request.
+
 **Path Parameters:**
 - `id` (string, required): Switch ID
+
+**Caching** (see [ADR-0001](../decisions/0001-cached-api-response-contract.md)): a live fetch takes ~11-13s on FortiSwitch over serial, expensive enough that a dashboard polling every few seconds would otherwise keep a near-constant session open on the switch's single exclusive serial device. Results are cached per switch for 10s by default. Cache state is communicated via **standard HTTP caching headers**, not a bespoke JSON field — this endpoint follows RFC 9111/RFC 9110 rather than inventing its own contract:
+
+| Header | Meaning |
+|---|---|
+| `ETag` | Opaque id that changes only when the cache entry is actually refreshed. Compare this, not the payload, to detect a real update. |
+| `Age` | Seconds since the data was fetched. `0` on a fresh live fetch. |
+| `Cache-Control: max-age=N` | The freshness lifetime (10s by default, or `?max_age_seconds=` if given). Combine with `Age` to compute remaining freshness. |
+| `Last-Modified` | Absolute fetch timestamp (HTTP-date). |
+
+Send `If-None-Match: "<etag>"` to get a `304 Not Modified` (headers only, no body) if the cache hasn't refreshed since that `ETag` — the standard way to poll cheaply without re-transferring `entries`/`raw_output` when nothing changed. `?fresh=true` always does a real fetch and never returns a `304`, even if `If-None-Match` happens to match.
 
 **Response:**
 
 **Success:** `200 OK`
 
+```
+ETag: "b3f1c2a4-9e3d-4b1a-8f2e-1a2b3c4d5e6f"
+Age: 4
+Cache-Control: max-age=10
+Last-Modified: Wed, 30 Sep 2026 13:24:55 GMT
+```
 ```json
 {
   "switch_id": "it-02876-sw1",
@@ -571,6 +592,8 @@ Query the switch's learned MAC-address table (FDB). Answers "what's physically w
   "raw_output": "MAC                VLAN  PORT\n00:11:22:33:44:55  101   port1\n..."
 }
 ```
+
+**Not modified:** `304 Not Modified` (same headers, empty body) — returned when `If-None-Match` matches the current cache entry's `ETag`.
 
 **Response Fields:**
 - `entries` (array): Best-effort parsed rows. `vlan_id` is `null` on Aruba (ArubaOS-Switch's `show mac-address` has no VLAN column).
@@ -598,6 +621,13 @@ Query the switch's learned MAC-address table (FDB). Answers "what's physically w
 ```bash
 # Find which port a MAC is on
 curl -s http://localhost:4002/switches/it-02876-sw1/mac-table | jq '.entries[] | select(.mac_address == "00:11:22:33:44:55")'
+
+# Force a live fetch, bypassing the cache
+curl -s "http://localhost:4002/switches/it-02876-sw1/mac-table?fresh=true"
+
+# Conditional poll: only pay the bandwidth cost when the data actually changed
+etag=$(curl -sI http://localhost:4002/switches/it-02876-sw1/mac-table | grep -i '^etag:' | cut -d' ' -f2 | tr -d '\r')
+curl -s -H "If-None-Match: $etag" http://localhost:4002/switches/it-02876-sw1/mac-table -w '%{http_code}\n'
 ```
 
 ---

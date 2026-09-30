@@ -6,10 +6,14 @@ use crate::models::{
 use crate::vendors;
 use crate::vendors::traits::SwitchVendor;
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
     Json,
+};
+use axum_extra::{
+    headers::{Age, CacheControl, ETag, HeaderMapExt, IfNoneMatch, LastModified},
+    TypedHeader,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -1777,20 +1781,96 @@ async fn poe_set_impl(
     Ok(())
 }
 
+/// Default max-age for a cached mac-table result before a fresh fetch is
+/// forced. Chosen to comfortably outlast a dashboard's typical poll
+/// interval (a few seconds) while still being short enough that "which
+/// device is on this port" answers stay meaningfully live.
+const MAC_TABLE_CACHE_DEFAULT_MAX_AGE_SECS: i64 = 10;
+
+/// Query parameters for `GET /switches/{id}/mac-table`.
+#[derive(Debug, Deserialize)]
+pub struct MacTableQuery {
+    /// Skip the cache and always fetch live from the switch.
+    #[serde(default)]
+    pub fresh: bool,
+    /// Override the default cache max-age (seconds). A cached result older
+    /// than this is treated as stale and re-fetched.
+    pub max_age_seconds: Option<i64>,
+}
+
+/// Is a cached mac-table entry fetched at `fetched_at` still within
+/// `max_age` of now? Extracted as a pure function so the boundary
+/// condition (exactly at the age limit) is directly unit-testable without
+/// needing real time to pass or a live switch connection.
+pub(crate) fn is_mac_table_cache_fresh(fetched_at: chrono::DateTime<chrono::Utc>, max_age: chrono::Duration) -> bool {
+    chrono::Utc::now() - fetched_at < max_age
+}
+
+/// Build the ETag this cache entry's generation corresponds to. Shared by
+/// both header-building and If-None-Match comparison so the two can never
+/// drift (e.g. differ in quoting).
+fn cache_etag(generation_id: uuid::Uuid) -> ETag {
+    // ETag's FromStr requires the RFC 7232 quoted-string form; a v4 UUID's
+    // hyphenated form is always valid inside quotes, so this can't fail.
+    format!("\"{}\"", generation_id).parse().expect("UUID is always a valid ETag value")
+}
+
+/// Build the standard HTTP caching headers every cached API response sets,
+/// on both a cache hit and a fresh live fetch, using the `headers` crate's
+/// spec-correct typed header types (not hand-rolled string formatting) --
+/// see docs/decisions/0001-cached-api-response-contract.md for why these
+/// specific headers (not a bespoke JSON field) are the contract: `ETag` is
+/// the "did this actually change" id, `Age`/`Cache-Control: max-age`
+/// together let any HTTP-aware client compute remaining freshness, and
+/// `Last-Modified` is the absolute fetch time.
+fn cache_headers(
+    fetched_at: chrono::DateTime<chrono::Utc>,
+    max_age: chrono::Duration,
+    generation_id: uuid::Uuid,
+) -> axum::http::HeaderMap {
+    let mut headers = axum::http::HeaderMap::new();
+    let age_secs = (chrono::Utc::now() - fetched_at).num_seconds().max(0) as u64;
+    let last_modified_time =
+        std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(fetched_at.timestamp().max(0) as u64);
+
+    headers.typed_insert(cache_etag(generation_id));
+    headers.typed_insert(Age::from_secs(age_secs));
+    headers.typed_insert(CacheControl::new().with_max_age(std::time::Duration::from_secs(max_age.num_seconds().max(0) as u64)));
+    headers.typed_insert(LastModified::from(last_modified_time));
+    headers
+}
+
+
 /// Query the switch's learned MAC-address table (FDB) — answers "what MAC is
 /// physically wired to this port" for cases where multiple devices on the
 /// same VLAN/subnet are indistinguishable over IP alone.
 ///
 /// GET /switches/{id}/mac-table
+/// GET /switches/{id}/mac-table?fresh=true                — bypass cache
+/// GET /switches/{id}/mac-table?max_age_seconds=30         — custom cache TTL
 ///
 /// Implemented for all 3 supported vendors (FortiSwitch, Aruba, Cisco), each
 /// with its own raw command and parser. Returns both parsed entries
 /// (best-effort — FortiSwitch is confirmed against real hardware
 /// (IT-02876-sw1); Aruba and Cisco are not yet) and the raw command
 /// output, so a parsing gap doesn't hide the answer.
+///
+/// **Caching**: a live fetch takes ~11-13s on FortiSwitch over serial
+/// (connect + login + the command itself) — expensive enough that a
+/// dashboard polling every few seconds would otherwise keep a near-constant
+/// session open on the switch's single exclusive serial device, competing
+/// with every other operational request for the same busy flag. Results
+/// are cached per switch for `MAC_TABLE_CACHE_DEFAULT_MAX_AGE_SECS` (10s) by
+/// default; a cache hit returns instantly with no serial I/O and no busy-flag
+/// contention at all. `cached`/`cache_age_seconds` in the response say
+/// whether this particular answer came from cache. Use `?fresh=true` to
+/// force a live fetch, or `?max_age_seconds=N` to use a different TTL for
+/// this call only — neither changes what gets cached for the next caller.
 pub async fn get_mac_table(
     State(store): State<ConfigStore>,
     Path(id): Path<String>,
+    Query(query): Query<MacTableQuery>,
+    if_none_match: Option<TypedHeader<IfNoneMatch>>,
 ) -> impl IntoResponse {
     let config = store.config.read().await;
     let switch_config = match config.switches.iter().find(|s| s.id == id) {
@@ -1816,9 +1896,44 @@ pub async fn get_mac_table(
             .into_response();
     }
 
+    let max_age = chrono::Duration::seconds(
+        query.max_age_seconds.unwrap_or(MAC_TABLE_CACHE_DEFAULT_MAX_AGE_SECS),
+    );
+
+    if !query.fresh {
+        let cache = store.mac_table_cache.read().await;
+        if let Some(cached) = cache.get(&id) {
+            if is_mac_table_cache_fresh(cached.fetched_at, max_age) {
+                let headers = cache_headers(cached.fetched_at, max_age, cached.generation_id);
+                // `?fresh=true` is this endpoint's own explicit "bypass
+                // the cache" escape hatch, so it never short-circuits to a
+                // 304 even if If-None-Match happens to match -- handled
+                // above by the `!query.fresh` guard on this whole block.
+                let etag_matches = if_none_match
+                    .as_ref()
+                    .map(|TypedHeader(inm)| !inm.precondition_passes(&cache_etag(cached.generation_id)))
+                    .unwrap_or(false);
+                if etag_matches {
+                    return (StatusCode::NOT_MODIFIED, headers).into_response();
+                }
+                return (
+                    StatusCode::OK,
+                    headers,
+                    Json(json!({
+                        "switch_id": id,
+                        "entries": cached.entries,
+                        "raw_output": cached.raw_output
+                    })),
+                )
+                    .into_response();
+            }
+        }
+    }
+
     let guard = match store.status.try_acquire_configuring(id.clone()).await {
         Some(guard) => guard,
         None => {
+
             return (
                 StatusCode::CONFLICT,
                 Json(json!({"error": format!("Switch '{}' is busy", id), "switch_id": id})),
@@ -1887,15 +2002,30 @@ pub async fn get_mac_table(
     guard.release().await;
 
     match result {
-        Ok((entries, raw)) => (
-            StatusCode::OK,
-            Json(json!({
-                "switch_id": id,
-                "entries": entries,
-                "raw_output": raw
-            })),
-        )
-            .into_response(),
+        Ok((entries, raw)) => {
+            let fetched_at = chrono::Utc::now();
+            let generation_id = uuid::Uuid::new_v4();
+            store.mac_table_cache.write().await.insert(
+                id.clone(),
+                crate::config::CachedMacTable {
+                    entries: entries.clone(),
+                    raw_output: raw.clone(),
+                    fetched_at,
+                    generation_id,
+                },
+            );
+            let headers = cache_headers(fetched_at, max_age, generation_id);
+            (
+                StatusCode::OK,
+                headers,
+                Json(json!({
+                    "switch_id": id,
+                    "entries": entries,
+                    "raw_output": raw
+                })),
+            )
+                .into_response()
+        }
         Err(e) => {
             error!("MAC table query failed for {}: {}", id, e);
             (
