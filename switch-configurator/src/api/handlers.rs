@@ -214,22 +214,27 @@ pub async fn apply_config(
 
     drop(config);
 
-    // Check if this specific switch is busy (being configured or has pending reload)
-    if store.status.is_switch_busy(&id).await {
-        let reason = if store.status.is_currently_configuring(&id).await {
-            "is already being configured"
-        } else {
-            "has a pending config reload queued"
-        };
-        return (
-            StatusCode::CONFLICT,
-            Json(json!({
-                "error": format!("Switch '{}' {}", id, reason),
-                "switch_id": id
-            })),
-        )
-            .into_response();
-    }
+    // Atomically check-and-mark busy (closes the check-then-act race the
+    // separate is_switch_busy()+set_currently_configuring() calls used to
+    // have — see StatusTracker::try_acquire_configuring's doc comment).
+    let guard = match store.status.try_acquire_configuring(id.clone()).await {
+        Some(guard) => guard,
+        None => {
+            let reason = if store.status.is_currently_configuring(&id).await {
+                "is already being configured"
+            } else {
+                "has a pending config reload queued"
+            };
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({
+                    "error": format!("Switch '{}' {}", id, reason),
+                    "switch_id": id
+                })),
+            )
+                .into_response();
+        }
+    };
 
     // Spawn background task and return immediately
     let store_clone = store.clone();
@@ -237,7 +242,7 @@ pub async fn apply_config(
     let switch_config_clone = switch_config.clone();
 
     tokio::spawn(async move {
-        match apply_config_impl(store_clone, id_clone.clone(), switch_config_clone).await {
+        match apply_config_impl(store_clone, id_clone.clone(), switch_config_clone, guard).await {
             Ok(results) => {
                 info!("Apply completed for switch '{}': {} results", id_clone, results.len());
             }
@@ -265,11 +270,9 @@ async fn apply_config_impl(
     store: ConfigStore,
     id: String,
     switch_config: SwitchConfig,
+    guard: crate::status::ConfiguringGuard,
 ) -> Result<Vec<crate::models::ConfigResult>, String> {
     let enforce_port_config = switch_config.settings.enforce_port_config;
-
-    // Mark this switch as currently being configured
-    store.status.set_currently_configuring(id.clone()).await;
 
     info!("Applying configuration to switch: {} ({})", id, switch_config.hostname.as_ref().unwrap_or(&id));
 
@@ -287,7 +290,7 @@ async fn apply_config_impl(
                 "apply_config".to_string(),
             ).await;
             store.status.record_apply_failure(&id, &e.to_string()).await;
-            store.status.clear_currently_configuring(&id).await;
+            guard.release().await;
 
             return Err(e.to_string());
         }
@@ -305,7 +308,7 @@ async fn apply_config_impl(
             "apply_config".to_string(),
         ).await;
         store.status.record_apply_failure(&id, &format!("Connection failed: {}", e)).await;
-        store.status.clear_currently_configuring(&id).await;
+        guard.release().await;
 
         return Err(format!("Connection failed: {}", e));
     }
@@ -325,7 +328,7 @@ async fn apply_config_impl(
                 "apply_config".to_string(),
             ).await;
             store.status.record_apply_failure(&id, &e.to_string()).await;
-            store.status.clear_currently_configuring(&id).await;
+            guard.release().await;
 
             return Err(format!("Configuration failed: {}", e));
         }
@@ -360,7 +363,7 @@ async fn apply_config_impl(
 
     // Record success
     store.status.record_apply_success(&id).await;
-    store.status.clear_currently_configuring(&id).await;
+    guard.release().await;
 
     Ok(results)
 }
@@ -976,21 +979,23 @@ pub async fn reload_config(State(store): State<ConfigStore>) -> impl IntoRespons
     let mut switches_skipped = Vec::new();
 
     for switch_config in &new_config.switches {
-        if store.status.is_switch_busy(&switch_config.id).await {
-            warn!("Switch '{}' is busy, skipping configuration", switch_config.id);
-            switches_skipped.push(switch_config.id.clone());
-        } else {
-            switches_to_configure.push(switch_config.clone());
+        match store.status.try_acquire_configuring(switch_config.id.clone()).await {
+            Some(guard) => switches_to_configure.push((switch_config.clone(), guard)),
+            None => {
+                warn!("Switch '{}' is busy, skipping configuration", switch_config.id);
+                switches_skipped.push(switch_config.id.clone());
+            }
         }
     }
 
     // Spawn background tasks for each switch (in parallel)
-    for switch_config in switches_to_configure.iter().cloned() {
+    let configuring_ids: Vec<String> = switches_to_configure.iter().map(|(cfg, _)| cfg.id.clone()).collect();
+    for (switch_config, guard) in switches_to_configure.drain(..) {
         let store_clone = store.clone();
         let id = switch_config.id.clone();
 
         tokio::spawn(async move {
-            match apply_config_impl(store_clone, id.clone(), switch_config).await {
+            match apply_config_impl(store_clone, id.clone(), switch_config, guard).await {
                 Ok(results) => {
                     info!("Reload+apply completed for switch '{}': {} results", id, results.len());
                 }
@@ -1000,8 +1005,6 @@ pub async fn reload_config(State(store): State<ConfigStore>) -> impl IntoRespons
             }
         });
     }
-
-    let configuring_ids: Vec<String> = switches_to_configure.iter().map(|s| s.id.clone()).collect();
 
     info!(
         "Started configuration for {} switches, skipped {} busy switches",
@@ -1041,22 +1044,29 @@ pub async fn reload_switch_config(
 ) -> impl IntoResponse {
     info!("Switch-specific reload requested for: {}", id);
 
-    // Check if this switch is busy FIRST (before doing any I/O)
-    if store.status.is_switch_busy(&id).await {
-        let reason = if store.status.is_currently_configuring(&id).await {
-            "is already being configured"
-        } else {
-            "has a pending config reload queued"
-        };
-        return (
-            StatusCode::CONFLICT,
-            Json(json!({
-                "error": format!("Switch '{}' {}", id, reason),
-                "switch_id": id
-            })),
-        )
-            .into_response();
-    }
+    // Atomically check-and-mark busy FIRST (before doing any I/O). Held for
+    // the rest of this function; if any of the error paths below return
+    // early, the guard drops here and releases the flag automatically —
+    // only the final success path (spawning apply_config_impl) needs to
+    // explicitly move it onward.
+    let guard = match store.status.try_acquire_configuring(id.clone()).await {
+        Some(guard) => guard,
+        None => {
+            let reason = if store.status.is_currently_configuring(&id).await {
+                "is already being configured"
+            } else {
+                "has a pending config reload queued"
+            };
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({
+                    "error": format!("Switch '{}' {}", id, reason),
+                    "switch_id": id
+                })),
+            )
+                .into_response();
+        }
+    };
 
     // Get config paths from status tracker
     let config_paths = match store.status.get_config_paths().await {
@@ -1132,7 +1142,7 @@ pub async fn reload_switch_config(
     let switch_config_clone = switch_config.clone();
 
     tokio::spawn(async move {
-        match apply_config_impl(store_clone, id_clone.clone(), switch_config_clone).await {
+        match apply_config_impl(store_clone, id_clone.clone(), switch_config_clone, guard).await {
             Ok(results) => {
                 info!("Reload+apply completed for switch '{}': {} results", id_clone, results.len());
             }
@@ -1540,13 +1550,15 @@ pub async fn delete_switch_config(
 /// Shared guard checks for PoE operational endpoints (reset/on/off): switch
 /// exists, its model supports PoE at all, the specific port supports PoE,
 /// the vendor is one with PoE commands implemented, and the switch isn't
-/// already mid-operation. Returns the resolved `SwitchConfig` on success, or
-/// the error response to return immediately.
+/// already mid-operation. Returns the resolved `SwitchConfig` plus the
+/// busy-flag guard (already acquired atomically — see
+/// `StatusTracker::try_acquire_configuring`) on success, or the error
+/// response to return immediately.
 async fn poe_op_guard(
     store: &ConfigStore,
     id: &str,
     port_id: &str,
-) -> Result<SwitchConfig, axum::response::Response> {
+) -> Result<(SwitchConfig, crate::status::ConfiguringGuard), axum::response::Response> {
     let config = store.config.read().await;
     let switch_config = match config.switches.iter().find(|s| s.id == id) {
         Some(cfg) => cfg.clone(),
@@ -1586,15 +1598,14 @@ async fn poe_op_guard(
             .into_response());
     }
 
-    if store.status.is_switch_busy(id).await {
-        return Err((
+    match store.status.try_acquire_configuring(id.to_string()).await {
+        Some(guard) => Ok((switch_config, guard)),
+        None => Err((
             StatusCode::CONFLICT,
             Json(json!({"error": format!("Switch '{}' is busy", id), "switch_id": id})),
         )
-            .into_response());
+            .into_response()),
     }
-
-    Ok(switch_config)
 }
 
 /// Get the vendor-specific PoE enable/disable command sets for a port.
@@ -1636,12 +1647,10 @@ async fn poe_set(
     port_id: String,
     turn_on: bool,
 ) -> impl IntoResponse {
-    let switch_config = match poe_op_guard(&store, &id, &port_id).await {
-        Ok(cfg) => cfg,
+    let (switch_config, guard) = match poe_op_guard(&store, &id, &port_id).await {
+        Ok(v) => v,
         Err(resp) => return resp,
     };
-
-    store.status.set_currently_configuring(id.clone()).await;
 
     let action = if turn_on { "on" } else { "off" };
     let store_bg = store.clone();
@@ -1650,6 +1659,9 @@ async fn poe_set(
     let action_bg = action.to_string();
 
     tokio::spawn(async move {
+        // Moved into this task so it's held (and its Drop-released) for
+        // the task's whole lifetime, not just until the handler returns.
+        let _guard = guard;
         let result = poe_set_impl(&store_bg, &id_bg, &switch_config, &port_bg, turn_on).await;
         match &result {
             Ok(()) => {
@@ -1685,7 +1697,7 @@ async fn poe_set(
                     .await;
             }
         }
-        store_bg.status.clear_currently_configuring(&id_bg).await;
+        _guard.release().await;
     });
 
     (
@@ -1804,56 +1816,75 @@ pub async fn get_mac_table(
             .into_response();
     }
 
-    if store.status.is_switch_busy(&id).await {
-        return (
-            StatusCode::CONFLICT,
-            Json(json!({"error": format!("Switch '{}' is busy", id), "switch_id": id})),
-        )
-            .into_response();
-    }
-
-    store.status.set_currently_configuring(id.clone()).await;
-
-    let result: Result<(Vec<crate::models::MacTableEntry>, String), String> = async {
-        match switch_config.model().vendor() {
-            Vendor::Fortiswitch => {
-                let mut vendor = vendors::fortiswitch::FortiswitchSwitch::new(
-                    switch_config.clone(),
-                    crate::config::RuntimeConfig::default(),
-                    switch_config.settings.enforce_port_config,
-                );
-                vendor.connect().await.map_err(|e| format!("Connection failed: {}", e))?;
-                let outcome = vendor.get_mac_table().await.map_err(|e| e.to_string());
-                let _ = vendor.disconnect().await;
-                outcome
-            }
-            Vendor::Aruba => {
-                let mut vendor = vendors::aruba::ArubaSwitch::new(
-                    switch_config.clone(),
-                    crate::config::RuntimeConfig::default(),
-                    switch_config.settings.enforce_port_config,
-                );
-                vendor.connect().await.map_err(|e| format!("Connection failed: {}", e))?;
-                let outcome = vendor.get_mac_table().await.map_err(|e| e.to_string());
-                let _ = vendor.disconnect().await;
-                outcome
-            }
-            Vendor::Cisco => {
-                let mut vendor = vendors::cisco::CiscoSwitch::new(
-                    switch_config.clone(),
-                    crate::config::RuntimeConfig::default(),
-                    switch_config.settings.enforce_port_config,
-                );
-                vendor.connect().await.map_err(|e| format!("Connection failed: {}", e))?;
-                let outcome = vendor.get_mac_table().await.map_err(|e| e.to_string());
-                let _ = vendor.disconnect().await;
-                outcome
-            }
+    let guard = match store.status.try_acquire_configuring(id.clone()).await {
+        Some(guard) => guard,
+        None => {
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({"error": format!("Switch '{}' is busy", id), "switch_id": id})),
+            )
+                .into_response();
         }
-    }
-    .await;
+    };
 
-    store.status.clear_currently_configuring(&id).await;
+    // Bounded overall budget as a defense-in-depth safety net: even if some
+    // future bug reintroduces an unbounded wait deeper in the vendor/serial
+    // stack (the actual root cause of a real incident on IT-02876-sw1 —
+    // a check-then-act race let two concurrent mac-table requests both open
+    // a session on the same exclusive serial device, and one hung forever
+    // on an I/O call with no timeout of its own, permanently stuck busy
+    // until the service was restarted), this guarantees the busy flag
+    // (held by `guard`, released on drop) can't stay stuck past this bound.
+    const MAC_TABLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+    let result: Result<(Vec<crate::models::MacTableEntry>, String), String> =
+        match tokio::time::timeout(MAC_TABLE_TIMEOUT, async {
+            match switch_config.model().vendor() {
+                Vendor::Fortiswitch => {
+                    let mut vendor = vendors::fortiswitch::FortiswitchSwitch::new(
+                        switch_config.clone(),
+                        crate::config::RuntimeConfig::default(),
+                        switch_config.settings.enforce_port_config,
+                    );
+                    vendor.connect().await.map_err(|e| format!("Connection failed: {}", e))?;
+                    let outcome = vendor.get_mac_table().await.map_err(|e| e.to_string());
+                    let _ = vendor.disconnect().await;
+                    outcome
+                }
+                Vendor::Aruba => {
+                    let mut vendor = vendors::aruba::ArubaSwitch::new(
+                        switch_config.clone(),
+                        crate::config::RuntimeConfig::default(),
+                        switch_config.settings.enforce_port_config,
+                    );
+                    vendor.connect().await.map_err(|e| format!("Connection failed: {}", e))?;
+                    let outcome = vendor.get_mac_table().await.map_err(|e| e.to_string());
+                    let _ = vendor.disconnect().await;
+                    outcome
+                }
+                Vendor::Cisco => {
+                    let mut vendor = vendors::cisco::CiscoSwitch::new(
+                        switch_config.clone(),
+                        crate::config::RuntimeConfig::default(),
+                        switch_config.settings.enforce_port_config,
+                    );
+                    vendor.connect().await.map_err(|e| format!("Connection failed: {}", e))?;
+                    let outcome = vendor.get_mac_table().await.map_err(|e| e.to_string());
+                    let _ = vendor.disconnect().await;
+                    outcome
+                }
+            }
+        })
+        .await
+        {
+            Ok(inner_result) => inner_result,
+            Err(_elapsed) => Err(format!(
+                "Timed out after {}s waiting for the switch (a stuck underlying I/O call — see StatusTracker::try_acquire_configuring's doc comment for the incident this guards against)",
+                MAC_TABLE_TIMEOUT.as_secs()
+            )),
+        };
+
+    guard.release().await;
 
     match result {
         Ok((entries, raw)) => (
@@ -1915,30 +1946,42 @@ pub async fn get_port_status(
             .into_response();
     }
 
-    if store.status.is_switch_busy(&id).await {
-        return (
-            StatusCode::CONFLICT,
-            Json(json!({"error": format!("Switch '{}' is busy", id), "switch_id": id})),
-        )
-            .into_response();
-    }
+    let guard = match store.status.try_acquire_configuring(id.clone()).await {
+        Some(guard) => guard,
+        None => {
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({"error": format!("Switch '{}' is busy", id), "switch_id": id})),
+            )
+                .into_response();
+        }
+    };
 
-    store.status.set_currently_configuring(id.clone()).await;
+    // Same defense-in-depth bound as get_mac_table — see its comment.
+    const PORT_STATUS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
-    let result: Result<(Vec<crate::models::PortStatusEntry>, String), String> = async {
-        let mut vendor = vendors::fortiswitch::FortiswitchSwitch::new(
-            switch_config.clone(),
-            crate::config::RuntimeConfig::default(),
-            switch_config.settings.enforce_port_config,
-        );
-        vendor.connect().await.map_err(|e| format!("Connection failed: {}", e))?;
-        let outcome = vendor.get_port_status().await.map_err(|e| e.to_string());
-        let _ = vendor.disconnect().await;
-        outcome
-    }
-    .await;
+    let result: Result<(Vec<crate::models::PortStatusEntry>, String), String> =
+        match tokio::time::timeout(PORT_STATUS_TIMEOUT, async {
+            let mut vendor = vendors::fortiswitch::FortiswitchSwitch::new(
+                switch_config.clone(),
+                crate::config::RuntimeConfig::default(),
+                switch_config.settings.enforce_port_config,
+            );
+            vendor.connect().await.map_err(|e| format!("Connection failed: {}", e))?;
+            let outcome = vendor.get_port_status().await.map_err(|e| e.to_string());
+            let _ = vendor.disconnect().await;
+            outcome
+        })
+        .await
+        {
+            Ok(inner_result) => inner_result,
+            Err(_elapsed) => Err(format!(
+                "Timed out after {}s waiting for the switch",
+                PORT_STATUS_TIMEOUT.as_secs()
+            )),
+        };
 
-    store.status.clear_currently_configuring(&id).await;
+    guard.release().await;
 
     match result {
         Ok((entries, raw)) => (
@@ -1965,12 +2008,10 @@ pub async fn poe_reset(
     State(store): State<ConfigStore>,
     Path((id, port_id)): Path<(String, String)>,
 ) -> impl IntoResponse {
-    let switch_config = match poe_op_guard(&store, &id, &port_id).await {
-        Ok(cfg) => cfg,
+    let (switch_config, guard) = match poe_op_guard(&store, &id, &port_id).await {
+        Ok(v) => v,
         Err(resp) => return resp,
     };
-
-    store.status.set_currently_configuring(id.clone()).await;
 
     // Run the reset in the background and stream progress via SSE.
     // Returns 202 immediately; the UI listens on /api/events for the staged
@@ -1981,6 +2022,9 @@ pub async fn poe_reset(
     let cfg_bg = switch_config.clone();
 
     tokio::spawn(async move {
+        // Moved into this task so it's held (and its Drop-released) for
+        // the task's whole lifetime, not just until the handler returns.
+        let _guard = guard;
         let result = poe_reset_impl(&store_bg, &id_bg, &cfg_bg, &port_bg).await;
         match &result {
             Ok(()) => {
@@ -2011,7 +2055,7 @@ pub async fn poe_reset(
                     .await;
             }
         }
-        store_bg.status.clear_currently_configuring(&id_bg).await;
+        _guard.release().await;
     });
 
     (
