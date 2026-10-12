@@ -218,34 +218,20 @@ pub async fn apply_config(
 
     drop(config);
 
-    // Atomically check-and-mark busy (closes the check-then-act race the
-    // separate is_switch_busy()+set_currently_configuring() calls used to
-    // have — see StatusTracker::try_acquire_configuring's doc comment).
-    let guard = match store.status.try_acquire_configuring(id.clone()).await {
-        Some(guard) => guard,
-        None => {
-            let reason = if store.status.is_currently_configuring(&id).await {
-                "is already being configured"
-            } else {
-                "has a pending config reload queued"
-            };
-            return (
-                StatusCode::CONFLICT,
-                Json(json!({
-                    "error": format!("Switch '{}' {}", id, reason),
-                    "switch_id": id
-                })),
-            )
-                .into_response();
-        }
-    };
-
     // Spawn background task and return immediately
     let store_clone = store.clone();
     let id_clone = id.clone();
     let switch_config_clone = switch_config.clone();
 
     tokio::spawn(async move {
+        // Queued rather than rejected: an apply that arrives while the switch
+        // is busy runs when its turn comes (see StatusTracker::acquire_configuring_queued).
+        let Some(guard) = store_clone.status.acquire_configuring_queued(id_clone.clone(), QUEUE_MAX_WAIT_ASYNC).await else {
+            let msg = format!("Gave up after waiting {}s for the switch's turn", QUEUE_MAX_WAIT_ASYNC.as_secs());
+            error!("Apply not run for switch '{}': {}", id_clone, msg);
+            store_clone.status.record_apply_failure(&id_clone, &msg).await;
+            return;
+        };
         match apply_config_impl(store_clone, id_clone.clone(), switch_config_clone, guard).await {
             Ok(results) => {
                 info!("Apply completed for switch '{}': {} results", id_clone, results.len());
@@ -260,10 +246,10 @@ pub async fn apply_config(
         StatusCode::ACCEPTED,
         Json(json!({
             "status": "accepted",
-            "message": format!("Configuration apply started for switch '{}'", id),
+            "message": format!("Configuration apply accepted for switch '{}' (runs when the switch is free)", id),
             "switch_id": id,
             "poll_url": "/api/status",
-            "hint": "Poll /api/status and check 'currently_configuring' array. When empty or switch not in list, check switches[].last_result for the outcome."
+            "hint": "Poll /api/status; the apply is finished when the switch is in neither 'currently_configuring' nor 'queued_operations'. Then check switches[].last_result for the outcome."
         })),
     )
         .into_response()
@@ -1572,16 +1558,15 @@ pub async fn delete_switch_config(
 
 /// Shared guard checks for PoE operational endpoints (reset/on/off): switch
 /// exists, its model supports PoE at all, the specific port supports PoE,
-/// the vendor is one with PoE commands implemented, and the switch isn't
-/// already mid-operation. Returns the resolved `SwitchConfig` plus the
-/// busy-flag guard (already acquired atomically — see
-/// `StatusTracker::try_acquire_configuring`) on success, or the error
-/// response to return immediately.
+/// and the vendor is one with PoE commands implemented. Returns the resolved `SwitchConfig` on success, or the error
+/// response to return immediately. Doesn't take the switch: the caller's
+/// background task queues for its turn (`acquire_configuring_queued`), so a
+/// busy switch delays the operation instead of rejecting it.
 async fn poe_op_guard(
     store: &ConfigStore,
     id: &str,
     port_id: &str,
-) -> Result<(SwitchConfig, crate::status::ConfiguringGuard), axum::response::Response> {
+) -> Result<SwitchConfig, axum::response::Response> {
     let config = store.config.read().await;
     let switch_config = match config.switches.iter().find(|s| s.id == id) {
         Some(cfg) => cfg.clone(),
@@ -1621,14 +1606,7 @@ async fn poe_op_guard(
             .into_response());
     }
 
-    match store.status.try_acquire_configuring(id.to_string()).await {
-        Some(guard) => Ok((switch_config, guard)),
-        None => Err((
-            StatusCode::CONFLICT,
-            Json(json!({"error": format!("Switch '{}' is busy", id), "switch_id": id})),
-        )
-            .into_response()),
-    }
+    Ok(switch_config)
 }
 
 /// Get the vendor-specific PoE enable/disable command sets for a port.
@@ -1670,7 +1648,7 @@ async fn poe_set(
     port_id: String,
     turn_on: bool,
 ) -> impl IntoResponse {
-    let (switch_config, guard) = match poe_op_guard(&store, &id, &port_id).await {
+    let switch_config = match poe_op_guard(&store, &id, &port_id).await {
         Ok(v) => v,
         Err(resp) => return resp,
     };
@@ -1682,9 +1660,28 @@ async fn poe_set(
     let action_bg = action.to_string();
 
     tokio::spawn(async move {
-        // Moved into this task so it's held (and its Drop-released) for
-        // the task's whole lifetime, not just until the handler returns.
-        let _guard = guard;
+        // Taken here, not in the handler, so the request returns 202 at once
+        // and this operation waits in the switch's queue. Held (and
+        // Drop-released) for the task's whole lifetime.
+        let _guard = match store_bg.status.acquire_configuring_queued(id_bg.clone(), QUEUE_MAX_WAIT_ASYNC).await {
+            Some(guard) => guard,
+            None => {
+                let msg = format!("Gave up after waiting {}s for the switch's turn", QUEUE_MAX_WAIT_ASYNC.as_secs());
+                store_bg.emit_event(SseEvent::PoeSet {
+                    switch_id: id_bg.clone(),
+                    port_id: port_bg.clone(),
+                    action: action_bg.clone(),
+                    stage: "failed".to_string(),
+                    detail: Some(msg.clone()),
+                });
+                error!("PoE {} not run for {}:{}: {}", action_bg, id_bg, port_bg, msg);
+                store_bg
+                    .status
+                    .record_error("PoeSet".to_string(), msg, Some(id_bg.clone()), format!("poe_{}", action_bg))
+                    .await;
+                return;
+            }
+        };
         let result = poe_set_impl(&store_bg, &id_bg, &switch_config, &port_bg, turn_on).await;
         match &result {
             Ok(()) => {
@@ -1727,7 +1724,7 @@ async fn poe_set(
         StatusCode::ACCEPTED,
         Json(json!({
             "status": "accepted",
-            "message": format!("PoE {} started for port {} on switch '{}'", action, port_id, id),
+            "message": format!("PoE {} accepted for port {} on switch '{}' (runs when the switch is free)", action, port_id, id),
             "switch_id": id,
             "port_id": port_id,
             "hint": "Listen on /api/events for poe-set stage events"
@@ -1866,6 +1863,68 @@ fn cache_headers(
     headers
 }
 
+
+/// Max time a request that returns its result in the response body (mac-table,
+/// port-status) waits for its turn on a busy switch before giving up with 503.
+/// A turn is ~12-14s over serial, so this covers a handful of queued operations.
+const QUEUE_MAX_WAIT_SYNC: std::time::Duration = std::time::Duration::from_secs(90);
+
+/// Max time a fire-and-forget operation (202 Accepted: apply, PoE) waits for
+/// its turn. Nobody holds an HTTP connection open for these, so it can be long.
+const QUEUE_MAX_WAIT_ASYNC: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// 503 for a request that waited `waited` in the switch's queue and never got
+/// its turn — retrying later is the right response, unlike a plain 409.
+fn queue_timeout_response(id: &str, waited: std::time::Duration) -> axum::response::Response {
+    let mut resp = (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({
+            "error": format!("Switch '{}' stayed busy for {}s while this request waited its turn", id, waited.as_secs()),
+            "switch_id": id
+        })),
+    )
+        .into_response();
+    resp.headers_mut().insert(
+        axum::http::header::RETRY_AFTER,
+        axum::http::HeaderValue::from(waited.as_secs().min(30)),
+    );
+    resp
+}
+
+/// Serve the cached mac-table if it's still within `max_age`: the 200 with
+/// cache headers, or a 304 when `If-None-Match` matches. `None` means the
+/// caller has to fetch live.
+async fn mac_table_cache_response(
+    store: &ConfigStore,
+    id: &str,
+    max_age: chrono::Duration,
+    if_none_match: Option<&TypedHeader<IfNoneMatch>>,
+) -> Option<axum::response::Response> {
+    let cache = store.mac_table_cache.read().await;
+    let cached = cache.get(id)?;
+    if !is_mac_table_cache_fresh(cached.fetched_at, max_age) {
+        return None;
+    }
+    let headers = cache_headers(cached.fetched_at, max_age, cached.generation_id);
+    let etag_matches = if_none_match
+        .map(|TypedHeader(inm)| !inm.precondition_passes(&cache_etag(cached.generation_id)))
+        .unwrap_or(false);
+    if etag_matches {
+        return Some((StatusCode::NOT_MODIFIED, headers).into_response());
+    }
+    Some(
+        (
+            StatusCode::OK,
+            headers,
+            Json(json!({
+                "switch_id": id,
+                "entries": cached.entries,
+                "raw_output": cached.raw_output
+            })),
+        )
+            .into_response(),
+    )
+}
 
 /// Query the switch's learned MAC-address table (FDB) — answers "what MAC is
 /// physically wired to this port" for cases where multiple devices on the
@@ -2078,46 +2137,24 @@ pub async fn get_mac_table(
     );
 
     if !query.fresh {
-        let cache = store.mac_table_cache.read().await;
-        if let Some(cached) = cache.get(&id) {
-            if is_mac_table_cache_fresh(cached.fetched_at, max_age) {
-                let headers = cache_headers(cached.fetched_at, max_age, cached.generation_id);
-                // `?fresh=true` is this endpoint's own explicit "bypass
-                // the cache" escape hatch, so it never short-circuits to a
-                // 304 even if If-None-Match happens to match -- handled
-                // above by the `!query.fresh` guard on this whole block.
-                let etag_matches = if_none_match
-                    .as_ref()
-                    .map(|TypedHeader(inm)| !inm.precondition_passes(&cache_etag(cached.generation_id)))
-                    .unwrap_or(false);
-                if etag_matches {
-                    return (StatusCode::NOT_MODIFIED, headers).into_response();
-                }
-                return (
-                    StatusCode::OK,
-                    headers,
-                    Json(json!({
-                        "switch_id": id,
-                        "entries": cached.entries,
-                        "raw_output": cached.raw_output
-                    })),
-                )
-                    .into_response();
-            }
+        if let Some(resp) = mac_table_cache_response(&store, &id, max_age, if_none_match.as_ref()).await {
+            return resp;
         }
     }
 
-    let guard = match store.status.try_acquire_configuring(id.clone()).await {
+    let guard = match store.status.acquire_configuring_queued(id.clone(), QUEUE_MAX_WAIT_SYNC).await {
         Some(guard) => guard,
-        None => {
-
-            return (
-                StatusCode::CONFLICT,
-                Json(json!({"error": format!("Switch '{}' is busy", id), "switch_id": id})),
-            )
-                .into_response();
-        }
+        None => return queue_timeout_response(&id, QUEUE_MAX_WAIT_SYNC),
     };
+
+    // Whoever held the switch ahead of us (the refresher, or another
+    // caller waiting on the same data) has probably just filled the cache.
+    if !query.fresh {
+        if let Some(resp) = mac_table_cache_response(&store, &id, max_age, if_none_match.as_ref()).await {
+            guard.release().await;
+            return resp;
+        }
+    }
 
     // Bounded overall budget as a defense-in-depth safety net: even if some
     // future bug reintroduces an unbounded wait deeper in the vendor/serial
@@ -2206,15 +2243,9 @@ pub async fn get_port_status(
             .into_response();
     }
 
-    let guard = match store.status.try_acquire_configuring(id.clone()).await {
+    let guard = match store.status.acquire_configuring_queued(id.clone(), QUEUE_MAX_WAIT_SYNC).await {
         Some(guard) => guard,
-        None => {
-            return (
-                StatusCode::CONFLICT,
-                Json(json!({"error": format!("Switch '{}' is busy", id), "switch_id": id})),
-            )
-                .into_response();
-        }
+        None => return queue_timeout_response(&id, QUEUE_MAX_WAIT_SYNC),
     };
 
     // Same defense-in-depth bound as get_mac_table — see its comment.
@@ -2268,7 +2299,7 @@ pub async fn poe_reset(
     State(store): State<ConfigStore>,
     Path((id, port_id)): Path<(String, String)>,
 ) -> impl IntoResponse {
-    let (switch_config, guard) = match poe_op_guard(&store, &id, &port_id).await {
+    let switch_config = match poe_op_guard(&store, &id, &port_id).await {
         Ok(v) => v,
         Err(resp) => return resp,
     };
@@ -2282,9 +2313,27 @@ pub async fn poe_reset(
     let cfg_bg = switch_config.clone();
 
     tokio::spawn(async move {
-        // Moved into this task so it's held (and its Drop-released) for
-        // the task's whole lifetime, not just until the handler returns.
-        let _guard = guard;
+        // Taken here, not in the handler, so the request returns 202 at once
+        // and this operation waits in the switch's queue. Held (and
+        // Drop-released) for the task's whole lifetime.
+        let _guard = match store_bg.status.acquire_configuring_queued(id_bg.clone(), QUEUE_MAX_WAIT_ASYNC).await {
+            Some(guard) => guard,
+            None => {
+                let msg = format!("Gave up after waiting {}s for the switch's turn", QUEUE_MAX_WAIT_ASYNC.as_secs());
+                store_bg.emit_event(SseEvent::PoeReset {
+                    switch_id: id_bg.clone(),
+                    port_id: port_bg.clone(),
+                    stage: "failed".to_string(),
+                    detail: Some(msg.clone()),
+                });
+                error!("PoE reset not run for {}:{}: {}", id_bg, port_bg, msg);
+                store_bg
+                    .status
+                    .record_error("PoeReset".to_string(), msg, Some(id_bg.clone()), "poe_reset".to_string())
+                    .await;
+                return;
+            }
+        };
         let result = poe_reset_impl(&store_bg, &id_bg, &cfg_bg, &port_bg).await;
         match &result {
             Ok(()) => {
@@ -2322,7 +2371,7 @@ pub async fn poe_reset(
         StatusCode::ACCEPTED,
         Json(json!({
             "status": "accepted",
-            "message": format!("PoE reset started for port {} on switch '{}'", port_id, id),
+            "message": format!("PoE reset accepted for port {} on switch '{}' (runs when the switch is free)", port_id, id),
             "switch_id": id,
             "port_id": port_id,
             "hint": "Listen on /api/events for poe-reset stage events"

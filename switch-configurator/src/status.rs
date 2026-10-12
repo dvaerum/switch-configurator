@@ -3,9 +3,11 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
-use tokio::sync::RwLock;
+use std::time::{Duration, Instant};
+use tokio::sync::{OwnedSemaphorePermit, RwLock, Semaphore};
 
 /// Maximum number of errors to track
 const MAX_ERRORS: usize = 50;
@@ -25,6 +27,10 @@ pub struct StatusTracker {
 pub struct ConfiguringGuard {
     tracker: StatusTracker,
     switch_id: String,
+    /// The switch's exclusive turn. Must outlive the busy-flag clear below,
+    /// otherwise the next queued holder could set its flag and then have it
+    /// wiped by this guard's cleanup.
+    permit: Option<OwnedSemaphorePermit>,
     /// Set by `release()` to skip the spawn-on-drop path when the caller
     /// already released explicitly (avoids a redundant spawned task).
     released: bool,
@@ -39,6 +45,7 @@ impl ConfiguringGuard {
     pub async fn release(mut self) {
         self.tracker.clear_currently_configuring(&self.switch_id).await;
         self.released = true;
+        drop(self.permit.take());
     }
 }
 
@@ -49,8 +56,10 @@ impl Drop for ConfiguringGuard {
         }
         let tracker = self.tracker.clone();
         let switch_id = std::mem::take(&mut self.switch_id);
+        let permit = self.permit.take();
         tokio::spawn(async move {
             tracker.clear_currently_configuring(&switch_id).await;
+            drop(permit);
         });
     }
 }
@@ -66,6 +75,43 @@ struct StatusTrackerInner {
     currently_configuring: HashSet<String>,
     /// Set of switch IDs with pending config reload (file watcher queue, max 1 per switch)
     pending_config_reload: HashSet<String>,
+    /// Per-switch FIFO turnstile: the switch's serial line / session can
+    /// serve exactly one operation at a time, and tokio's semaphore hands
+    /// out permits to waiters in arrival order.
+    gates: HashMap<String, SwitchGate>,
+}
+
+#[derive(Clone)]
+struct SwitchGate {
+    turn: Arc<Semaphore>,
+    waiting: Arc<AtomicUsize>,
+}
+
+impl SwitchGate {
+    fn new() -> Self {
+        Self {
+            turn: Arc::new(Semaphore::new(1)),
+            waiting: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+}
+
+/// Counts a queued waiter for as long as it is alive. Decrements in `Drop`
+/// so a waiter cancelled mid-wait (client disconnect, timeout) still leaves
+/// the count correct.
+struct WaitingToken(Arc<AtomicUsize>);
+
+impl WaitingToken {
+    fn new(counter: &Arc<AtomicUsize>) -> Self {
+        counter.fetch_add(1, Ordering::SeqCst);
+        Self(counter.clone())
+    }
+}
+
+impl Drop for WaitingToken {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 /// Metadata about the loaded configuration
@@ -116,6 +162,8 @@ pub struct ServiceStatus {
     pub currently_configuring: Vec<String>,
     /// List of switch IDs with pending config reload from file watcher (queued, waiting)
     pub pending_config_reload: Vec<String>,
+    /// Operations waiting their turn per switch (only switches with a queue)
+    pub queued_operations: HashMap<String, usize>,
     pub configuration: ConfigurationStatus,
     pub api: ApiInfo,
     pub switches: Vec<SwitchStatus>,
@@ -166,6 +214,7 @@ impl StatusTracker {
                 last_config_error: None,
                 currently_configuring: HashSet::new(),
                 pending_config_reload: HashSet::new(),
+                gates: HashMap::new(),
             })),
         }
     }
@@ -214,13 +263,54 @@ impl StatusTracker {
         if inner.currently_configuring.contains(&switch_id) || inner.pending_config_reload.contains(&switch_id) {
             return None;
         }
+        let gate = inner.gates.entry(switch_id.clone()).or_insert_with(SwitchGate::new);
+        let permit = gate.turn.clone().try_acquire_owned().ok()?;
         inner.currently_configuring.insert(switch_id.clone());
         drop(inner);
         Some(ConfiguringGuard {
             tracker: self.clone(),
             switch_id,
+            permit: Some(permit),
             released: false,
         })
+    }
+
+    /// Like `try_acquire_configuring`, but instead of failing when the
+    /// switch is busy, wait in a first-come-first-served line for up to
+    /// `max_wait`. Returns `None` only if the wait timed out.
+    ///
+    /// A switch handles one console session at a time and each takes
+    /// ~10-14s over serial, so callers that were rejected with `409` used
+    /// to retry on their own timers — with no ordering, an unlucky caller
+    /// could lose every race indefinitely. Callers that must not wait
+    /// (e.g. the background refresher) keep using `try_acquire_configuring`.
+    /// A pending config reload is deliberately not a reason to refuse here:
+    /// the waiter just takes its turn.
+    pub async fn acquire_configuring_queued(&self, switch_id: String, max_wait: Duration) -> Option<ConfiguringGuard> {
+        let gate = {
+            let mut inner = self.inner.write().await;
+            inner.gates.entry(switch_id.clone()).or_insert_with(SwitchGate::new).clone()
+        };
+        let permit = {
+            let _waiting = WaitingToken::new(&gate.waiting);
+            tokio::time::timeout(max_wait, gate.turn.clone().acquire_owned())
+                .await
+                .ok()?
+                .expect("switch gate semaphore is never closed")
+        };
+        self.inner.write().await.currently_configuring.insert(switch_id.clone());
+        Some(ConfiguringGuard {
+            tracker: self.clone(),
+            switch_id,
+            permit: Some(permit),
+            released: false,
+        })
+    }
+
+    /// Number of operations currently waiting their turn for a switch.
+    pub async fn queued_count(&self, switch_id: &str) -> usize {
+        let inner = self.inner.read().await;
+        inner.gates.get(switch_id).map_or(0, |g| g.waiting.load(Ordering::SeqCst))
     }
 
     /// Check if a specific switch is currently being configured
@@ -418,6 +508,12 @@ impl StatusTracker {
             uptime_seconds: uptime.as_secs(),
             currently_configuring: inner.currently_configuring.iter().cloned().collect(),
             pending_config_reload: inner.pending_config_reload.iter().cloned().collect(),
+            queued_operations: inner
+                .gates
+                .iter()
+                .map(|(id, gate)| (id.clone(), gate.waiting.load(Ordering::SeqCst)))
+                .filter(|(_, n)| *n > 0)
+                .collect(),
             configuration: config_status,
             api: ApiInfo {
                 port: api_port,
@@ -533,5 +629,93 @@ mod tests {
             }
         }
         assert_eq!(successes, 1, "exactly one concurrent acquire should have won");
+    }
+
+    #[tokio::test]
+    async fn test_queued_acquire_waits_for_holder_then_succeeds() {
+        let tracker = StatusTracker::new();
+        let first = tracker.try_acquire_configuring("sw1".to_string()).await.unwrap();
+        let t2 = tracker.clone();
+        let waiter = tokio::spawn(async move {
+            t2.acquire_configuring_queued("sw1".to_string(), std::time::Duration::from_secs(5)).await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(!waiter.is_finished(), "waiter must block while the first guard is held");
+        first.release().await;
+        let second = waiter.await.unwrap();
+        assert!(second.is_some(), "waiter must get the switch once the holder releases");
+        assert!(tracker.is_currently_configuring("sw1").await);
+    }
+
+    #[tokio::test]
+    async fn test_queued_acquire_times_out_while_held() {
+        let tracker = StatusTracker::new();
+        let _held = tracker.try_acquire_configuring("sw1".to_string()).await.unwrap();
+        let got = tracker
+            .acquire_configuring_queued("sw1".to_string(), std::time::Duration::from_millis(50))
+            .await;
+        assert!(got.is_none());
+        assert_eq!(tracker.queued_count("sw1").await, 0, "a timed-out waiter must leave the queue");
+    }
+
+    #[tokio::test]
+    async fn test_queued_acquire_is_first_come_first_served() {
+        let tracker = StatusTracker::new();
+        let held = tracker.try_acquire_configuring("sw1".to_string()).await.unwrap();
+        let order = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut handles = Vec::new();
+        for i in 0..4 {
+            let t = tracker.clone();
+            let order = order.clone();
+            handles.push(tokio::spawn(async move {
+                let g = t
+                    .acquire_configuring_queued("sw1".to_string(), std::time::Duration::from_secs(5))
+                    .await
+                    .unwrap();
+                order.lock().unwrap().push(i);
+                g.release().await;
+            }));
+            // Make arrival order deterministic.
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert_eq!(tracker.queued_count("sw1").await, 4);
+        held.release().await;
+        for h in handles {
+            h.await.unwrap();
+        }
+        assert_eq!(*order.lock().unwrap(), vec![0, 1, 2, 3]);
+    }
+
+    /// The previous holder's Drop cleanup runs in a spawned task; it must
+    /// not clear the busy flag the *next* holder has just set.
+    #[tokio::test]
+    async fn test_dropped_guard_cleanup_does_not_clear_next_holders_flag() {
+        for _ in 0..50 {
+            let tracker = StatusTracker::new();
+            let first = tracker.try_acquire_configuring("sw1".to_string()).await.unwrap();
+            let t2 = tracker.clone();
+            let waiter = tokio::spawn(async move {
+                t2.acquire_configuring_queued("sw1".to_string(), std::time::Duration::from_secs(5)).await
+            });
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            drop(first);
+            let second = waiter.await.unwrap().unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            assert!(
+                tracker.is_currently_configuring("sw1").await,
+                "next holder's flag was wiped by the previous guard's cleanup"
+            );
+            second.release().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn test_queued_acquire_independent_per_switch() {
+        let tracker = StatusTracker::new();
+        let _held = tracker.try_acquire_configuring("sw1".to_string()).await.unwrap();
+        let other = tracker
+            .acquire_configuring_queued("sw2".to_string(), std::time::Duration::from_millis(50))
+            .await;
+        assert!(other.is_some());
     }
 }

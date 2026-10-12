@@ -187,22 +187,7 @@ Apply the **in-memory** configuration to a specific switch. This does NOT re-rea
 }
 ```
 
-- `409 CONFLICT` - Switch is busy (being configured or has pending reload)
-```json
-{
-  "error": "Switch 'switch-01' is already being configured",
-  "switch_id": "switch-01"
-}
-```
-or
-```json
-{
-  "error": "Switch 'switch-01' has a pending config reload queued",
-  "switch_id": "switch-01"
-}
-```
-
-**Note:** The conflict detection is **per-switch** - you can configure multiple different switches in parallel. A switch is considered "busy" if it's either being configured OR has a pending config reload queued by the file watcher.
+**Queueing:** a busy switch never rejects this request. It is accepted (`202`) and runs when the switch is free, in arrival order (see [Per-switch operation queue](#per-switch-operation-queue)). If its turn doesn't come within 10 minutes it is dropped and `last_result` records the failure.
 
 **Monitoring Progress:**
 
@@ -243,9 +228,23 @@ done
 - If connection or configuration fails, the switch state is left unchanged
 - Configuration is automatically saved after successful application
 - Multiple different switches can be configured in parallel
-- Concurrent applies to the same switch return `409 Conflict`
-- **File watcher integration**: If the file watcher is applying to a switch or has a pending reload queued, the API returns `409 Conflict` for that switch
+- Concurrent applies to the same switch are queued and run one after another
+- **File watcher integration**: If the file watcher is applying to a switch, the apply waits its turn
 - **Pending queue**: When file watcher triggers a reload for a busy switch, the reload is queued (max 1 per switch). Newer config changes replace older pending reloads.
+
+---
+
+### Per-switch operation queue
+
+A switch handles one console session at a time (~10-14s each over serial). Operations that arrive while it is busy wait in a first-come-first-served line per switch instead of getting `409`:
+
+| Operation | While busy | Gives up after |
+|-----------|-----------|----------------|
+| `apply`, `poe-reset`, `poe-on`, `poe-off` | `202` at once, runs in turn | 10 min (reported via `last_result` / SSE `failed`) |
+| `mac-table` (cache miss), `port-status` | request waits | 90s, then `503` + `Retry-After` |
+| Background mac-table refresher | skipped for that cycle | — |
+
+`GET /api/status` lists switches with waiting operations in `queued_operations` (`{"switch-01": 2}`). A queued `mac-table` request re-checks the cache once it gets its turn, so requests that piled up behind a refresh are served from it without extra console sessions. `reload` (single or all) and the file watcher keep their previous "skip/queue-one" behaviour.
 
 ---
 
@@ -482,7 +481,7 @@ Power-cycle PoE on a single port: disable, wait 3 seconds, re-enable. Always end
 
 - `404 NOT FOUND` - Switch not found
 - `400 BAD REQUEST` - Switch model doesn't support PoE, port doesn't support PoE, or vendor not yet supported
-- `409 CONFLICT` - Switch is busy
+- A busy switch queues the reset (it runs when the switch is free; the SSE `failed` stage reports it if the turn never comes within 10 minutes)
 
 **SSE progress** (`/api/events`, event name `poe-reset`):
 
@@ -522,7 +521,7 @@ Persistently turn PoE on or off for a single port — unlike PoE Reset, this doe
 }
 ```
 
-**Errors:** same as PoE Reset (`404`, `400`, `409`).
+**Errors:** same as PoE Reset (`404`, `400`); a busy switch queues the request.
 
 **SSE progress** (`/api/events`, event name `poe-set`):
 
@@ -573,7 +572,7 @@ Query the switch's learned MAC-address table (FDB). Answers "what's physically w
 
 Send `If-None-Match: "<etag>"` to get a `304 Not Modified` (headers only, no body) if the cache hasn't refreshed since that `ETag` — the standard way to poll cheaply without re-transferring `entries`/`raw_output` when nothing changed. `?fresh=true` always does a real fetch and never returns a `304`, even if `If-None-Match` happens to match.
 
-**Background refresher**: a task proactively re-fetches every switch's mac-table once per TTL (60s), independent of any caller's request. It uses the exact same busy-flag guard as every other operational endpoint (`apply`, `poe-reset`, etc.) — if a switch is busy with something else when the refresher's turn comes, it simply skips that switch for the cycle rather than waiting or erroring; the next real request just pays the live-fetch cost once, same as if the refresher didn't exist. Deleting a switch (`DELETE /switches/:id/desired-config`) or a full config reload removes its cache entry too, so nothing lingers for a switch that no longer exists.
+**Background refresher**: a task proactively re-fetches every switch's mac-table once per TTL (60s), independent of any caller's request. It uses the exact same busy-flag guard as every other operational endpoint (`apply`, `poe-reset`, etc.) — if a switch is busy with something else when the refresher's turn comes, it simply skips that switch for the cycle rather than queueing (it never takes a turn from a real request); the next real request just pays the live-fetch cost once, same as if the refresher didn't exist. Deleting a switch (`DELETE /switches/:id/desired-config`) or a full config reload removes its cache entry too, so nothing lingers for a switch that no longer exists.
 
 **Response:**
 
@@ -605,7 +604,7 @@ Last-Modified: Wed, 30 Sep 2026 13:24:55 GMT
 
 - `404 NOT FOUND` - Switch not found
 - `400 BAD REQUEST` - Vendor not yet supported
-- `409 CONFLICT` - Switch is busy
+- `503 SERVICE UNAVAILABLE` - Switch stayed busy for 90s while this request waited its turn (`Retry-After` is set)
 - `500 INTERNAL SERVER ERROR` - Connection failed, or the switch rejected the underlying CLI command (each vendor's known rejection marker is detected and surfaced as a real error rather than a false empty success — see Verification status below)
 
 **Supported vendors and commands:**
@@ -666,7 +665,7 @@ Query live per-port operational status (link/speed/duplex/PoE) — distinct from
 
 - `404 NOT FOUND` - Switch not found
 - `400 BAD REQUEST` - Vendor not yet supported (FortiSwitch only, for now)
-- `409 CONFLICT` - Switch is busy
+- `503 SERVICE UNAVAILABLE` - Switch stayed busy for 90s while this request waited its turn (`Retry-After` is set)
 - `500 INTERNAL SERVER ERROR` - Connection failed, or the switch rejected the underlying command (same rejection-marker detection as mac-table)
 
 **Supported vendors:** FortiSwitch only (`get switch physical-port`). Added for a live hardware incident where a MAC-table entry was missing on one port with no other way to tell "switch sees no link" from "device isn't sending traffic". Aruba/Cisco not yet implemented.
