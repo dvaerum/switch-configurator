@@ -418,12 +418,11 @@ async fn test_apply_config_returns_202_with_correct_response() {
 }
 
 #[tokio::test]
-async fn test_apply_config_conflict_same_switch() {
-    // Test that applying to the same switch twice returns 409 Conflict
+async fn test_apply_config_while_busy_is_accepted_and_queued() {
+    // An apply that arrives while the switch is busy is queued behind the
+    // current operation (202), not rejected with 409.
     let store = create_test_config_store();
-
-    // Simulate that the switch is already being configured
-    store.status.set_currently_configuring("test-sw-01".to_string()).await;
+    let holder = store.status.try_acquire_configuring("test-sw-01".to_string()).await.unwrap();
 
     let response = apply_config(
         axum::extract::State(store.clone()),
@@ -431,16 +430,18 @@ async fn test_apply_config_conflict_same_switch() {
     )
     .await
     .into_response();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
 
-    assert_eq!(response.status(), StatusCode::CONFLICT);
-
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let json: Value = serde_json::from_slice(&body).unwrap();
-
-    assert!(json["error"].as_str().unwrap().contains("already being configured"));
-    assert_eq!(json["switch_id"], "test-sw-01");
+    for _ in 0..50 {
+        if store.status.queued_count("test-sw-01").await == 1 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(store.status.queued_count("test-sw-01").await, 1);
+    let status = store.status.get_status(4002).await;
+    assert_eq!(status.queued_operations.get("test-sw-01"), Some(&1));
+    drop(holder);
 }
 
 #[tokio::test]
@@ -511,11 +512,9 @@ async fn test_get_config_no_conflict_different_switch() {
 }
 
 #[tokio::test]
-async fn test_apply_config_conflict_pending_reload() {
-    // Test that apply returns 409 when switch has a pending config reload queued
+async fn test_apply_config_with_pending_reload_is_accepted() {
+    // A pending file-watcher reload no longer blocks an apply: it queues.
     let store = create_test_config_store();
-
-    // Queue a pending reload for this switch
     store.status.queue_pending_reload("test-sw-01".to_string()).await;
 
     let response = apply_config(
@@ -524,16 +523,7 @@ async fn test_apply_config_conflict_pending_reload() {
     )
     .await
     .into_response();
-
-    assert_eq!(response.status(), StatusCode::CONFLICT);
-
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let json: Value = serde_json::from_slice(&body).unwrap();
-
-    assert!(json["error"].as_str().unwrap().contains("pending config reload"));
-    assert_eq!(json["switch_id"], "test-sw-01");
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
 }
 
 #[tokio::test]
@@ -3289,10 +3279,11 @@ mod integration_tests {
         assert!(json["error"].as_str().unwrap().contains("does not support PoE"));
     }
 
-    #[tokio::test]
-    async fn test_poe_reset_switch_busy() {
+        #[tokio::test]
+    async fn test_poe_reset_switch_busy_is_queued() {
+        // Busy switch: the request is accepted (202) and waits its turn.
         let store = create_test_config_store();
-        store.status.set_currently_configuring("test-sw-01".to_string()).await;
+        let holder = store.status.try_acquire_configuring("test-sw-01".to_string()).await.unwrap();
 
         let response = poe_reset(
             axum::extract::State(store.clone()),
@@ -3300,7 +3291,16 @@ mod integration_tests {
         )
         .await
         .into_response();
-        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+
+        for _ in 0..50 {
+            if store.status.queued_count("test-sw-01").await == 1 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(store.status.queued_count("test-sw-01").await, 1);
+        drop(holder);
     }
 
     #[tokio::test]
@@ -3556,10 +3556,11 @@ mod integration_tests {
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
-    #[tokio::test]
-    async fn test_poe_off_switch_busy() {
+        #[tokio::test]
+    async fn test_poe_off_switch_busy_is_queued() {
+        // Busy switch: the request is accepted (202) and waits its turn.
         let store = create_test_config_store();
-        store.status.set_currently_configuring("test-sw-01".to_string()).await;
+        let holder = store.status.try_acquire_configuring("test-sw-01".to_string()).await.unwrap();
 
         let response = poe_off(
             axum::extract::State(store.clone()),
@@ -3567,7 +3568,16 @@ mod integration_tests {
         )
         .await
         .into_response();
-        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+
+        for _ in 0..50 {
+            if store.status.queued_count("test-sw-01").await == 1 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(store.status.queued_count("test-sw-01").await, 1);
+        drop(holder);
     }
 
     #[tokio::test]
@@ -3693,20 +3703,53 @@ mod integration_tests {
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
-    #[tokio::test]
-    async fn test_get_mac_table_switch_busy() {
+        #[tokio::test]
+    async fn test_get_mac_table_waits_for_busy_switch_then_serves_fresh_cache() {
+        // Busy switch + empty cache: the request waits its turn, and once the
+        // holder has filled the cache it is served from there, not by a
+        // second live fetch.
         let store = create_test_config_store();
-        store.status.set_currently_configuring("test-sw-01".to_string()).await;
+        let holder = store.status.try_acquire_configuring("test-sw-01".to_string()).await.unwrap();
 
-        let response = get_mac_table(
-            axum::extract::State(store.clone()),
-            axum::extract::Path("test-sw-01".to_string()),
-            axum::extract::Query(MacTableQuery { fresh: false, max_age_seconds: None }),
-            None,
-        )
-        .await
-        .into_response();
-        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let store_req = store.clone();
+        let request = tokio::spawn(async move {
+            get_mac_table(
+                axum::extract::State(store_req),
+                axum::extract::Path("test-sw-01".to_string()),
+                axum::extract::Query(MacTableQuery { fresh: false, max_age_seconds: None }),
+                None,
+            )
+            .await
+            .into_response()
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(!request.is_finished(), "request must wait while the switch is busy");
+        assert_eq!(store.status.queued_count("test-sw-01").await, 1);
+
+        store.mac_table_cache.write().await.insert(
+            "test-sw-01".to_string(),
+            crate::config::CachedMacTable {
+                entries: vec![crate::models::MacTableEntry {
+                    mac_address: "00:00:5e:00:53:01".to_string(),
+                    vlan_id: Some(10),
+                    port_id: "1".to_string(),
+                }],
+                raw_output: "raw".to_string(),
+                fetched_at: chrono::Utc::now(),
+                generation_id: uuid::Uuid::new_v4(),
+            },
+        );
+        holder.release().await;
+
+        let response = tokio::time::timeout(std::time::Duration::from_secs(5), request)
+            .await
+            .expect("request must finish once the switch is free")
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["entries"][0]["port_id"], "1");
     }
 
     #[tokio::test]
@@ -3869,17 +3912,25 @@ mod integration_tests {
         assert!(json["error"].as_str().unwrap().contains("not yet supported"));
     }
 
-    #[tokio::test]
-    async fn test_get_port_status_switch_busy() {
+        #[tokio::test]
+    async fn test_get_port_status_waits_for_busy_switch() {
         let store = create_fortiswitch_test_store();
-        store.status.set_currently_configuring("test-sw-forti".to_string()).await;
+        let holder = store.status.try_acquire_configuring("test-sw-forti".to_string()).await.unwrap();
 
-        let response = get_port_status(
-            axum::extract::State(store.clone()),
-            axum::extract::Path("test-sw-forti".to_string()),
-        )
-        .await
-        .into_response();
-        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let store_req = store.clone();
+        let request = tokio::spawn(async move {
+            get_port_status(
+                axum::extract::State(store_req),
+                axum::extract::Path("test-sw-forti".to_string()),
+            )
+            .await
+            .into_response()
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(!request.is_finished(), "request must wait, not get a 409");
+        assert_eq!(store.status.queued_count("test-sw-forti").await, 1);
+        request.abort();
+        drop(holder);
     }
 }
