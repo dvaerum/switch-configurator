@@ -715,6 +715,28 @@ fn merge_configs(configs: Vec<ConfigWithMetadata>) -> Result<(AppConfig, Vec<Swi
             continue;
         }
 
+        // The merged config is what runs, so SNMP secret references are read
+        // (and vendor limits checked) here, as `validate_switch_config` does
+        // for a single file.
+        let snmp_result = crate::secrets::resolve_snmp_secrets(&mut switch, &crate::secrets::SecretContext::from_env())
+            .and_then(|_| crate::allowed_hosts::check_vendor_support(&switch));
+        if let Err(e) = snmp_result {
+            let sources: Vec<String> = merge_trackers.get(&switch.id)
+                .map(|t| t.source_files().into_iter().map(|p| p.to_string_lossy().to_string()).collect())
+                .unwrap_or_default();
+            tracing::warn!("Switch '{}' failed SNMP validation and will be skipped: {:#}", switch.id, e);
+            failures.push(SwitchValidationFailure {
+                switch_id: switch.id.clone(),
+                hostname: switch.hostname.clone(),
+                error: format!("{:#}", e),
+                config_sources: sources,
+                preview: Some(switch.clone()),
+                vlan_sources: vlan_source_maps.get(&switch.id).cloned().unwrap_or_default(),
+                port_sources: port_source_maps.get(&switch.id).cloned().unwrap_or_default(),
+            });
+            continue;
+        }
+
         // Resolve VLAN name references against the merged VLAN list, then
         // validate VLAN references and other checks.
         let vlan_result = resolve_vlan_names(&mut switch, false)
@@ -4034,6 +4056,66 @@ switches:
 {snmp_block}
 "#
         )
+    }
+
+    #[test]
+    fn load_resolves_a_name_file_reads_community_into_the_runtime_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let secret = dir.path().join("snmp-read");
+        std::fs::write(&secret, "loaded-reads-secret\n").unwrap();
+        let main = dir.path().join("main.yaml");
+        std::fs::write(
+            &main,
+            forti_switch_yaml(
+                5,
+                &format!("    snmp:\n      reads:\n        mode: auto\n        community:\n          name_file: {}", secret.display()),
+            ),
+        )
+        .unwrap();
+
+        for (how, (config, failures)) in [
+            ("load", AppConfig::load(&main).unwrap()),
+            ("load_multi", AppConfig::load_multi(&main, &[]).unwrap()),
+        ] {
+            assert!(failures.is_empty(), "{how}: {:?}", failures.iter().map(|f| &f.error).collect::<Vec<_>>());
+            let reads = config.switches[0].snmp.as_ref().unwrap().reads.as_ref().unwrap();
+            assert_eq!(reads.community.as_ref().unwrap().name, "loaded-reads-secret", "{how}");
+        }
+    }
+
+    #[test]
+    fn load_multi_skips_a_switch_whose_secret_cannot_be_read_and_says_why() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("main.yaml");
+        std::fs::write(
+            &main,
+            forti_switch_yaml(5, "    snmp:\n      communities:\n        - name_file: /nonexistent/snmp-ro\n          access: operator"),
+        )
+        .unwrap();
+
+        let (config, failures) = AppConfig::load_multi(&main, &[]).unwrap();
+
+        assert!(config.switches.is_empty(), "a switch with an unreadable secret must not load");
+        assert_eq!(failures.len(), 1);
+        assert!(failures[0].error.contains("SNMP community #1"), "unhelpful error: {}", failures[0].error);
+    }
+
+    #[test]
+    fn load_multi_refuses_snmp_allowed_hosts_on_a_vendor_that_cannot_enforce_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("main.yaml");
+        std::fs::write(
+            &main,
+            forti_switch_yaml(5, "    snmp:\n      communities:\n        - name: public\n          access: operator\n          allowed_hosts: [auto]")
+                .replace("Fortiswitch124F_FPOE", "Aruba2930F"),
+        )
+        .unwrap();
+
+        let (config, failures) = AppConfig::load_multi(&main, &[]).unwrap();
+
+        assert!(config.switches.is_empty());
+        assert_eq!(failures.len(), 1);
+        assert!(failures[0].error.contains("allowed_hosts"), "unhelpful error: {}", failures[0].error);
     }
 
     #[test]
