@@ -71,6 +71,7 @@ impl Session {
     }
 
     /// The value of one scalar (`None` for noSuchObject/noSuchInstance).
+    #[cfg(test)]
     pub async fn get(&self, oid: &[u32]) -> Result<Option<SnmpValue>> {
         let oid = async_snmp::Oid::from_slice(oid);
         let response = tokio::time::timeout(self.deadline, self.client.get(&oid))
