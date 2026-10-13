@@ -33,3 +33,6 @@ result-*
 
 # Claude Code
 .claude/settings.local.json
+
+# Agent tooling runtime locks
+.claude/*.lock

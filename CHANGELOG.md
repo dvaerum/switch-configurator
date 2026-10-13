@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- `.claude/scheduled_tasks.lock` (a runtime lock file of the agent tooling that changed on every session) is no longer tracked; `.claude/*.lock` is ignored (`switch-configurator` 0.23.4).
 - **More Aruba/Cisco SNMP lab evidence** (`switch-configurator` 0.23.3): `docs/learnings/snmp-aruba-cisco.md` now records the Cisco per-community ACL gate (a standard ACL on `snmp-server community`: no answer from a host outside it, answered once permitted), and same-moment comparisons of SNMP against the console on both lab switches (port admin/link state, speed and duplex, per-VLAN MAC table, PoE admin state). Result: state, MACs and PoE agree; speed and duplex are only trustworthy while the link is up. No code change; Aruba/Cisco `snmp.reads` and `allowed_hosts` stay refused.
 
 ### Fixed
