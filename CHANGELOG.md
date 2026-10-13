@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **UI: a community set by file or credential showed a blank name on the read-only SNMP tab** (`switch-configurator-ui` 0.7.1): found by driving the real UI in Firefox. The edit page already labelled such rows `from file <path>` / `from credential <name>` (never the secret); the SNMP tab of the switch detail page read only `name`, so those rows were empty. It now shows the same labels.
+
 ### Changed
 - **Lab evidence for SNMP on Aruba and Cisco, and why they stay refused** (`switch-configurator` 0.23.1): gates run on the lab ArubaOS-Switch 2530-48G (YA.16.10) and Cisco Catalyst 9300 (IOS-XE 16.9) are written up in `docs/learnings/snmp-aruba-cisco.md`: Aruba answers SNMP only on its management VLAN, restricts managers switch-wide (not per community) with `ip authorized-managers` (removal syntax: no mask), and has a populated Q-BRIDGE FDB with VLANs; Cisco needs `community@vlan` walks per VLAN for the MAC table and has a populated power table. `snmp.reads` / `allowed_hosts` on these vendors keep their validation error, which now points at that page, together with the open product questions (switch-wide restriction semantics, an unrestricted read community, and where SNMP actually beats SSH).
 

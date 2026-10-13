@@ -243,7 +243,13 @@ fn parse_switch_view(id: &str, json: &serde_json::Value) -> SwitchView {
                 .map(|a| {
                     a.iter()
                         .map(|c| SnmpCommunityView {
-                            name: c["name"].as_str().unwrap_or("").to_string(),
+                            name: if let Some(file) = c["name_file"].as_str() {
+                                format!("from file {}", file)
+                            } else if let Some(credential) = c["name_credential"].as_str() {
+                                format!("from credential {}", credential)
+                            } else {
+                                c["name"].as_str().unwrap_or("").to_string()
+                            },
                             access_display: c["access"].as_str().unwrap_or("").to_string(),
                         })
                         .collect()
@@ -375,6 +381,23 @@ switches:
         mac_notify: false
         speed_duplex: auto
 "#;
+
+    #[test]
+    fn test_snmp_view_labels_referenced_communities_without_leaking_the_secret() {
+        let json = serde_json::json!({
+            "snmp": {"communities": [
+                {"name": "inline-name", "access": "operator"},
+                {"name_file": "/run/secrets/snmp-ro", "access": "operator"},
+                {"name_credential": "snmp-ro", "access": "manager"},
+            ]}
+        });
+        let view = parse_switch_view("sw", &json);
+        let names: Vec<_> = view.snmp.unwrap().communities.into_iter().map(|c| c.name).collect();
+        assert_eq!(
+            names,
+            ["inline-name", "from file /run/secrets/snmp-ro", "from credential snmp-ro"]
+        );
+    }
 
     #[test]
     fn test_parse_switch_view_from_yaml_extracts_declared_switch() {
