@@ -100,9 +100,15 @@ echo "UI is up on port $UI_PORT"
 
 echo "=== Running Playwright E2E tests (Firefox headless) ==="
 cd "$SCRIPT_DIR"
-export PLAYWRIGHT_BROWSERS_PATH=$(nix build nixpkgs#playwright-driver.browsers --no-link --print-out-paths 2>/dev/null)
+# Runner and browsers come from the same nixpkgs revision so their versions match
+# (the npm "latest" runner expects browser builds nixpkgs does not ship).
+PLAYWRIGHT_TEST=$(nix build nixpkgs#playwright-test --no-link --print-out-paths)
+export PLAYWRIGHT_BROWSERS_PATH=$(nix build nixpkgs#playwright-driver.browsers --no-link --print-out-paths)
 export UI_URL="http://127.0.0.1:$UI_PORT"
-npx @playwright/test@latest test --config=playwright.config.mjs
+# The spec is ESM, which ignores NODE_PATH; node_modules (git-ignored) must point at the runner's package set.
+ln -sfn "$PLAYWRIGHT_TEST/lib/node_modules" node_modules
+set +e
+"$PLAYWRIGHT_TEST/bin/playwright" test --config=playwright.config.mjs
 EXIT_CODE=$?
 
 rm -f "$TMPCONFIG"
