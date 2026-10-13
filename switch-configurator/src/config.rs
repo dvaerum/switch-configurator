@@ -428,6 +428,8 @@ pub struct ConfigStore {
     /// `handlers::get_mac_table`'s doc comment for the caching policy
     /// (default max-age, `?fresh=true` bypass).
     pub mac_table_cache: Arc<RwLock<std::collections::HashMap<String, CachedMacTable>>>,
+    /// Open vendor sessions kept between operations (see `session_pool`).
+    pub session_pool: crate::session_pool::SessionPool,
 }
 
 impl ConfigStore {
@@ -441,6 +443,7 @@ impl ConfigStore {
             events: Arc::new(tx),
             validation_failures: Arc::new(RwLock::new(Vec::new())),
             mac_table_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            session_pool: crate::session_pool::SessionPool::with_vendor_sessions(),
         }
     }
 

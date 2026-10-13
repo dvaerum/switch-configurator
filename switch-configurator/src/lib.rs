@@ -3,6 +3,7 @@ pub mod api;
 pub mod config;
 pub mod diff;
 pub mod models;
+pub mod session_pool;
 pub mod ssh;
 pub mod status;
 pub mod validation;

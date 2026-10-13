@@ -927,6 +927,10 @@ impl SwitchVendor for CiscoSwitch {
         preview
     }
 
+    async fn get_mac_table(&mut self) -> Result<(Vec<MacTableEntry>, String), VendorError> {
+        CiscoSwitch::get_mac_table(self).await
+    }
+
     async fn execute_raw_commands(&mut self, commands: &[String]) -> Result<Vec<String>, VendorError> {
         let client = self.client.as_mut()
             .ok_or_else(|| VendorError::SshError("Not connected".to_string()))?;

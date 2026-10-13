@@ -919,6 +919,32 @@ impl SwitchVendor for FortiswitchSwitch {
         Ok(())
     }
 
+    fn supports_session_reuse(&self) -> bool {
+        true
+    }
+
+    async fn resume_session(&mut self) -> Result<(), VendorError> {
+        let client = self
+            .client
+            .as_mut()
+            .ok_or_else(|| VendorError::SshError("no open session to resume".to_string()))?;
+        client.probe().await.map_err(|e| VendorError::SshError(e.to_string()))?;
+        // The last operation may have left the CLI inside a `config` block.
+        client
+            .execute_command("end")
+            .await
+            .map_err(|e| VendorError::SshError(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn get_mac_table(&mut self) -> Result<(Vec<MacTableEntry>, String), VendorError> {
+        FortiswitchSwitch::get_mac_table(self).await
+    }
+
+    async fn get_port_status(&mut self) -> Result<(Vec<PortStatusEntry>, String), VendorError> {
+        FortiswitchSwitch::get_port_status(self).await
+    }
+
     async fn disconnect(&mut self) -> Result<(), VendorError> {
         if let Some(mut client) = self.client.take() {
             client
@@ -4775,5 +4801,47 @@ mod tests {
             let written = switch.convert_trap_type_to_fortiswitch(&trap);
             assert_eq!(FortiswitchSwitch::parse_trap_type_from_fortiswitch(&written), Some(trap));
         }
+    }
+
+    // ---- session reuse (resume_session) against a fake console ----
+
+    use crate::ssh::fake_console::{FakeConsole, Mode};
+
+    #[test]
+    fn fortiswitch_opts_in_to_session_reuse() {
+        assert!(create_test_switch().supports_session_reuse());
+    }
+
+    #[tokio::test]
+    async fn resume_session_resets_cli_context_on_a_live_console() {
+        let (client, console) = FakeConsole::spawn(Mode::LoggedIn);
+        let mut switch = create_test_switch();
+        switch.client = Some(ConnectionClient::Serial(client));
+
+        switch.resume_session().await.expect("live session resumes");
+
+        assert_eq!(
+            console.commands(),
+            vec!["end".to_string()],
+            "must leave any config block and send nothing else"
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_session_fails_on_an_expired_session_so_the_pool_reopens() {
+        let (client, console) = FakeConsole::spawn(Mode::LoggedIn);
+        let mut switch = create_test_switch();
+        switch.client = Some(ConnectionClient::Serial(client));
+        switch.resume_session().await.expect("fresh session resumes");
+
+        // The switch's idle timeout logs the console out between operations.
+        console.set_mode(Mode::Terminated);
+        assert!(switch.resume_session().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn resume_session_fails_without_an_open_session() {
+        let mut switch = create_test_switch();
+        assert!(switch.resume_session().await.is_err());
     }
 }

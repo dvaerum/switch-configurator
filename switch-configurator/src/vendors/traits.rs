@@ -1,4 +1,6 @@
-use crate::models::{ConfigResult, Port, PortMirror, StateDiff, SwitchModel, SwitchState, Vlan};
+use crate::models::{
+    ConfigResult, MacTableEntry, Port, PortMirror, PortStatusEntry, StateDiff, SwitchModel, SwitchState, Vlan,
+};
 use crate::validation::{ValidationConfig, ValidationResult, RollbackMethod};
 use async_trait::async_trait;
 use thiserror::Error;
@@ -87,6 +89,31 @@ pub trait SwitchVendor: Send + Sync {
     /// (e.g., hardware model mismatch, deprecated features, etc.)
     fn get_warnings(&self) -> Vec<String> {
         Vec::new()
+    }
+
+    /// Whether an open session may be kept between operations (see
+    /// `crate::session_pool`). Off by default: a kept-open session holds the
+    /// switch's exclusive console, so only vendors that can verify and reset
+    /// a stale session via `resume_session` opt in.
+    fn supports_session_reuse(&self) -> bool {
+        false
+    }
+
+    /// Verify a previously opened session is still usable and bring it back
+    /// to a clean prompt. `Err` means "don't reuse": the caller drops this
+    /// session and opens a fresh one.
+    async fn resume_session(&mut self) -> Result<(), VendorError> {
+        Err(VendorError::UnsupportedFeature("session reuse".to_string()))
+    }
+
+    /// Learned MAC-address table: parsed entries plus the raw command output.
+    async fn get_mac_table(&mut self) -> Result<(Vec<MacTableEntry>, String), VendorError> {
+        Err(VendorError::UnsupportedFeature("MAC table lookup".to_string()))
+    }
+
+    /// Live per-port operational status: parsed entries plus the raw output.
+    async fn get_port_status(&mut self) -> Result<(Vec<PortStatusEntry>, String), VendorError> {
+        Err(VendorError::UnsupportedFeature("port status lookup".to_string()))
     }
 }
 

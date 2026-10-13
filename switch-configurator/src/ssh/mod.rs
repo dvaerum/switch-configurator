@@ -1,6 +1,8 @@
 pub mod client;
 pub mod connection;
 pub mod serial;
+#[cfg(test)]
+pub(crate) mod fake_console;
 pub mod jump_host;
 pub mod jump_host_parser;
 pub mod jump_chain;

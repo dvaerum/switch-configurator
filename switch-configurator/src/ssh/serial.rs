@@ -30,6 +30,15 @@ impl SerialClient {
         }
     }
 
+    /// A client already attached to `port`, for driving the real login and
+    /// command code against `ssh::fake_console` without hardware.
+    #[cfg(test)]
+    pub(crate) fn from_stream(device: String, port: tokio_serial::SerialStream) -> Self {
+        let mut client = Self::new(device, 115200);
+        client.port = Some(port);
+        client
+    }
+
     /// Enable debug mode (prompts before each command)
     pub fn with_debug_mode(mut self, enabled: bool) -> Self {
         self.debug_mode = enabled;
@@ -641,6 +650,34 @@ impl SerialClient {
         }
 
         debug!("Serial connectivity verified - device is responding");
+        Ok(())
+    }
+
+    /// Strict liveness check for a session kept open between operations
+    /// (`session_pool`): only a visible command prompt passes. Unlike
+    /// `verify_connectivity` (login-time, tolerant, only warns when no prompt
+    /// shows) this fails on a login prompt, an expired session or silence,
+    /// because reusing a dead session would send commands into a login
+    /// prompt. Sends only a newline, never a command.
+    pub async fn probe_session(&mut self) -> Result<()> {
+        self.clear_buffer().await?;
+        self.send_raw("\r").await?;
+        let response = self.check_current_state(Duration::from_secs(3)).await?;
+        let clean = regex::Regex::new(r"\x1b\[[0-9;?]*[A-Za-z]")
+            .unwrap()
+            .replace_all(&response, "")
+            .into_owned();
+
+        if clean.contains("login:")
+            || clean.contains("Username:")
+            || clean.contains("Password:")
+            || clean.contains("Session Terminated")
+        {
+            anyhow::bail!("Serial session expired: console is at a login prompt");
+        }
+        if !clean.contains('#') && !clean.contains('>') {
+            anyhow::bail!("Serial console is not showing a command prompt");
+        }
         Ok(())
     }
 
