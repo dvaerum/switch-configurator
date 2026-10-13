@@ -269,15 +269,19 @@ test.describe('Edit Ports CRUD', () => {
     await page.locator('a:has-text("Ports")').click();
     await expect(page).toHaveURL(/\/edit\/ports/);
 
-    // Should have vlan input, tagged_vlans, description input, checkboxes, speed select (no mode dropdown)
-    await expect(page.locator('input[name="vlan"]').first()).toBeVisible();
-    await expect(page.locator('input[name="description"]').first()).toBeVisible();
-    await expect(page.locator('input[name="enabled"]').first()).toBeVisible();
-    await expect(page.locator('select[name="speed_duplex"]').first()).toBeVisible();
+    // Rows: VLAN/tagged selects, description input, enabled + PoE checkboxes, speed select
+    await expect(page.locator('select[name^="vlan."]').first()).toBeVisible();
+    await expect(page.locator('select[name^="tagged_vlans."]').first()).toBeVisible();
+    await expect(page.locator('input[name^="description."]').first()).toBeVisible();
+    await expect(page.locator('input[name^="enabled."]').first()).toBeVisible();
+    await expect(page.locator('input[name^="poe_enabled."]').first()).toBeVisible();
+    await expect(page.locator('select[name^="speed_duplex."]').first()).toBeVisible();
+    await expect(page.locator('button:has-text("Save All Ports")')).toBeVisible();
 
-    // Should have add row in tfoot
-    await expect(page.locator('tfoot input[name="port_id"]')).toBeVisible();
-    await expect(page.locator('tfoot button:has-text("+ Add")')).toBeVisible();
+    // Separate "Add Port" form below the table
+    const addForm = page.locator('form[action$="/port/add"]');
+    await expect(addForm.locator('input[name="port_id"]')).toBeVisible();
+    await expect(addForm.locator('button:has-text("+ Add Port")')).toBeVisible();
 
     await page.locator('a:has-text("Discard")').click();
   });
@@ -286,17 +290,20 @@ test.describe('Edit Ports CRUD', () => {
     await page.goto(`${UI_URL}/switch/demo-sw-01`);
     await page.locator('button:has-text("Edit")').click();
     await page.locator('a:has-text("Ports")').click();
+    // count() does not auto-wait: without this it can read the previous page's single row
+    await expect(page).toHaveURL(/\/edit\/ports/);
 
     const initialRows = await page.locator('tbody tr').count();
 
     // Fill add form
-    await page.locator('tfoot input[name="port_id"]').fill('99');
-    await page.locator('tfoot input[name="vlan"]').fill('10');
-    await page.locator('tfoot input[name="description"]').fill('Test port');
-    await page.locator('tfoot button:has-text("+ Add")').click();
+    const addForm = page.locator('form[action$="/port/add"]');
+    await addForm.locator('input[name="port_id"]').fill('99');
+    await addForm.locator('select[name="vlan"]').selectOption('10');
+    await addForm.locator('input[name="description"]').fill('Test port');
+    await addForm.locator('button:has-text("+ Add Port")').click();
 
     await expect(page.locator('tbody tr')).toHaveCount(initialRows + 1);
-    await expect(page.locator('input[name="description"][value="Test port"]')).toHaveCount(1);
+    await expect(page.locator('input[name^="description."][value="Test port"]')).toHaveCount(1);
 
     // Remove it
     await page.locator('a[href*="/port/99/remove"]').click();
