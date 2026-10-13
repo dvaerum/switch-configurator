@@ -6,6 +6,7 @@ mod models;
 mod redact;
 mod secrets;
 mod session_pool;
+mod snmp;
 mod snmp_reads;
 mod ssh;
 mod status;

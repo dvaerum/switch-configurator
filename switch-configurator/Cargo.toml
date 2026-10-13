@@ -1,6 +1,6 @@
 [package]
 name = "switch-configurator"
-version = "0.22.0"
+version = "0.23.0"
 edition = "2024"
 rust-version = "1.85"
 
@@ -64,6 +64,8 @@ dirs = "5.0"
 
 # SSE streaming
 tokio-stream = { version = "0.1", features = ["sync"] }
+# SNMPv2c reads (no v3 crypto backend yet; add `crypto-rustcrypto` for v3)
+async-snmp = { version = "0.18.1", default-features = false }
 futures-core = "0.3"
 
 # Unix socket serving
@@ -71,6 +73,7 @@ hyper = { version = "1.6", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 
 [dev-dependencies]
+async-snmp = { version = "0.18.1", default-features = false, features = ["agent"] }
 tokio-test = "0.4"
 mockall = "0.13"
 tempfile = "3.13"

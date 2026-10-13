@@ -70,6 +70,13 @@ pub struct Settings {
     /// When true, ports not in config will be reset to default state (disabled, VLAN 1)
     #[serde(default = "default_false")]
     pub enforce_port_config: bool,
+    /// UDP port of the switch's SNMP agent (the service's own SNMP reads).
+    #[serde(default = "default_snmp_port")]
+    pub snmp_port: u16,
+}
+
+fn default_snmp_port() -> u16 {
+    161
 }
 
 fn default_timeout() -> u64 {
@@ -89,6 +96,7 @@ impl Default for Settings {
         Self {
             ssh_timeout_secs: default_timeout(),
             max_retries: default_retry(),
+            snmp_port: default_snmp_port(),
             enforce_port_config: default_false(),
         }
     }
@@ -1014,11 +1022,9 @@ fn merge_single_switch(
     }
 
     // Merge Settings (replace entire object, highest priority wins)
-    for config in &configs {
-        let switch = &config.config.switches[0];
-        // Settings always has a value (uses Default), so take from highest priority
-        merged.settings = switch.settings.clone();
-        break;
+    // Settings always has a value (uses Default), so take from highest priority
+    if let Some(config) = configs.first() {
+        merged.settings = config.config.switches[0].settings.clone();
     }
 
     // Credentials already merged above as optional field

@@ -3705,7 +3705,7 @@ mod integration_tests {
         let response = get_mac_table(
             axum::extract::State(store),
             axum::extract::Path("nonexistent".to_string()),
-            axum::extract::Query(MacTableQuery { fresh: false, max_age_seconds: None }),
+            axum::extract::Query(MacTableQuery { fresh: false, max_age_seconds: None, source: DataSource::Auto }),
             None,
         )
         .await
@@ -3726,7 +3726,7 @@ mod integration_tests {
             get_mac_table(
                 axum::extract::State(store_req),
                 axum::extract::Path("test-sw-01".to_string()),
-                axum::extract::Query(MacTableQuery { fresh: false, max_age_seconds: None }),
+                axum::extract::Query(MacTableQuery { fresh: false, max_age_seconds: None, source: DataSource::Auto }),
                 None,
             )
             .await
@@ -3788,7 +3788,7 @@ mod integration_tests {
         let response = get_mac_table(
             axum::extract::State(store.clone()),
             axum::extract::Path("test-sw-01".to_string()),
-            axum::extract::Query(MacTableQuery { fresh: false, max_age_seconds: None }),
+            axum::extract::Query(MacTableQuery { fresh: false, max_age_seconds: None, source: DataSource::Auto }),
             None,
         )
         .await
@@ -3828,7 +3828,7 @@ mod integration_tests {
         let response = get_mac_table(
             axum::extract::State(store.clone()),
             axum::extract::Path("test-sw-01".to_string()),
-            axum::extract::Query(MacTableQuery { fresh: false, max_age_seconds: None }),
+            axum::extract::Query(MacTableQuery { fresh: false, max_age_seconds: None, source: DataSource::Auto }),
             Some(axum_extra::TypedHeader(if_none_match)),
         )
         .await
@@ -3861,7 +3861,7 @@ mod integration_tests {
         let response = get_mac_table(
             axum::extract::State(store.clone()),
             axum::extract::Path("test-sw-01".to_string()),
-            axum::extract::Query(MacTableQuery { fresh: false, max_age_seconds: None }),
+            axum::extract::Query(MacTableQuery { fresh: false, max_age_seconds: None, source: DataSource::Auto }),
             Some(axum_extra::TypedHeader(if_none_match)),
         )
         .await
@@ -3897,7 +3897,7 @@ mod integration_tests {
         let response = get_port_status(
             axum::extract::State(store),
             axum::extract::Path("nonexistent".to_string()),
-            axum::extract::Query(PortStatusQuery { fresh: false, max_age_seconds: None }),
+            axum::extract::Query(PortStatusQuery { fresh: false, max_age_seconds: None, source: DataSource::Auto }),
             None,
         )
         .await
@@ -3912,7 +3912,7 @@ mod integration_tests {
         let response = get_port_status(
             axum::extract::State(store),
             axum::extract::Path("test-sw-01".to_string()),
-            axum::extract::Query(PortStatusQuery { fresh: false, max_age_seconds: None }),
+            axum::extract::Query(PortStatusQuery { fresh: false, max_age_seconds: None, source: DataSource::Auto }),
             None,
         )
         .await
@@ -3936,7 +3936,7 @@ mod integration_tests {
             get_port_status(
                 axum::extract::State(store_req),
                 axum::extract::Path("test-sw-forti".to_string()),
-                axum::extract::Query(PortStatusQuery { fresh: false, max_age_seconds: None }),
+                axum::extract::Query(PortStatusQuery { fresh: false, max_age_seconds: None, source: DataSource::Auto }),
                 None,
             )
             .await
@@ -4016,7 +4016,7 @@ mod integration_tests {
         // A cache hit never touches the switch, so a busy switch must not matter.
         store.status.set_currently_configuring("test-sw-forti".to_string()).await;
 
-        let response = port_status_call(&store, PortStatusQuery { fresh: false, max_age_seconds: None }, None).await;
+        let response = port_status_call(&store, PortStatusQuery { fresh: false, max_age_seconds: None, source: DataSource::Auto }, None).await;
         assert_eq!(response.status(), StatusCode::OK);
         assert!(response.headers().contains_key(axum::http::header::ETAG));
         assert!(response.headers().contains_key(axum::http::header::AGE));
@@ -4040,7 +4040,7 @@ mod integration_tests {
 
         let if_none_match: axum_extra::headers::IfNoneMatch =
             format!("\"{}\"", generation_id).parse::<axum_extra::headers::ETag>().unwrap().into();
-        let response = port_status_call(&store, PortStatusQuery { fresh: false, max_age_seconds: None }, Some(if_none_match)).await;
+        let response = port_status_call(&store, PortStatusQuery { fresh: false, max_age_seconds: None, source: DataSource::Auto }, Some(if_none_match)).await;
 
         assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
         assert!(response.headers().contains_key(axum::http::header::ETAG));
@@ -4060,8 +4060,8 @@ mod integration_tests {
         // max_age 0 = always stale, ?fresh=true = explicit bypass: both must
         // try the switch (unreachable here, so 500) instead of serving the cache.
         for query in [
-            PortStatusQuery { fresh: false, max_age_seconds: Some(0) },
-            PortStatusQuery { fresh: true, max_age_seconds: None },
+            PortStatusQuery { fresh: false, max_age_seconds: Some(0), source: DataSource::Auto },
+            PortStatusQuery { fresh: true, max_age_seconds: None, source: DataSource::Auto },
         ] {
             let response = port_status_call(&store, query, None).await;
             assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
@@ -4075,7 +4075,7 @@ mod integration_tests {
 
         let store_req = store.clone();
         let request = tokio::spawn(async move {
-            port_status_call(&store_req, PortStatusQuery { fresh: false, max_age_seconds: None }, None).await
+            port_status_call(&store_req, PortStatusQuery { fresh: false, max_age_seconds: None, source: DataSource::Auto }, None).await
         });
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         assert!(!request.is_finished(), "request must wait while the switch is busy");
@@ -4262,5 +4262,198 @@ mod integration_tests {
         let text = String::from_utf8(axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap().to_vec()).unwrap();
         assert!(text.contains("communities_to_remove"), "expected the community removal in the diff: {text}");
         assert!(!text.contains("preview-secret-12"), "preview-diff leaked a registered secret: {text}");
+    }
+
+    // ---- ?source=snmp|console|auto ----
+
+    use crate::models::{SnmpAccess, SnmpCommunity, SnmpConfig, SnmpReads, SnmpReadsMode};
+    use crate::snmp::testing::{agent_serving, lab_agent_rows};
+
+    /// The FortiSwitch test store with `snmp.reads` pointing at `snmp_port` on
+    /// 127.0.0.1 and a pool whose console sessions are counted mock vendors.
+    async fn forti_store_with_snmp(snmp_port: u16, mode: SnmpReadsMode) -> (ConfigStore, std::sync::Arc<LookupOpener>) {
+        let mut store = create_fortiswitch_test_store();
+        {
+            let mut config = store.config.write().await;
+            let switch = &mut config.switches[0];
+            switch.management_ip = Some("127.0.0.1".to_string());
+            switch.settings.snmp_port = snmp_port;
+            switch.snmp = Some(SnmpConfig {
+                communities: vec![],
+                trap_receivers: vec![],
+                enabled_traps: vec![],
+                reads: Some(SnmpReads {
+                    mode,
+                    community: Some(SnmpCommunity::new("public", SnmpAccess::Operator)),
+                }),
+            });
+        }
+        let opener = lookup_opener();
+        store.session_pool = crate::session_pool::SessionPool::new(opener.clone(), std::time::Duration::from_secs(30));
+        (store, opener)
+    }
+
+    async fn port_status_with(store: &ConfigStore, source: DataSource) -> (StatusCode, axum::http::HeaderMap, Value) {
+        let response = get_port_status(
+            axum::extract::State(store.clone()),
+            axum::extract::Path("test-sw-forti".to_string()),
+            axum::extract::Query(PortStatusQuery { fresh: true, max_age_seconds: None, source }),
+            None,
+        )
+        .await
+        .into_response();
+        let (parts, body) = response.into_parts();
+        let bytes = axum::body::to_bytes(body, usize::MAX).await.unwrap();
+        (parts.status, parts.headers, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    }
+
+    fn header<'a>(headers: &'a axum::http::HeaderMap, name: &str) -> Option<&'a str> {
+        headers.get(name).and_then(|v| v.to_str().ok())
+    }
+
+    /// A UDP port nothing answers on (the socket is kept alive by the caller).
+    async fn silent_port() -> (u16, tokio::net::UdpSocket) {
+        let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        (socket.local_addr().unwrap().port(), socket)
+    }
+
+    #[tokio::test]
+    async fn auto_reads_port_status_over_snmp_without_touching_the_console() {
+        use std::sync::atomic::Ordering;
+        let (addr, _agent) = agent_serving(lab_agent_rows()).await;
+        let (store, opener) = forti_store_with_snmp(addr.port(), SnmpReadsMode::Auto).await;
+
+        let (status, headers, body) = port_status_with(&store, DataSource::Auto).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(header(&headers, "x-data-source"), Some("snmp"));
+        assert_eq!(body["entries"].as_array().unwrap().len(), 11);
+        assert_eq!(opener.opens.load(Ordering::SeqCst), 0, "SNMP needs no console session");
+        assert_eq!(store.port_status_cache.read().await["test-sw-forti"].entries.len(), 11, "the answer is cached");
+    }
+
+    #[tokio::test]
+    async fn auto_falls_back_to_the_console_when_snmp_does_not_answer_and_says_so() {
+        use std::sync::atomic::Ordering;
+        let (port, _silent) = silent_port().await;
+        let (store, opener) = forti_store_with_snmp(port, SnmpReadsMode::Auto).await;
+
+        let (status, headers, body) = port_status_with(&store, DataSource::Auto).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(header(&headers, "x-data-source"), Some("console"));
+        assert!(header(&headers, "x-data-source-fallback").is_some(), "the fallback must be visible: {headers:?}");
+        assert_eq!(body["raw_output"], "raw port status");
+        assert_eq!(opener.port_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn source_console_skips_snmp_even_when_it_is_enabled() {
+        use std::sync::atomic::Ordering;
+        let (addr, _agent) = agent_serving(lab_agent_rows()).await;
+        let (store, opener) = forti_store_with_snmp(addr.port(), SnmpReadsMode::Auto).await;
+
+        let (status, headers, _) = port_status_with(&store, DataSource::Console).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(header(&headers, "x-data-source"), Some("console"));
+        assert!(header(&headers, "x-data-source-fallback").is_none(), "nothing fell back");
+        assert_eq!(opener.port_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn auto_with_reads_off_uses_the_console_without_a_fallback_note() {
+        let (addr, _agent) = agent_serving(lab_agent_rows()).await;
+        let (store, _opener) = forti_store_with_snmp(addr.port(), SnmpReadsMode::Off).await;
+
+        let (status, headers, _) = port_status_with(&store, DataSource::Auto).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(header(&headers, "x-data-source"), Some("console"));
+        assert!(header(&headers, "x-data-source-fallback").is_none());
+    }
+
+    #[tokio::test]
+    async fn source_snmp_without_reads_enabled_is_a_clear_client_error() {
+        let (addr, _agent) = agent_serving(lab_agent_rows()).await;
+        let (store, _opener) = forti_store_with_snmp(addr.port(), SnmpReadsMode::Off).await;
+
+        let (status, _, body) = port_status_with(&store, DataSource::Snmp).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body["error"].as_str().unwrap().contains("snmp.reads"), "unhelpful error: {body}");
+    }
+
+    #[tokio::test]
+    async fn source_snmp_that_fails_is_an_error_not_a_silent_console_fallback() {
+        use std::sync::atomic::Ordering;
+        let (port, _silent) = silent_port().await;
+        let (store, opener) = forti_store_with_snmp(port, SnmpReadsMode::Auto).await;
+
+        let (status, _, body) = port_status_with(&store, DataSource::Snmp).await;
+
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert!(body["error"].is_string());
+        assert_eq!(opener.port_calls.load(Ordering::SeqCst), 0, "no fallback when SNMP was demanded");
+    }
+
+    #[tokio::test]
+    async fn the_refresher_reads_port_status_over_snmp_and_only_the_mac_table_over_the_console() {
+        use std::sync::atomic::Ordering;
+        let (addr, _agent) = agent_serving(lab_agent_rows()).await;
+        let (store, opener) = forti_store_with_snmp(addr.port(), SnmpReadsMode::Auto).await;
+
+        refresh_all_lookups_once(&store).await;
+
+        assert_eq!(store.port_status_cache.read().await["test-sw-forti"].entries.len(), 11);
+        assert_eq!(opener.port_calls.load(Ordering::SeqCst), 0, "port status did not use the console");
+        assert_eq!(opener.mac_calls.load(Ordering::SeqCst), 1, "the mac-table still does (it needs VLANs)");
+    }
+
+    #[tokio::test]
+    async fn the_refresher_falls_back_to_the_console_for_port_status_when_snmp_fails() {
+        use std::sync::atomic::Ordering;
+        let (port, _silent) = silent_port().await;
+        let (store, opener) = forti_store_with_snmp(port, SnmpReadsMode::Auto).await;
+
+        refresh_all_lookups_once(&store).await;
+
+        assert_eq!(opener.port_calls.load(Ordering::SeqCst), 1);
+        assert!(store.port_status_cache.read().await.contains_key("test-sw-forti"));
+    }
+
+    async fn mac_table_with(store: &ConfigStore, source: DataSource) -> (StatusCode, axum::http::HeaderMap, Value) {
+        let response = get_mac_table(
+            axum::extract::State(store.clone()),
+            axum::extract::Path("test-sw-forti".to_string()),
+            axum::extract::Query(MacTableQuery { fresh: true, max_age_seconds: None, source }),
+            None,
+        )
+        .await
+        .into_response();
+        let (parts, body) = response.into_parts();
+        let bytes = axum::body::to_bytes(body, usize::MAX).await.unwrap();
+        (parts.status, parts.headers, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    }
+
+    #[tokio::test]
+    async fn the_mac_table_over_snmp_is_explicit_only_and_has_no_vlan() {
+        use std::sync::atomic::Ordering;
+        let (addr, _agent) = agent_serving(lab_agent_rows()).await;
+        let (store, opener) = forti_store_with_snmp(addr.port(), SnmpReadsMode::Auto).await;
+
+        let (status, headers, body) = mac_table_with(&store, DataSource::Snmp).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(header(&headers, "x-data-source"), Some("snmp"));
+        assert_eq!(body["entries"].as_array().unwrap().len(), 3);
+        assert!(body["entries"][0]["vlan_id"].is_null());
+        assert_eq!(opener.mac_calls.load(Ordering::SeqCst), 0);
+        assert!(!store.mac_table_cache.read().await.contains_key("test-sw-forti"), "VLAN-less data must not be cached for auto callers");
+
+        // `auto` keeps using the console: only it can say which VLAN a MAC is on.
+        let (status, headers, _) = mac_table_with(&store, DataSource::Auto).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(header(&headers, "x-data-source"), Some("console"));
+        assert_eq!(opener.mac_calls.load(Ordering::SeqCst), 1);
     }
 }

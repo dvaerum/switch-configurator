@@ -648,6 +648,8 @@ Query live per-port operational status (link/speed/duplex/PoE) — distinct from
 - `fresh=true`: skip the cache and fetch live
 - `max_age_seconds=N`: treat a cached result older than N seconds as stale (default 60)
 
+**Data source (`?source=`):** `auto` (default), `snmp` or `console`. With `snmp.reads` switched on for the switch, `auto` reads over SNMP (about 0.1s, no console session, no queue turn) and falls back to the console if the switch doesn't answer; `console` never uses SNMP; `snmp` never falls back (`400` if reads aren't enabled for the switch, `502` if it doesn't answer). A live (uncached) answer carries `x-data-source: snmp|console`, and a fallback adds `x-data-source-fallback: snmp-unavailable` (details are in the service log). Over SNMP the `poe_status` field is filled in (`searching`, `delivering`, `disabled`, `fault`, ...); the console path doesn't report it.
+
 **Caching:** same contract as the mac-table lookup (see [`docs/decisions/0001-cached-api-response-contract.md`](../decisions/0001-cached-api-response-contract.md)): `ETag`, `Age`, `Cache-Control: max-age`, `Last-Modified`, and `304 Not Modified` for a matching `If-None-Match`. The background refresher fetches this together with the mac-table in one session every 60s, so a normal request is answered from the cache in about a millisecond.
 
 **Response:**
@@ -1038,7 +1040,9 @@ curl -X DELETE http://localhost:4002/switches/old-switch-01/desired-config
 All endpoints return appropriate HTTP status codes:
 
 - `200 OK` - Request successful
-- `404 NOT FOUND` - Resource not found (switch not in configuration)
+- `404 NOT FOUND` - Resource not found (switch not in configurat**Data source (`?source=`):** `console` is what `auto` uses for the MAC table, because only the console knows which VLAN a MAC is on. `?source=snmp` (needs `snmp.reads`) answers in about a second instead of ten, with the same MACs and ports but `vlan_id: null`; those answers are not cached, so they never reach callers that need the VLAN. Live answers carry an `x-data-source` header.
+
+ion)
 - `500 INTERNAL SERVER ERROR` - Server error (connection failure, configuration error, etc.)
 
 Error responses include a JSON body with an `error` field describing the issue:

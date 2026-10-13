@@ -1835,9 +1835,50 @@ async fn poe_set_impl(
 /// else) on the immediately preceding cycle.
 pub(crate) const MAC_TABLE_CACHE_DEFAULT_MAX_AGE_SECS: i64 = 60;
 
+/// Which path a lookup should read from (`?source=`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DataSource {
+    /// SNMP when the service has read access (`snmp.reads`) and it works; the
+    /// console otherwise (a fallback is reported, see `x-data-source-fallback`).
+    #[default]
+    Auto,
+    /// SNMP only: an error if it isn't enabled or doesn't answer.
+    Snmp,
+    /// The console only.
+    Console,
+}
+
+const DATA_SOURCE_HEADER: &str = "x-data-source";
+const DATA_SOURCE_FALLBACK_HEADER: &str = "x-data-source-fallback";
+
+/// Say which path produced a live (not cached) answer. A fallback gets a
+/// generic reason only: the details are in the log, and must not carry
+/// addresses or secrets to API callers.
+fn data_source_headers(headers: &mut axum::http::HeaderMap, source: &'static str, fell_back: bool) {
+    headers.insert(DATA_SOURCE_HEADER, axum::http::HeaderValue::from_static(source));
+    if fell_back {
+        headers.insert(DATA_SOURCE_FALLBACK_HEADER, axum::http::HeaderValue::from_static("snmp-unavailable"));
+    }
+}
+
+/// `?source=snmp` on a switch the service has no SNMP read access to.
+fn snmp_not_enabled_response() -> axum::response::Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({"error": "SNMP reads are not enabled for this switch: set snmp.reads (mode: auto) in its config"})),
+    )
+        .into_response()
+}
+
 /// Query parameters for `GET /switches/{id}/mac-table`.
 #[derive(Debug, Deserialize)]
 pub struct MacTableQuery {
+    /// Which path to read from; see `DataSource`. For the mac-table, `auto`
+    /// means the console: only it knows which VLAN a MAC is on.
+    #[serde(default)]
+    pub source: DataSource,
+
     /// Skip the cache and always fetch live from the switch.
     #[serde(default)]
     pub fresh: bool,
@@ -2026,6 +2067,9 @@ async fn fetch_port_status_live(
 /// `MacTableQuery`).
 #[derive(Debug, Deserialize)]
 pub struct PortStatusQuery {
+    /// Which path to read from; see `DataSource`.
+    #[serde(default)]
+    pub source: DataSource,
     /// Skip the cache and always fetch live from the switch.
     #[serde(default)]
     pub fresh: bool,
@@ -2198,9 +2242,32 @@ pub(crate) async fn refresh_all_lookups_once(store: &ConfigStore) {
             }
         };
 
-        // Port status only exists for FortiSwitch today; where it does, it is
+        // Port status only exists for FortiSwitch today. Over SNMP when the
+        // service can read that way (no console time at all); otherwise it is
         // fetched in the same session as the mac-table (one login, not two).
-        let with_port_status = switch_config.model().vendor() == Vendor::Fortiswitch;
+        let mut with_port_status = switch_config.model().vendor() == Vendor::Fortiswitch;
+        if with_port_status {
+            if let Some(target) = crate::snmp::lookup::target_for(&switch_config) {
+                let model = switch_config.model();
+                let poe = |name: &str| model.port_supports_poe(name.strip_prefix("port").unwrap_or(name));
+                match crate::snmp::lookup::fetch_port_status(&target, poe).await {
+                    Ok((entries, raw)) => {
+                        store.port_status_cache.write().await.insert(
+                            id.clone(),
+                            crate::config::CachedPortStatus {
+                                entries,
+                                raw_output: raw,
+                                fetched_at: chrono::Utc::now(),
+                                generation_id: uuid::Uuid::new_v4(),
+                            },
+                        );
+                        debug!("lookup refresher: refreshed port-status cache for '{}' over SNMP", id);
+                        with_port_status = false;
+                    }
+                    Err(e) => warn!("lookup refresher: SNMP port-status for '{}' failed, using the console: {:#}", id, e),
+                }
+            }
+        }
         match fetch_lookups_live(&store.session_pool, &switch_config, with_port_status).await {
             Err(e) => warn!("lookup refresher: failed to refresh '{}': {}", id, e),
             Ok(lookups) => {
@@ -2277,6 +2344,26 @@ pub async fn get_mac_table(
         query.max_age_seconds.unwrap_or(MAC_TABLE_CACHE_DEFAULT_MAX_AGE_SECS),
     );
 
+    // Explicit SNMP: needs no queue turn, and its VLAN-less answer is neither
+    // read from nor written to the cache that `auto`/console callers share.
+    if query.source == DataSource::Snmp {
+        let Some(target) = crate::snmp::lookup::target_for(&switch_config) else {
+            return snmp_not_enabled_response();
+        };
+        return match crate::snmp::lookup::fetch_mac_table(&target).await {
+            Ok((entries, raw)) => {
+                let mut headers = axum::http::HeaderMap::new();
+                data_source_headers(&mut headers, "snmp", false);
+                (StatusCode::OK, headers, Json(json!({"switch_id": id, "entries": entries, "raw_output": raw})))
+                    .into_response()
+            }
+            Err(e) => {
+                warn!("SNMP mac-table read failed for {}: {:#}", id, e);
+                (StatusCode::BAD_GATEWAY, Json(json!({"error": crate::secrets::scrub(&format!("{:#}", e))}))).into_response()
+            }
+        };
+    }
+
     if !query.fresh {
         if let Some(resp) = mac_table_cache_response(&store, &id, max_age, if_none_match.as_ref()).await {
             return resp;
@@ -2322,7 +2409,8 @@ pub async fn get_mac_table(
                     generation_id,
                 },
             );
-            let headers = cache_headers(fetched_at, max_age, generation_id);
+            let mut headers = cache_headers(fetched_at, max_age, generation_id);
+            data_source_headers(&mut headers, "console", false);
             (
                 StatusCode::OK,
                 headers,
@@ -2390,9 +2478,51 @@ pub async fn get_port_status(
         query.max_age_seconds.unwrap_or(MAC_TABLE_CACHE_DEFAULT_MAX_AGE_SECS),
     );
 
-    if !query.fresh {
+    // An explicit `?source=snmp` wants a live SNMP answer, not a cached one.
+    if !query.fresh && query.source != DataSource::Snmp {
         if let Some(resp) = port_status_cache_response(&store, &id, max_age, if_none_match.as_ref()).await {
             return resp;
+        }
+    }
+
+    // SNMP first (unless the console was asked for): it needs no queue turn
+    // and no console session.
+    let mut fell_back = false;
+    if query.source != DataSource::Console {
+        match crate::snmp::lookup::target_for(&switch_config) {
+            Some(target) => {
+                let model = switch_config.model();
+                let poe = |name: &str| model.port_supports_poe(name.strip_prefix("port").unwrap_or(name));
+                match crate::snmp::lookup::fetch_port_status(&target, poe).await {
+                    Ok((entries, raw)) => {
+                        let fetched_at = chrono::Utc::now();
+                        let generation_id = uuid::Uuid::new_v4();
+                        store.port_status_cache.write().await.insert(
+                            id.clone(),
+                            crate::config::CachedPortStatus {
+                                entries: entries.clone(),
+                                raw_output: raw.clone(),
+                                fetched_at,
+                                generation_id,
+                            },
+                        );
+                        let mut headers = cache_headers(fetched_at, max_age, generation_id);
+                        data_source_headers(&mut headers, "snmp", false);
+                        return (StatusCode::OK, headers, Json(json!({"switch_id": id, "entries": entries, "raw_output": raw})))
+                            .into_response();
+                    }
+                    Err(e) => {
+                        warn!("SNMP port-status read failed for {}: {:#}", id, e);
+                        if query.source == DataSource::Snmp {
+                            return (StatusCode::BAD_GATEWAY, Json(json!({"error": crate::secrets::scrub(&format!("{:#}", e))})))
+                                .into_response();
+                        }
+                        fell_back = true;
+                    }
+                }
+            }
+            None if query.source == DataSource::Snmp => return snmp_not_enabled_response(),
+            None => {}
         }
     }
 
@@ -2426,9 +2556,11 @@ pub async fn get_port_status(
                     generation_id,
                 },
             );
+            let mut headers = cache_headers(fetched_at, max_age, generation_id);
+            data_source_headers(&mut headers, "console", fell_back);
             (
                 StatusCode::OK,
-                cache_headers(fetched_at, max_age, generation_id),
+                headers,
                 Json(json!({
                     "switch_id": id,
                     "entries": entries,
