@@ -1819,7 +1819,7 @@ mod tests {
                 SnmpCommunity::new("public".to_string(), SnmpAccess::Operator),
             ],
             trap_receivers: vec![],
-            enabled_traps: vec![],
+            enabled_traps: vec![], reads: None,
         };
 
         let commands = cisco.generate_snmp_commands(&snmp_config);
@@ -1847,7 +1847,7 @@ mod tests {
             enabled_traps: vec![
                 TrapType::LinkChange,
                 TrapType::MacNotify,
-            ],
+            ], reads: None,
         };
 
         let commands = cisco.generate_snmp_commands(&snmp_config);

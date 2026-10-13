@@ -23,12 +23,26 @@ pub fn local_address_towards(target: &str) -> Result<IpAddr> {
 }
 
 /// Replace every `auto` in the switch's SNMP communities with the local
-/// address towards its management IP, as a plain network entry.
+/// address towards its management IP, as a plain network entry. The service's
+/// own read community (`snmp.reads`, when on) with no `allowed_hosts` at all
+/// is restricted to this host by default.
 pub fn resolve_auto_hosts(switch: &mut SwitchConfig) -> Result<()> {
-    let needs_resolution = switch
-        .snmp
-        .as_ref()
-        .is_some_and(|snmp| snmp.communities.iter().any(|c| c.allowed_hosts.contains(&AllowedHost::Auto)));
+    use crate::models::SnmpReadsMode;
+
+    let reads_default = |snmp: &crate::models::SnmpConfig| {
+        snmp.reads.as_ref().is_some_and(|r| {
+            r.mode == SnmpReadsMode::Auto && r.community.as_ref().is_some_and(|c| c.allowed_hosts.is_empty())
+        })
+    };
+    let needs_resolution = switch.snmp.as_ref().is_some_and(|snmp| {
+        snmp.communities.iter().any(|c| c.allowed_hosts.contains(&AllowedHost::Auto))
+            || snmp
+                .reads
+                .as_ref()
+                .and_then(|r| r.community.as_ref())
+                .is_some_and(|c| c.allowed_hosts.contains(&AllowedHost::Auto))
+            || reads_default(snmp)
+    });
     if !needs_resolution {
         return Ok(());
     }
@@ -40,12 +54,24 @@ pub fn resolve_auto_hosts(switch: &mut SwitchConfig) -> Result<()> {
             switch.id, management_ip
         )
     })?;
+    let here = AllowedHost::Network(local.to_string());
 
     if let Some(snmp) = switch.snmp.as_mut() {
+        let default_reads = reads_default(snmp);
         for community in &mut snmp.communities {
             for host in &mut community.allowed_hosts {
                 if *host == AllowedHost::Auto {
-                    *host = AllowedHost::Network(local.to_string());
+                    *host = here.clone();
+                }
+            }
+        }
+        if let Some(reads) = snmp.reads.as_mut().and_then(|r| r.community.as_mut()) {
+            if default_reads {
+                reads.allowed_hosts = vec![here.clone()];
+            }
+            for host in &mut reads.allowed_hosts {
+                if *host == AllowedHost::Auto {
+                    *host = here.clone();
                 }
             }
         }
@@ -63,6 +89,13 @@ pub fn check_vendor_support(switch: &SwitchConfig) -> Result<()> {
     let vendor = model.vendor();
     if vendor == crate::models::Vendor::Fortiswitch {
         return Ok(());
+    }
+    if crate::snmp_reads::reads_enabled(switch) {
+        bail!(
+            "switch '{}': snmp.reads is not supported for {:?} switches yet (FortiSwitch only)",
+            switch.id,
+            vendor
+        );
     }
     let restricted = switch
         .snmp
@@ -144,7 +177,7 @@ mod tests {
             vlans: vec![],
             ports: vec![],
             port_mirrors: vec![],
-            snmp: Some(SnmpConfig { communities, trap_receivers: vec![], enabled_traps: vec![] }),
+            snmp: Some(SnmpConfig { communities, trap_receivers: vec![], enabled_traps: vec![], reads: None }),
             validation: None,
             vendor_specific: std::collections::HashMap::new(),
             management_vlan: None,
@@ -258,5 +291,52 @@ mod tests {
         let mut overlay = switch("192.0.2.1", vec![community]);
         overlay.model = None;
         assert!(check_vendor_support(&overlay).is_ok());
+    }
+
+    fn reads_switch(model: SwitchModel, hosts: Vec<AllowedHost>) -> SwitchConfig {
+        let mut community = SnmpCommunity::new("svc", SnmpAccess::Operator);
+        community.allowed_hosts = hosts;
+        let mut sw = switch("127.0.0.1", vec![]);
+        sw.model = Some(model);
+        sw.snmp.as_mut().unwrap().reads = Some(crate::models::SnmpReads {
+            mode: crate::models::SnmpReadsMode::Auto,
+            community: Some(community),
+        });
+        sw
+    }
+
+    #[test]
+    fn the_reads_community_defaults_to_this_host_only() {
+        let mut sw = reads_switch(SwitchModel::Fortiswitch124F_FPOE, vec![]);
+        resolve_auto_hosts(&mut sw).unwrap();
+        let reads = sw.snmp.unwrap().reads.unwrap().community.unwrap();
+        assert_eq!(reads.allowed_hosts, vec![AllowedHost::Network("127.0.0.1".to_string())]);
+    }
+
+    #[test]
+    fn explicit_hosts_on_the_reads_community_are_kept_and_auto_is_resolved() {
+        let mut sw = reads_switch(
+            SwitchModel::Fortiswitch124F_FPOE,
+            vec![AllowedHost::Auto, AllowedHost::Network("192.0.2.0/24".to_string())],
+        );
+        resolve_auto_hosts(&mut sw).unwrap();
+        let hosts = sw.snmp.unwrap().reads.unwrap().community.unwrap().allowed_hosts;
+        assert_eq!(hosts, vec![AllowedHost::Network("127.0.0.1".to_string()), AllowedHost::Network("192.0.2.0/24".to_string())]);
+    }
+
+    #[test]
+    fn a_disabled_reads_block_gets_no_default_hosts() {
+        let mut sw = reads_switch(SwitchModel::Fortiswitch124F_FPOE, vec![]);
+        sw.snmp.as_mut().unwrap().reads.as_mut().unwrap().mode = crate::models::SnmpReadsMode::Off;
+        resolve_auto_hosts(&mut sw).unwrap();
+        assert!(sw.snmp.unwrap().reads.unwrap().community.unwrap().allowed_hosts.is_empty());
+    }
+
+    #[test]
+    fn snmp_reads_are_refused_on_vendors_that_do_not_support_them_yet() {
+        let sw = reads_switch(SwitchModel::Aruba2930F, vec![]);
+        let err = check_vendor_support(&sw).unwrap_err().to_string();
+        assert!(err.contains("sw1") && err.contains("snmp.reads") && err.contains("FortiSwitch"), "unhelpful error: {err}");
+        assert!(check_vendor_support(&reads_switch(SwitchModel::Fortiswitch124F_FPOE, vec![])).is_ok());
     }
 }

@@ -969,8 +969,8 @@ impl FortiswitchSwitch {
             });
         }
 
-        if let Some(desired) = &self.config.snmp {
-            Self::check_snmp_limits(desired)?;
+        if let Some(desired) = crate::snmp_reads::effective_snmp(&self.config) {
+            Self::check_snmp_limits(&desired)?;
         }
 
         // Reachability first: SNMP only answers once sysinfo is enabled and
@@ -1318,8 +1318,8 @@ impl SwitchVendor for FortiswitchSwitch {
         self.snmp_community_indices = Self::parse_snmp_community_indices(&snmp_community_lines);
         // Read-only SNMP can't report an access level: adopt the desired one so
         // it never shows up as a difference (see `adopt_desired_access`).
-        if let (Some(parsed), Some(desired)) = (snmp.as_mut(), self.config.snmp.as_ref()) {
-            Self::adopt_desired_access(parsed, desired);
+        if let (Some(parsed), Some(desired)) = (snmp.as_mut(), crate::snmp_reads::effective_snmp(&self.config)) {
+            Self::adopt_desired_access(parsed, &desired);
         }
         // What SNMP needs besides a community: the agent switched on, and `snmp`
         // allowed on the address queries are sent to.
@@ -1662,8 +1662,8 @@ impl SwitchVendor for FortiswitchSwitch {
         }
 
         // SNMP: community count and manager lists must fit a FortiSwitch.
-        if let Some(snmp) = &self.config.snmp {
-            Self::check_snmp_limits(snmp)?;
+        if let Some(snmp) = crate::snmp_reads::effective_snmp(&self.config) {
+            Self::check_snmp_limits(&snmp)?;
         }
 
         Ok(())
@@ -2490,7 +2490,7 @@ impl FortiswitchSwitch {
             return None;
         }
 
-        Some(SnmpConfig { communities, trap_receivers, enabled_traps })
+        Some(SnmpConfig { communities, trap_receivers, enabled_traps, reads: None })
     }
 
     /// Map each SNMP community's name to its numeric `edit <N>` index in
@@ -3687,7 +3687,7 @@ mod tests {
         let snmp_config = SnmpConfig {
             communities: vec![SnmpCommunity::new("public".to_string(), SnmpAccess::Operator)],
             trap_receivers: vec![],
-            enabled_traps: vec![],
+            enabled_traps: vec![], reads: None,
         };
 
         let commands = switch.generate_snmp_commands(&snmp_config);
@@ -3711,7 +3711,7 @@ mod tests {
                 community: "public".to_string(),
                 version: Some("2c".to_string()),
             }],
-            enabled_traps: vec![TrapType::MacNotify, TrapType::LinkChange],
+            enabled_traps: vec![TrapType::MacNotify, TrapType::LinkChange], reads: None,
         };
 
         let commands = switch.generate_snmp_commands(&snmp_config);
@@ -3738,7 +3738,7 @@ mod tests {
                 community: "public".to_string(),
                 version: Some("2c".to_string()),
             }],
-            enabled_traps: vec![],
+            enabled_traps: vec![], reads: None,
         };
 
         let commands = switch.generate_snmp_commands(&snmp_config);
@@ -3770,7 +3770,7 @@ mod tests {
                     version: Some("2c".to_string()),
                 },
             ],
-            enabled_traps: vec![],
+            enabled_traps: vec![], reads: None,
         };
 
         let commands = switch.generate_snmp_commands(&snmp_config);
@@ -3791,7 +3791,7 @@ mod tests {
                 community: "public".to_string(),
                 version: Some("2c".to_string()),
             }],
-            enabled_traps: vec![TrapType::MacNotify, TrapType::LinkChange, TrapType::All],
+            enabled_traps: vec![TrapType::MacNotify, TrapType::LinkChange, TrapType::All], reads: None,
         };
 
         let commands = switch.generate_snmp_commands(&snmp_config);
@@ -3959,7 +3959,7 @@ mod tests {
                 community: "public".to_string(),
                 version: Some("2c".to_string()),
             }],
-            enabled_traps: vec![TrapType::MacNotify, TrapType::LinkChange],
+            enabled_traps: vec![TrapType::MacNotify, TrapType::LinkChange], reads: None,
         });
 
         let switch = FortiswitchSwitch::new(config.clone(), RuntimeConfig::default(), false);
@@ -5485,7 +5485,7 @@ end
         switch.config.snmp = Some(SnmpConfig {
             communities: vec![community("a"), community("b"), community("c")],
             trap_receivers: vec![],
-            enabled_traps: vec![],
+            enabled_traps: vec![], reads: None,
         });
         assert!(switch.validate_configuration().is_ok());
 
@@ -5501,7 +5501,7 @@ end
         switch.config.snmp = Some(SnmpConfig {
             communities: vec![community_with_hosts("v6", &["2001:db8::1"])],
             trap_receivers: vec![],
-            enabled_traps: vec![],
+            enabled_traps: vec![], reads: None,
         });
         assert!(switch.validate_configuration().unwrap_err().to_string().contains("IPv6"));
     }
@@ -5511,7 +5511,7 @@ end
         let desired = SnmpConfig {
             communities: vec![SnmpCommunity::new("kept", SnmpAccess::Operator)],
             trap_receivers: vec![],
-            enabled_traps: vec![],
+            enabled_traps: vec![], reads: None,
         };
         let mut parsed = SnmpConfig {
             communities: vec![
@@ -5519,7 +5519,7 @@ end
                 SnmpCommunity::new("unknown", SnmpAccess::Unrestricted),
             ],
             trap_receivers: vec![],
-            enabled_traps: vec![],
+            enabled_traps: vec![], reads: None,
         };
         FortiswitchSwitch::adopt_desired_access(&mut parsed, &desired);
         assert_eq!(parsed.communities[0].access, SnmpAccess::Operator);
@@ -5536,7 +5536,7 @@ end
         let snmp = SnmpConfig {
             communities: vec![community_with_hosts("poll", &["192.0.2.1"])],
             trap_receivers: vec![],
-            enabled_traps: vec![],
+            enabled_traps: vec![], reads: None,
         };
 
         switch.configure_snmp(&snmp).await.unwrap();
@@ -5557,7 +5557,7 @@ end
         let snmp = SnmpConfig {
             communities: vec![community("a"), community("b"), community("c"), community("d")],
             trap_receivers: vec![],
-            enabled_traps: vec![],
+            enabled_traps: vec![], reads: None,
         };
 
         assert!(switch.configure_snmp(&snmp).await.is_err());
@@ -5570,11 +5570,32 @@ end
         config.management_ip = Some("127.0.0.1".to_string());
         let mut community = SnmpCommunity::new("poll", SnmpAccess::Operator);
         community.allowed_hosts = vec![crate::models::AllowedHost::Auto];
-        config.snmp = Some(SnmpConfig { communities: vec![community], trap_receivers: vec![], enabled_traps: vec![] });
+        config.snmp = Some(SnmpConfig { communities: vec![community], trap_receivers: vec![], enabled_traps: vec![], reads: None });
 
         let switch = FortiswitchSwitch::new(config, RuntimeConfig::default(), false);
 
         let hosts = &switch.config.snmp.as_ref().unwrap().communities[0].allowed_hosts;
         assert_eq!(hosts, &vec![crate::models::AllowedHost::Network("127.0.0.1".to_string())]);
+    }
+
+    #[test]
+    fn the_service_read_community_counts_towards_the_three_a_fortiswitch_holds() {
+        let mut switch = create_test_switch();
+        let community = |n: &str| SnmpCommunity::new(n, SnmpAccess::Operator);
+        switch.config.snmp = Some(SnmpConfig {
+            communities: vec![community("a"), community("b"), community("c")],
+            trap_receivers: vec![],
+            enabled_traps: vec![],
+            reads: Some(crate::models::SnmpReads {
+                mode: crate::models::SnmpReadsMode::Auto,
+                community: Some(community("service")),
+            }),
+        });
+
+        let err = switch.validate_configuration().unwrap_err().to_string();
+        assert!(err.contains("at most 3") && err.contains("4"), "unhelpful error: {err}");
+
+        switch.config.snmp.as_mut().unwrap().reads.as_mut().unwrap().mode = crate::models::SnmpReadsMode::Off;
+        assert!(switch.validate_configuration().is_ok(), "reads off: only the listed three");
     }
 }

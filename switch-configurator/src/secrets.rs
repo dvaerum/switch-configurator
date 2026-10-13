@@ -17,7 +17,7 @@ use std::sync::{Mutex, OnceLock};
 
 use anyhow::{bail, Context, Result};
 
-use crate::models::SwitchConfig;
+use crate::models::{SnmpCommunity, SnmpConfig, SnmpReadsMode, SwitchConfig};
 
 /// Where credential ids are looked up.
 #[derive(Debug, Clone, Default)]
@@ -40,6 +40,39 @@ impl SecretContext {
     }
 }
 
+/// The communities whose string can come from a reference, with a label for
+/// error messages: the listed ones, and the service's own `snmp.reads.community`
+/// when reads are switched on (a disabled feature is not validated or read).
+fn labelled_communities(snmp: &SnmpConfig) -> Vec<(String, &SnmpCommunity)> {
+    let mut all: Vec<(String, &SnmpCommunity)> = snmp
+        .communities
+        .iter()
+        .enumerate()
+        .map(|(i, c)| (format!("SNMP community #{}", i + 1), c))
+        .collect();
+    if let Some(reads) = snmp.reads.as_ref().filter(|r| r.mode == SnmpReadsMode::Auto) {
+        if let Some(community) = &reads.community {
+            all.push(("snmp.reads.community".to_string(), community));
+        }
+    }
+    all
+}
+
+fn labelled_communities_mut(snmp: &mut SnmpConfig) -> Vec<(String, &mut SnmpCommunity)> {
+    let mut all: Vec<(String, &mut SnmpCommunity)> = snmp
+        .communities
+        .iter_mut()
+        .enumerate()
+        .map(|(i, c)| (format!("SNMP community #{}", i + 1), c))
+        .collect();
+    if let Some(reads) = snmp.reads.as_mut().filter(|r| r.mode == SnmpReadsMode::Auto) {
+        if let Some(community) = reads.community.as_mut() {
+            all.push(("snmp.reads.community".to_string(), community));
+        }
+    }
+    all
+}
+
 /// Every community must name a source, and at most one kind of reference.
 /// Structural only (nothing is read), so it also suits overlays that are
 /// saved but not yet applied. An inline `name` next to a reference is NOT an
@@ -47,18 +80,17 @@ impl SecretContext {
 /// `resolve_snmp_secrets` rejects it if the two disagree.
 pub fn check_snmp_secret_sources(switch: &SwitchConfig) -> Result<()> {
     let Some(snmp) = &switch.snmp else { return Ok(()) };
-    for (index, community) in snmp.communities.iter().enumerate() {
-        let number = index + 1;
+    for (label, community) in labelled_communities(snmp) {
         if community.name_file.is_some() && community.name_credential.is_some() {
             bail!(
-                "switch '{}' SNMP community #{} sets more than one source: use only one of name_file and name_credential",
-                switch.id, number
+                "switch '{}' {} sets more than one source: use only one of name_file and name_credential",
+                switch.id, label
             );
         }
         if community.name.is_empty() && !community.has_reference() {
             bail!(
-                "switch '{}' SNMP community #{} has no source: set one of name, name_file or name_credential",
-                switch.id, number
+                "switch '{}' {} has no source: set one of name, name_file or name_credential",
+                switch.id, label
             );
         }
     }
@@ -73,17 +105,16 @@ pub fn resolve_snmp_secrets(switch: &mut SwitchConfig, ctx: &SecretContext) -> R
     let switch_id = switch.id.clone();
     let Some(snmp) = switch.snmp.as_mut() else { return Ok(()) };
 
-    for (index, community) in snmp.communities.iter_mut().enumerate() {
-        let number = index + 1;
+    for (label, community) in labelled_communities_mut(snmp) {
         let (value, source) = match (&community.name_file, &community.name_credential) {
-            (Some(path), _) => (read_secret_file(path, &switch_id, number)?, format!("name_file {}", path.display())),
-            (None, Some(id)) => (read_credential(id, ctx, &switch_id, number)?, format!("name_credential '{}'", id)),
+            (Some(path), _) => (read_secret_file(path, &switch_id, &label)?, format!("name_file {}", path.display())),
+            (None, Some(id)) => (read_credential(id, ctx, &switch_id, &label)?, format!("name_credential '{}'", id)),
             (None, None) => continue,
         };
         if !community.name.is_empty() && community.name != value {
             bail!(
-                "switch '{}' SNMP community #{} has an inline name that disagrees with its {}: use only one source",
-                switch_id, number, source
+                "switch '{}' {} has an inline name that disagrees with its {}: use only one source",
+                switch_id, label, source
             );
         }
         register_secret(&value);
@@ -92,20 +123,14 @@ pub fn resolve_snmp_secrets(switch: &mut SwitchConfig, ctx: &SecretContext) -> R
     Ok(())
 }
 
-fn read_secret_file(path: &std::path::Path, switch_id: &str, number: usize) -> Result<String> {
-    let raw = std::fs::read_to_string(path).with_context(|| {
-        format!(
-            "switch '{}' SNMP community #{}: cannot read name_file {}",
-            switch_id,
-            number,
-            path.display()
-        )
-    })?;
-    validate_value(raw, &format!("switch '{}' SNMP community #{} (name_file {})", switch_id, number, path.display()))
+fn read_secret_file(path: &std::path::Path, switch_id: &str, label: &str) -> Result<String> {
+    let raw = std::fs::read_to_string(path)
+        .with_context(|| format!("switch '{}' {}: cannot read name_file {}", switch_id, label, path.display()))?;
+    validate_value(raw, &format!("switch '{}' {} (name_file {})", switch_id, label, path.display()))
 }
 
-fn read_credential(id: &str, ctx: &SecretContext, switch_id: &str, number: usize) -> Result<String> {
-    let label = format!("switch '{}' SNMP community #{} (name_credential '{}')", switch_id, number, id);
+fn read_credential(id: &str, ctx: &SecretContext, switch_id: &str, community: &str) -> Result<String> {
+    let label = format!("switch '{}' {} (name_credential '{}')", switch_id, community, id);
     if id.is_empty() || id == "." || id == ".." || id.contains('/') || id.contains('\0') {
         bail!("{}: credential ids are plain names, not paths", label);
     }
@@ -196,7 +221,7 @@ mod tests {
             vlans: vec![],
             ports: vec![],
             port_mirrors: vec![],
-            snmp: Some(SnmpConfig { communities, trap_receivers: vec![], enabled_traps: vec![] }),
+            snmp: Some(SnmpConfig { communities, trap_receivers: vec![], enabled_traps: vec![], reads: None }),
             validation: None,
             vendor_specific: std::collections::HashMap::new(),
             management_vlan: None,
@@ -439,5 +464,50 @@ mod tests {
     #[test]
     fn scrub_with_nothing_registered_for_the_text_leaves_it_alone() {
         assert_eq!(scrub("nothing secret here"), "nothing secret here");
+    }
+
+    // ---- snmp.reads.community ----
+
+    fn with_reads(mode: crate::models::SnmpReadsMode, community: SnmpCommunity) -> SwitchConfig {
+        let mut sw = switch_with(vec![]);
+        sw.snmp.as_mut().unwrap().reads = Some(crate::models::SnmpReads { mode, community: Some(community) });
+        sw
+    }
+
+    #[test]
+    fn the_reads_community_is_resolved_like_any_other() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("snmp-ro");
+        std::fs::write(&path, "reads-secret-14\n").unwrap();
+        let mut sw = with_reads(crate::models::SnmpReadsMode::Auto, file_community(&path));
+
+        resolve_snmp_secrets(&mut sw, &SecretContext::without_credentials()).unwrap();
+
+        let community = sw.snmp.as_ref().unwrap().reads.as_ref().unwrap().community.as_ref().unwrap();
+        assert_eq!(community.name, "reads-secret-14");
+        assert_eq!(scrub("x reads-secret-14"), "x <redacted>", "it is registered for scrubbing too");
+    }
+
+    #[test]
+    fn a_reads_community_that_cannot_be_read_names_snmp_reads_in_the_error() {
+        let mut sw = with_reads(crate::models::SnmpReadsMode::Auto, file_community(std::path::Path::new("/nonexistent/x")));
+        let err = resolve_snmp_secrets(&mut sw, &SecretContext::without_credentials()).unwrap_err().to_string();
+        assert!(err.contains("sw1") && err.contains("snmp.reads.community"), "unhelpful error: {err}");
+    }
+
+    #[test]
+    fn a_reads_community_with_no_source_is_an_error_only_when_reads_are_on() {
+        let nameless = SnmpCommunity::new("", SnmpAccess::Operator);
+        let on = with_reads(crate::models::SnmpReadsMode::Auto, nameless.clone());
+        assert!(check_snmp_secret_sources(&on).unwrap_err().to_string().contains("snmp.reads.community"));
+
+        let off = with_reads(crate::models::SnmpReadsMode::Off, nameless);
+        assert!(check_snmp_secret_sources(&off).is_ok(), "a disabled feature is not validated");
+    }
+
+    #[test]
+    fn a_disabled_reads_community_is_not_even_read() {
+        let off = &mut with_reads(crate::models::SnmpReadsMode::Off, file_community(std::path::Path::new("/nonexistent/x")));
+        assert!(resolve_snmp_secrets(off, &SecretContext::without_credentials()).is_ok());
     }
 }
