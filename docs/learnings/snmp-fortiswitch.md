@@ -78,3 +78,33 @@ parallel walks of `dot1dTpFdbTable` columns made the agent stop answering
 service walks the whole FDB table once, front to back.
 
 SNMPv3 was not tried (the client is built without the v3 crypto backend).
+
+## The production model: 124F-FPOE, FortiSwitch 7.2.5
+
+Enabled through the service itself (`snmp.reads`, credential-backed community,
+`allowed_hosts` = the host's address towards the switch) on a bench 124F-FPOE
+whose management address is a DHCP lease on `vlan42`.
+
+- The apply wrote what the 108F needed: `sysinfo` enabled, `snmp` appended to the
+  leased interface's `allowaccess` (`ping` → `ping snmp`), the community with a
+  `config hosts` entry for the host; the next read-back converged and the diff is
+  empty. The community is shown by `show system snmp community` with only
+  non-default fields (`status`/`query-*` enabled are omitted).
+- Before the 0.23.6 fix the service generated `set name ""` (the credential was
+  not read when configs load from several files); FortiOS rejects that with a
+  multi-line error and the community was never created. Typing the same
+  sequence by hand worked, which is how the cause was narrowed down.
+- Tables answered on this model: `ifName`, `ifOperStatus`, `ifHighSpeed` (31 rows
+  each), `dot3StatsDuplexStatus` (30), RFC 3621 `pethPsePortDetectionStatus` (29),
+  `dot1dTpFdbPort` (~174 at the time of the first walk), `dot1qVlanStaticName` (8).
+- Through the deployed service, same moment: link, speed and duplex agree with
+  the console on all 24 ports; PoE state exists only over SNMP (as on the
+  108F); the MAC table is identical (179 entries each). Latency: port status
+  0.39s against 12.4s over the console; MAC table 0.12s against 3.5s.
+  `x-data-source: snmp` for `source=snmp` and `auto`.
+- One difference: SNMP also lists the `vlan42` VLAN interface (30 rows against
+  the console's 29, which has only the physical ports and `internal`). The
+  mapping covers every interface by design; whether to keep virtual interfaces
+  out is an open decision.
+- Not exercised on this unit: the console fallback with SNMP switched off
+  (covered by unit tests only) and SNMPv3.
