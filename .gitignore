@@ -36,3 +36,7 @@ result-*
 
 # Agent tooling runtime locks
 .claude/*.lock
+
+# E2E (Playwright) runner package link and failure artefacts
+/tests/e2e/node_modules
+/tests/e2e/test-results/
