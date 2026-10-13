@@ -3463,13 +3463,13 @@ mod integration_tests {
     }
 
     #[tokio::test]
-    async fn test_refresh_all_mac_tables_once_skips_busy_switch() {
+    async fn test_refresh_all_lookups_once_skips_busy_switch() {
         let store = create_fortiswitch_serial_test_store();
         store.status.set_currently_configuring("test-sw-forti-serial".to_string()).await;
 
         // Must return promptly without touching the (nonexistent) serial
         // device or the cache, since the switch is busy.
-        refresh_all_mac_tables_once(&store).await;
+        refresh_all_lookups_once(&store).await;
 
         assert!(!store.mac_table_cache.read().await.contains_key("test-sw-forti-serial"));
         // Busy flag must be exactly as this test left it -- the refresher
@@ -3478,7 +3478,7 @@ mod integration_tests {
     }
 
     #[tokio::test]
-    async fn test_refresh_all_mac_tables_once_releases_guard_on_fetch_failure() {
+    async fn test_refresh_all_lookups_once_releases_guard_on_fetch_failure() {
         let store = create_fortiswitch_serial_test_store();
 
         // The switch isn't busy, so the refresher attempts a real fetch --
@@ -3489,21 +3489,21 @@ mod integration_tests {
         // behavior under test: the busy flag this acquired for the attempt
         // must be released afterward, not left stuck (exactly the class of
         // bug fixed by try_acquire_configuring/ConfiguringGuard).
-        refresh_all_mac_tables_once(&store).await;
+        refresh_all_lookups_once(&store).await;
 
         assert!(!store.mac_table_cache.read().await.contains_key("test-sw-forti-serial"));
         assert!(!store.status.is_currently_configuring("test-sw-forti-serial").await);
     }
 
     #[tokio::test]
-    async fn test_refresh_all_mac_tables_once_ignores_unsupported_vendor() {
+    async fn test_refresh_all_lookups_once_ignores_unsupported_vendor() {
         // test-sw-01 (create_test_config_store) is Aruba over SSH -- IS a
         // supported mac-table vendor, so it's not a good "skip" fixture.
         // Use a config with zero switches instead, to confirm the refresher
         // handles an empty switch list without error (the simplest possible
         // "nothing to do" case, still exercising the real code path).
         let store = ConfigStore::new(AppConfig { switches: vec![] }, 4003);
-        refresh_all_mac_tables_once(&store).await;
+        refresh_all_lookups_once(&store).await;
         assert!(store.mac_table_cache.read().await.is_empty());
     }
 
@@ -3897,6 +3897,8 @@ mod integration_tests {
         let response = get_port_status(
             axum::extract::State(store),
             axum::extract::Path("nonexistent".to_string()),
+            axum::extract::Query(PortStatusQuery { fresh: false, max_age_seconds: None }),
+            None,
         )
         .await
         .into_response();
@@ -3910,6 +3912,8 @@ mod integration_tests {
         let response = get_port_status(
             axum::extract::State(store),
             axum::extract::Path("test-sw-01".to_string()),
+            axum::extract::Query(PortStatusQuery { fresh: false, max_age_seconds: None }),
+            None,
         )
         .await
         .into_response();
@@ -3932,6 +3936,8 @@ mod integration_tests {
             get_port_status(
                 axum::extract::State(store_req),
                 axum::extract::Path("test-sw-forti".to_string()),
+                axum::extract::Query(PortStatusQuery { fresh: false, max_age_seconds: None }),
+                None,
             )
             .await
             .into_response()
@@ -3965,5 +3971,223 @@ mod integration_tests {
         let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), vendor.connect()).await;
         assert!(outcome.is_ok(), "connect() ignored ssh_timeout_secs and was still waiting after 5s");
         assert!(outcome.unwrap().is_err());
+    }
+
+    // ---- port-status cache + shared refresher session ----
+
+    fn cached_port_status(raw: &str, generation_id: uuid::Uuid) -> crate::config::CachedPortStatus {
+        crate::config::CachedPortStatus {
+            entries: vec![crate::models::PortStatusEntry {
+                port_id: "port1".to_string(),
+                link_status: Some("up".to_string()),
+                speed: Some("1000Mbps".to_string()),
+                duplex: Some("full".to_string()),
+                poe_status: None,
+            }],
+            raw_output: raw.to_string(),
+            fetched_at: chrono::Utc::now(),
+            generation_id,
+        }
+    }
+
+    async fn port_status_call(
+        store: &ConfigStore,
+        query: PortStatusQuery,
+        if_none_match: Option<axum_extra::headers::IfNoneMatch>,
+    ) -> axum::response::Response {
+        get_port_status(
+            axum::extract::State(store.clone()),
+            axum::extract::Path("test-sw-forti".to_string()),
+            axum::extract::Query(query),
+            if_none_match.map(axum_extra::TypedHeader),
+        )
+        .await
+        .into_response()
+    }
+
+    #[tokio::test]
+    async fn test_get_port_status_serves_from_cache_when_fresh() {
+        let store = create_fortiswitch_test_store();
+        store
+            .port_status_cache
+            .write()
+            .await
+            .insert("test-sw-forti".to_string(), cached_port_status("raw port output", uuid::Uuid::new_v4()));
+        // A cache hit never touches the switch, so a busy switch must not matter.
+        store.status.set_currently_configuring("test-sw-forti".to_string()).await;
+
+        let response = port_status_call(&store, PortStatusQuery { fresh: false, max_age_seconds: None }, None).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(response.headers().contains_key(axum::http::header::ETAG));
+        assert!(response.headers().contains_key(axum::http::header::AGE));
+        assert!(response.headers().get(axum::http::header::CACHE_CONTROL).unwrap().to_str().unwrap().contains("max-age"));
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["entries"][0]["port_id"], "port1");
+        assert_eq!(json["raw_output"], "raw port output");
+    }
+
+    #[tokio::test]
+    async fn test_get_port_status_matching_if_none_match_returns_304() {
+        let store = create_fortiswitch_test_store();
+        let generation_id = uuid::Uuid::new_v4();
+        store
+            .port_status_cache
+            .write()
+            .await
+            .insert("test-sw-forti".to_string(), cached_port_status("not in a 304", generation_id));
+
+        let if_none_match: axum_extra::headers::IfNoneMatch =
+            format!("\"{}\"", generation_id).parse::<axum_extra::headers::ETag>().unwrap().into();
+        let response = port_status_call(&store, PortStatusQuery { fresh: false, max_age_seconds: None }, Some(if_none_match)).await;
+
+        assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
+        assert!(response.headers().contains_key(axum::http::header::ETAG));
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert!(body.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_get_port_status_stale_or_fresh_query_bypasses_cache() {
+        let store = create_fortiswitch_test_store();
+        store
+            .port_status_cache
+            .write()
+            .await
+            .insert("test-sw-forti".to_string(), cached_port_status("cached", uuid::Uuid::new_v4()));
+
+        // max_age 0 = always stale, ?fresh=true = explicit bypass: both must
+        // try the switch (unreachable here, so 500) instead of serving the cache.
+        for query in [
+            PortStatusQuery { fresh: false, max_age_seconds: Some(0) },
+            PortStatusQuery { fresh: true, max_age_seconds: None },
+        ] {
+            let response = port_status_call(&store, query, None).await;
+            assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_get_port_status_waits_for_busy_switch_then_serves_fresh_cache() {
+        let store = create_fortiswitch_test_store();
+        let holder = store.status.try_acquire_configuring("test-sw-forti".to_string()).await.unwrap();
+
+        let store_req = store.clone();
+        let request = tokio::spawn(async move {
+            port_status_call(&store_req, PortStatusQuery { fresh: false, max_age_seconds: None }, None).await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(!request.is_finished(), "request must wait while the switch is busy");
+
+        store
+            .port_status_cache
+            .write()
+            .await
+            .insert("test-sw-forti".to_string(), cached_port_status("filled by the holder", uuid::Uuid::new_v4()));
+        holder.release().await;
+
+        let response = tokio::time::timeout(std::time::Duration::from_secs(5), request)
+            .await
+            .expect("request must finish once the switch is free")
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_delete_switch_config_prunes_port_status_cache() {
+        let store = create_test_config_store();
+        store
+            .port_status_cache
+            .write()
+            .await
+            .insert("test-sw-01".to_string(), cached_port_status("stale", uuid::Uuid::new_v4()));
+
+        let app = api::create_router(store.clone());
+        let request = Request::builder()
+            .method("DELETE")
+            .uri("/switches/test-sw-01/desired-config")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(app.oneshot(request).await.unwrap().status(), StatusCode::OK);
+
+        assert!(!store.port_status_cache.read().await.contains_key("test-sw-01"));
+    }
+
+    /// Opens mock vendors that count how often each lookup runs.
+    struct LookupOpener {
+        opens: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        mac_calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        port_calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::session_pool::SessionOpener for LookupOpener {
+        async fn open(
+            &self,
+            _config: &SwitchConfig,
+        ) -> Result<Box<dyn crate::vendors::SwitchVendor>, crate::vendors::traits::VendorError> {
+            use std::sync::atomic::Ordering;
+            self.opens.fetch_add(1, Ordering::SeqCst);
+            let mut vendor = crate::vendors::tests::MockVendor::new();
+            vendor.expect_supports_session_reuse().returning(|| true);
+            vendor.expect_disconnect().returning(|| Ok(()));
+            let mac_calls = self.mac_calls.clone();
+            vendor.expect_get_mac_table().returning(move || {
+                mac_calls.fetch_add(1, Ordering::SeqCst);
+                Ok((
+                    vec![crate::models::MacTableEntry {
+                        mac_address: "00:00:5e:00:53:01".to_string(),
+                        vlan_id: Some(10),
+                        port_id: "1".to_string(),
+                    }],
+                    "raw mac table".to_string(),
+                ))
+            });
+            let port_calls = self.port_calls.clone();
+            vendor.expect_get_port_status().returning(move || {
+                port_calls.fetch_add(1, Ordering::SeqCst);
+                Ok((vec![], "raw port status".to_string()))
+            });
+            Ok(Box::new(vendor))
+        }
+    }
+
+    fn lookup_opener() -> std::sync::Arc<LookupOpener> {
+        let counter = || std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        std::sync::Arc::new(LookupOpener { opens: counter(), mac_calls: counter(), port_calls: counter() })
+    }
+
+    #[tokio::test]
+    async fn test_refresher_fetches_mac_table_and_port_status_in_one_session() {
+        use std::sync::atomic::Ordering;
+        let mut store = create_fortiswitch_test_store();
+        let opener = lookup_opener();
+        store.session_pool = crate::session_pool::SessionPool::new(opener.clone(), std::time::Duration::from_secs(30));
+
+        refresh_all_lookups_once(&store).await;
+
+        assert_eq!(opener.opens.load(Ordering::SeqCst), 1, "both lookups must share one session");
+        assert_eq!(opener.mac_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(opener.port_calls.load(Ordering::SeqCst), 1);
+        assert!(store.mac_table_cache.read().await.contains_key("test-sw-forti"));
+        assert!(store.port_status_cache.read().await.contains_key("test-sw-forti"));
+        assert!(!store.status.is_currently_configuring("test-sw-forti").await, "turn must be released");
+    }
+
+    #[tokio::test]
+    async fn test_refresher_skips_port_status_for_vendors_without_it() {
+        use std::sync::atomic::Ordering;
+        let mut store = create_test_config_store(); // Aruba: mac-table only
+        let opener = lookup_opener();
+        store.session_pool = crate::session_pool::SessionPool::new(opener.clone(), std::time::Duration::from_secs(30));
+
+        refresh_all_lookups_once(&store).await;
+
+        let switches = store.config.read().await.switches.len();
+        assert_eq!(opener.mac_calls.load(Ordering::SeqCst), switches, "one mac-table lookup per switch");
+        assert_eq!(opener.port_calls.load(Ordering::SeqCst), 0, "no port-status lookup for Aruba");
+        assert!(store.mac_table_cache.read().await.contains_key("test-sw-01"));
+        assert!(store.port_status_cache.read().await.is_empty());
     }
 }

@@ -416,6 +416,16 @@ pub struct CachedMacTable {
     pub generation_id: uuid::Uuid,
 }
 
+/// Cached live port status for one switch; same contract as `CachedMacTable`
+/// (see docs/decisions/0001-cached-api-response-contract.md).
+#[derive(Debug, Clone)]
+pub struct CachedPortStatus {
+    pub entries: Vec<crate::models::PortStatusEntry>,
+    pub raw_output: String,
+    pub fetched_at: chrono::DateTime<chrono::Utc>,
+    pub generation_id: uuid::Uuid,
+}
+
 /// Shared configuration store with status tracking
 #[derive(Clone)]
 pub struct ConfigStore {
@@ -428,6 +438,8 @@ pub struct ConfigStore {
     /// `handlers::get_mac_table`'s doc comment for the caching policy
     /// (default max-age, `?fresh=true` bypass).
     pub mac_table_cache: Arc<RwLock<std::collections::HashMap<String, CachedMacTable>>>,
+    /// Per-switch port-status cache, same policy as `mac_table_cache`.
+    pub port_status_cache: Arc<RwLock<std::collections::HashMap<String, CachedPortStatus>>>,
     /// Open vendor sessions kept between operations (see `session_pool`).
     pub session_pool: crate::session_pool::SessionPool,
 }
@@ -443,6 +455,7 @@ impl ConfigStore {
             events: Arc::new(tx),
             validation_failures: Arc::new(RwLock::new(Vec::new())),
             mac_table_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            port_status_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
             session_pool: crate::session_pool::SessionPool::with_vendor_sessions(),
         }
     }

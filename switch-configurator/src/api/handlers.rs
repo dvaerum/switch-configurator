@@ -989,6 +989,11 @@ pub async fn reload_config(State(store): State<ConfigStore>) -> impl IntoRespons
             .write()
             .await
             .retain(|id, _| live_ids.contains(id.as_str()));
+        store
+            .port_status_cache
+            .write()
+            .await
+            .retain(|id, _| live_ids.contains(id.as_str()));
     }
 
     // Track which switches we'll configure and which are busy
@@ -1551,6 +1556,7 @@ pub async fn delete_switch_config(
         // memory forever -- unreachable (nothing can query a switch that
         // no longer exists) but never actively removed either.
         store.mac_table_cache.write().await.remove(&id);
+        store.port_status_cache.write().await.remove(&id);
         info!("Deleted switch config for '{}'", id);
         (
             StatusCode::OK,
@@ -1810,7 +1816,7 @@ async fn poe_set_impl(
 /// device is on this port" answers stay meaningfully live.
 /// Default max-age for a cached mac-table result before a fresh fetch is
 /// forced, and the interval the background refresher (see
-/// `spawn_mac_table_refresher`) re-fetches on. 60s: long enough that the
+/// `spawn_lookup_refresher`) re-fetches on. 60s: long enough that the
 /// refresher, not a caller's own request, almost always pays the ~11-13s
 /// live-fetch latency — a caller normally only sees a stale-triggered live
 /// fetch if the refresher itself got skipped (switch busy with something
@@ -1933,6 +1939,123 @@ async fn mac_table_cache_response(
     )
 }
 
+/// Results of one session's worth of lookups (see `fetch_lookups_live`).
+struct LiveLookups {
+    mac_table: Result<(Vec<crate::models::MacTableEntry>, String), String>,
+    /// `None` when the vendor has no port-status lookup.
+    port_status: Option<Result<(Vec<crate::models::PortStatusEntry>, String), String>>,
+}
+
+/// Bound for one session's lookups (login + the commands). Same
+/// defense-in-depth as `fetch_mac_table_live`: nothing deeper in the
+/// vendor/serial stack may keep the busy flag held past this.
+const LOOKUPS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Run the mac-table lookup, and the port-status lookup when asked, over ONE
+/// pooled session, so the login is paid once. `Err` means no lookup could run
+/// (connect failed or timed out); each lookup's own failure is in its field.
+/// A session where any command failed is discarded, not kept.
+async fn fetch_lookups_live(
+    pool: &crate::session_pool::SessionPool,
+    switch_config: &SwitchConfig,
+    with_port_status: bool,
+) -> Result<LiveLookups, String> {
+    match tokio::time::timeout(LOOKUPS_TIMEOUT, async {
+        let mut session = pool
+            .checkout(switch_config)
+            .await
+            .map_err(|e| format!("Connection failed: {}", e))?;
+        let mac_table = session.vendor().get_mac_table().await.map_err(|e| e.to_string());
+        let port_status = if with_port_status {
+            Some(session.vendor().get_port_status().await.map_err(|e| e.to_string()))
+        } else {
+            None
+        };
+        let healthy = mac_table.is_ok() && port_status.as_ref().is_none_or(|r| r.is_ok());
+        if healthy {
+            session.release().await;
+        } else {
+            session.discard().await;
+        }
+        Ok(LiveLookups { mac_table, port_status })
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(_elapsed) => Err(format!("Timed out after {}s waiting for the switch", LOOKUPS_TIMEOUT.as_secs())),
+    }
+}
+
+/// Port-status only, over a pooled session (the `GET .../port-status` path).
+async fn fetch_port_status_live(
+    pool: &crate::session_pool::SessionPool,
+    switch_config: &SwitchConfig,
+) -> Result<(Vec<crate::models::PortStatusEntry>, String), String> {
+    match tokio::time::timeout(LOOKUPS_TIMEOUT, async {
+        let mut session = pool
+            .checkout(switch_config)
+            .await
+            .map_err(|e| format!("Connection failed: {}", e))?;
+        let outcome = session.vendor().get_port_status().await.map_err(|e| e.to_string());
+        match outcome {
+            Ok(_) => session.release().await,
+            Err(_) => session.discard().await,
+        }
+        outcome
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(_elapsed) => Err(format!("Timed out after {}s waiting for the switch", LOOKUPS_TIMEOUT.as_secs())),
+    }
+}
+
+/// Query parameters for `GET /switches/{id}/port-status` (same meaning as
+/// `MacTableQuery`).
+#[derive(Debug, Deserialize)]
+pub struct PortStatusQuery {
+    /// Skip the cache and always fetch live from the switch.
+    #[serde(default)]
+    pub fresh: bool,
+    /// Override the default cache max-age (seconds).
+    pub max_age_seconds: Option<i64>,
+}
+
+/// Serve the cached port status if it is still within `max_age`: the 200
+/// with cache headers, or a 304 when `If-None-Match` matches. `None` means
+/// the caller has to fetch live.
+async fn port_status_cache_response(
+    store: &ConfigStore,
+    id: &str,
+    max_age: chrono::Duration,
+    if_none_match: Option<&TypedHeader<IfNoneMatch>>,
+) -> Option<axum::response::Response> {
+    let cache = store.port_status_cache.read().await;
+    let cached = cache.get(id)?;
+    if !is_mac_table_cache_fresh(cached.fetched_at, max_age) {
+        return None;
+    }
+    let headers = cache_headers(cached.fetched_at, max_age, cached.generation_id);
+    let etag_matches = if_none_match
+        .map(|TypedHeader(inm)| !inm.precondition_passes(&cache_etag(cached.generation_id)))
+        .unwrap_or(false);
+    if etag_matches {
+        return Some((StatusCode::NOT_MODIFIED, headers).into_response());
+    }
+    Some(
+        (
+            StatusCode::OK,
+            headers,
+            Json(json!({
+                "switch_id": id,
+                "entries": cached.entries,
+                "raw_output": cached.raw_output
+            })),
+        )
+            .into_response(),
+    )
+}
+
 /// Query the switch's learned MAC-address table (FDB) — answers "what MAC is
 /// physically wired to this port" for cases where multiple devices on the
 /// same VLAN/subnet are indistinguishable over IP alone.
@@ -1953,7 +2076,7 @@ async fn mac_table_cache_response(
 /// session open on the switch's single exclusive serial device, competing
 /// with every other operational request for the same busy flag. Results
 /// are cached per switch for `MAC_TABLE_CACHE_DEFAULT_MAX_AGE_SECS` (60s) by
-/// default, and a background refresher (`spawn_mac_table_refresher`)
+/// default, and a background refresher (`spawn_lookup_refresher`)
 /// proactively re-fetches on that same interval so a real caller's request
 /// almost always hits a cache warmed by the refresher rather than paying
 /// the live-fetch latency itself. Cache facts are reported via standard
@@ -2026,18 +2149,18 @@ async fn fetch_mac_table_live(
 /// refresh cycle is caught by `tokio::spawn`'s task boundary and only
 /// drops that one iteration, per Rust's normal task-panic semantics; the
 /// loop itself has no way to panic on its own control flow).
-pub async fn spawn_mac_table_refresher(store: ConfigStore) {
+pub async fn spawn_lookup_refresher(store: ConfigStore) {
     let interval = std::time::Duration::from_secs(MAC_TABLE_CACHE_DEFAULT_MAX_AGE_SECS.max(1) as u64);
     loop {
         tokio::time::sleep(interval).await;
-        refresh_all_mac_tables_once(&store).await;
+        refresh_all_lookups_once(&store).await;
     }
 }
 
 /// One refresh cycle's worth of work, extracted from
-/// `spawn_mac_table_refresher`'s loop so it's directly testable without
+/// `spawn_lookup_refresher`'s loop so it's directly testable without
 /// waiting a full `MAC_TABLE_CACHE_DEFAULT_MAX_AGE_SECS` interval.
-pub(crate) async fn refresh_all_mac_tables_once(store: &ConfigStore) {
+pub(crate) async fn refresh_all_lookups_once(store: &ConfigStore) {
     let switches: Vec<SwitchConfig> = {
         let config = store.config.read().await;
         config
@@ -2058,28 +2181,48 @@ pub(crate) async fn refresh_all_mac_tables_once(store: &ConfigStore) {
         let guard = match store.status.try_acquire_configuring(id.clone()).await {
             Some(guard) => guard,
             None => {
-                debug!("mac-table refresher: '{}' is busy, skipping this cycle", id);
+                debug!("lookup refresher: '{}' is busy, skipping this cycle", id);
                 continue;
             }
         };
 
-        match fetch_mac_table_live(&store.session_pool, &switch_config).await {
-            Ok((entries, raw)) => {
-                let fetched_at = chrono::Utc::now();
-                let generation_id = uuid::Uuid::new_v4();
-                store.mac_table_cache.write().await.insert(
-                    id.clone(),
-                    crate::config::CachedMacTable {
-                        entries,
-                        raw_output: raw,
-                        fetched_at,
-                        generation_id,
-                    },
-                );
-                debug!("mac-table refresher: refreshed cache for '{}'", id);
-            }
-            Err(e) => {
-                warn!("mac-table refresher: failed to refresh '{}': {}", id, e);
+        // Port status only exists for FortiSwitch today; where it does, it is
+        // fetched in the same session as the mac-table (one login, not two).
+        let with_port_status = switch_config.model().vendor() == Vendor::Fortiswitch;
+        match fetch_lookups_live(&store.session_pool, &switch_config, with_port_status).await {
+            Err(e) => warn!("lookup refresher: failed to refresh '{}': {}", id, e),
+            Ok(lookups) => {
+                match lookups.mac_table {
+                    Ok((entries, raw)) => {
+                        store.mac_table_cache.write().await.insert(
+                            id.clone(),
+                            crate::config::CachedMacTable {
+                                entries,
+                                raw_output: raw,
+                                fetched_at: chrono::Utc::now(),
+                                generation_id: uuid::Uuid::new_v4(),
+                            },
+                        );
+                        debug!("lookup refresher: refreshed mac-table cache for '{}'", id);
+                    }
+                    Err(e) => warn!("lookup refresher: mac-table for '{}' failed: {}", id, e),
+                }
+                match lookups.port_status {
+                    Some(Ok((entries, raw))) => {
+                        store.port_status_cache.write().await.insert(
+                            id.clone(),
+                            crate::config::CachedPortStatus {
+                                entries,
+                                raw_output: raw,
+                                fetched_at: chrono::Utc::now(),
+                                generation_id: uuid::Uuid::new_v4(),
+                            },
+                        );
+                        debug!("lookup refresher: refreshed port-status cache for '{}'", id);
+                    }
+                    Some(Err(e)) => warn!("lookup refresher: port-status for '{}' failed: {}", id, e),
+                    None => {}
+                }
             }
         }
 
@@ -2207,6 +2350,8 @@ pub async fn get_mac_table(
 pub async fn get_port_status(
     State(store): State<ConfigStore>,
     Path(id): Path<String>,
+    Query(query): Query<PortStatusQuery>,
+    if_none_match: Option<TypedHeader<IfNoneMatch>>,
 ) -> impl IntoResponse {
     let config = store.config.read().await;
     let switch_config = match config.switches.iter().find(|s| s.id == id) {
@@ -2229,49 +2374,57 @@ pub async fn get_port_status(
             .into_response();
     }
 
+    let max_age = chrono::Duration::seconds(
+        query.max_age_seconds.unwrap_or(MAC_TABLE_CACHE_DEFAULT_MAX_AGE_SECS),
+    );
+
+    if !query.fresh {
+        if let Some(resp) = port_status_cache_response(&store, &id, max_age, if_none_match.as_ref()).await {
+            return resp;
+        }
+    }
+
     let guard = match store.status.acquire_configuring_queued(id.clone(), QUEUE_MAX_WAIT_SYNC).await {
         Some(guard) => guard,
         None => return queue_timeout_response(&id, QUEUE_MAX_WAIT_SYNC),
     };
 
-    // Same defense-in-depth bound as get_mac_table — see its comment.
-    const PORT_STATUS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+    // Whoever held the switch ahead of us (the refresher, or another caller)
+    // has probably just filled the cache.
+    if !query.fresh {
+        if let Some(resp) = port_status_cache_response(&store, &id, max_age, if_none_match.as_ref()).await {
+            guard.release().await;
+            return resp;
+        }
+    }
 
-    let result: Result<(Vec<crate::models::PortStatusEntry>, String), String> =
-        match tokio::time::timeout(PORT_STATUS_TIMEOUT, async {
-            let mut session = store
-                .session_pool
-                .checkout(&switch_config)
-                .await
-                .map_err(|e| format!("Connection failed: {}", e))?;
-            let outcome = session.vendor().get_port_status().await.map_err(|e| e.to_string());
-            match outcome {
-                Ok(_) => session.release().await,
-                Err(_) => session.discard().await,
-            }
-            outcome
-        })
-        .await
-        {
-            Ok(inner_result) => inner_result,
-            Err(_elapsed) => Err(format!(
-                "Timed out after {}s waiting for the switch",
-                PORT_STATUS_TIMEOUT.as_secs()
-            )),
-        };
-
+    let result = fetch_port_status_live(&store.session_pool, &switch_config).await;
     guard.release().await;
 
     match result {
-        Ok((entries, raw)) => (
-            StatusCode::OK,
-            Json(json!({
-                "switch_id": id,
-                "entries": entries,
-                "raw_output": raw
-            })),
-        )
-            .into_response(),
+        Ok((entries, raw)) => {
+            let fetched_at = chrono::Utc::now();
+            let generation_id = uuid::Uuid::new_v4();
+            store.port_status_cache.write().await.insert(
+                id.clone(),
+                crate::config::CachedPortStatus {
+                    entries: entries.clone(),
+                    raw_output: raw.clone(),
+                    fetched_at,
+                    generation_id,
+                },
+            );
+            (
+                StatusCode::OK,
+                cache_headers(fetched_at, max_age, generation_id),
+                Json(json!({
+                    "switch_id": id,
+                    "entries": entries,
+                    "raw_output": raw
+                })),
+            )
+                .into_response()
+        }
         Err(e) => {
             error!("Port status query failed for {}: {}", id, e);
             (

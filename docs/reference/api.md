@@ -644,6 +644,12 @@ Query live per-port operational status (link/speed/duplex/PoE) — distinct from
 **Path Parameters:**
 - `id` (string, required): Switch ID
 
+**Query Parameters:**
+- `fresh=true`: skip the cache and fetch live
+- `max_age_seconds=N`: treat a cached result older than N seconds as stale (default 60)
+
+**Caching:** same contract as the mac-table lookup (see [`docs/decisions/0001-cached-api-response-contract.md`](../decisions/0001-cached-api-response-contract.md)): `ETag`, `Age`, `Cache-Control: max-age`, `Last-Modified`, and `304 Not Modified` for a matching `If-None-Match`. The background refresher fetches this together with the mac-table in one session every 60s, so a normal request is answered from the cache in about a millisecond.
+
 **Response:**
 
 **Success:** `200 OK`
