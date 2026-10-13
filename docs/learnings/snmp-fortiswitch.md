@@ -46,3 +46,33 @@ is read as trap receivers.
 - Community strings travel in clear text in SNMPv2c (seen on the wire in
   the lab): keep the SNMP segment isolated and restrict managers with
   `allowed_hosts`.
+
+## Reading data over SNMP (verified on the same 108F-POE)
+
+Walked with `snmpwalk` and then through the service, compared with the
+console for the same moment (`get switch physical-port`,
+`diagnose switch mac-address list`):
+
+| Data | OIDs | Result |
+|---|---|---|
+| Interface names, link | IF-MIB `ifName` 1.3.6.1.2.1.31.1.1.1.1, `ifOperStatus` 1.3.6.1.2.1.2.2.1.8 | answered; `ifIndex` 1-10 = `port1`-`port10`, `internal` is listed twice (ifIndex 11 and 12) |
+| Speed | `ifHighSpeed` 1.3.6.1.2.1.31.1.1.1.15 | answered, but reports a nominal 1000 for DOWN ports (the console prints no speed for them) |
+| Duplex | EtherLike `dot3StatsDuplexStatus` 1.3.6.1.2.1.10.7.2.1.19 | answered: 3 = full when up, 1 = unknown when down |
+| PoE | RFC 3621 `pethPsePortAdminEnable` .105.1.1.1.3 / `pethPsePortDetectionStatus` .105.1.1.1.6, indexed `group.port` (group 1, port N = `portN`) | answered; the console path never exposed PoE state |
+| MAC table | BRIDGE-MIB `dot1dTpFdbTable` 1.3.6.1.2.1.17.4.3.1 (address .1, bridge port .2, status .3) | answered; the row index is a counter, the MAC is in the address column; status 3 learned, 4 self |
+| MAC VLAN | Q-BRIDGE `dot1qTpFdbTable` 1.3.6.1.2.1.17.7.1.2.2 | **noSuchObject**: no VLAN per MAC over SNMP |
+
+After the mapping rules in `src/snmp/mapping.rs` (speed/duplex only for a port
+that is up; the duplicate `internal` collapses to the entry with a speed) the
+SNMP and console answers were identical for all 11 ports and all 3 MACs, apart
+from the PoE state (SNMP only) and the VLAN (console only).
+
+Latency from the host to the switch (through the service): port status 0.07-0.35s
+(median ~0.13s) against ~11.7s over the console; MAC table ~1.1s against ~10.5s.
+
+**Quirk: do not walk the FDB table from several requests at once.** Three
+parallel walks of `dot1dTpFdbTable` columns made the agent stop answering
+(requests timed out), while the interface tables tolerate parallel walks. The
+service walks the whole FDB table once, front to back.
+
+SNMPv3 was not tried (the client is built without the v3 crypto backend).

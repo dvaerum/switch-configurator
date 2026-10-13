@@ -7,6 +7,7 @@ pub mod models;
 pub mod redact;
 pub mod secrets;
 pub mod session_pool;
+pub mod snmp;
 pub mod snmp_reads;
 pub mod ssh;
 pub mod status;
