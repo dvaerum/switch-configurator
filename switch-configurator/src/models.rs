@@ -1077,8 +1077,14 @@ impl TryFrom<String> for AllowedHost {
                 _ => return Err(format!("allowed_hosts entry '{}' has an invalid prefix length", value)),
             }
         }
-        Ok(Self::Network(value))
+        // A single host is spelled without a prefix, so `x/32` and `x` compare equal.
+        let single_host = prefix.is_some_and(|p| p.parse::<u8>().is_ok_and(|n| n == max_prefix(&ip)));
+        Ok(Self::Network(if single_host { addr.to_string() } else { value }))
     }
+}
+
+fn max_prefix(ip: &std::net::IpAddr) -> u8 {
+    if ip.is_ipv4() { 32 } else { 128 }
 }
 
 impl From<AllowedHost> for String {

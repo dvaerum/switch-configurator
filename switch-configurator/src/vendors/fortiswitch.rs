@@ -23,7 +23,30 @@ pub struct FortiswitchSwitch {
     /// still there on the next read. `apply_snmp_diff` needs this to issue
     /// `delete <index>` instead.
     snmp_community_indices: std::collections::HashMap<String, u16>,
+    /// Whether `config system snmp sysinfo` has `status enable`, from the
+    /// most recent `parse_current_state` (`None` = not read yet).
+    snmp_sysinfo_enabled: Option<bool>,
+    /// The interface (or secondary address) that owns the management IP and
+    /// its `allowaccess` list, from the most recent `parse_current_state`.
+    /// SNMP queries to an address are only answered when `snmp` is in that
+    /// address's `allowaccess` (confirmed on FortiSwitch 108F-POE 7.2.8: with
+    /// `snmp` only on the primary interface, queries to a secondary address
+    /// get no answer).
+    mgmt_access: Option<MgmtAccess>,
 }
+
+/// An interface address that can carry management traffic, and what it allows.
+#[derive(Debug, Clone, PartialEq)]
+struct MgmtAccess {
+    interface: String,
+    /// `Some(n)` when the address is `config secondaryip` entry `n`.
+    secondary_index: Option<u32>,
+    allowaccess: Vec<String>,
+}
+
+/// Most communities a FortiSwitch holds (FortiSwitchOS 7.x administration
+/// guide, SNMP chapter).
+const MAX_SNMP_COMMUNITIES: usize = 3;
 
 /// Raw `show` output for every FortiOS CLI block `parse_current_state` reads.
 struct FortiSwitchConfigBlocks {
@@ -33,6 +56,7 @@ struct FortiSwitchConfigBlocks {
     physical_port: String,
     switch_mirror: String,
     snmp_community: String,
+    snmp_sysinfo: String,
 }
 
 /// A VLAN's Layer-3 interface details, when it has one (see `parse_svi_details`).
@@ -66,7 +90,14 @@ struct PhysicalPortInfo {
 }
 
 impl FortiswitchSwitch {
-    pub fn new(config: SwitchConfig, runtime_config: RuntimeConfig, enforce_port_config: bool) -> Self {
+    pub fn new(mut config: SwitchConfig, runtime_config: RuntimeConfig, enforce_port_config: bool) -> Self {
+        // `auto` in an SNMP allowed_hosts list means "the address this host
+        // reaches the switch from"; turn it into that address now so the diff
+        // and the commands see a concrete manager. If it can't be resolved it
+        // stays `auto` and the SNMP apply fails with a clear error.
+        if let Err(e) = crate::allowed_hosts::resolve_auto_hosts(&mut config) {
+            warn!("{:#}", e);
+        }
         Self {
             config,
             runtime_config,
@@ -74,6 +105,232 @@ impl FortiswitchSwitch {
             enforce_port_config,
             current_state: None,
             snmp_community_indices: std::collections::HashMap::new(),
+            snmp_sysinfo_enabled: None,
+            mgmt_access: None,
+        }
+    }
+
+    /// `config system snmp sysinfo` is enabled when it lists `set status enable`
+    /// (FortiOS `show` omits defaults, and the default is disabled).
+    fn parse_snmp_sysinfo_enabled(lines: &[&str]) -> bool {
+        let mut in_block = false;
+        for line in lines {
+            let trimmed = line.trim();
+            if trimmed == "config system snmp sysinfo" {
+                in_block = true;
+            } else if in_block && trimmed == "end" {
+                return false;
+            } else if in_block && trimmed == "set status enable" {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Find the interface address equal to `management_ip` in `show system
+    /// interface` output: a primary `set ip <addr> <mask>` or a
+    /// `config secondaryip` entry. `None` when no configured address matches
+    /// (e.g. a DHCP-assigned primary, which `show` doesn't print).
+    fn parse_mgmt_access(lines: &[&str], management_ip: &str) -> Option<MgmtAccess> {
+        let mut interface: Option<String> = None;
+        let mut primary_access: Vec<String> = Vec::new();
+        let mut primary_matches = false;
+        let mut in_secondary = false;
+        let mut secondary_index: Option<u32> = None;
+        let mut secondary_access: Vec<String> = Vec::new();
+        let mut secondary_matches = false;
+        let mut found_secondary: Option<MgmtAccess> = None;
+
+        let address_of = |rest: &str| rest.split_whitespace().next().map(str::to_string);
+
+        for line in lines {
+            let trimmed = line.trim();
+            if let Some(name) = trimmed.strip_prefix("edit ") {
+                if in_secondary {
+                    secondary_index = name.trim().parse().ok();
+                    secondary_access.clear();
+                    secondary_matches = false;
+                } else {
+                    interface = Some(name.trim().trim_matches('"').to_string());
+                    primary_access.clear();
+                    primary_matches = false;
+                    found_secondary = None;
+                }
+            } else if trimmed == "config secondaryip" {
+                in_secondary = true;
+            } else if trimmed == "next" {
+                if in_secondary && secondary_matches {
+                    if let Some(name) = &interface {
+                        found_secondary = Some(MgmtAccess {
+                            interface: name.clone(),
+                            secondary_index,
+                            allowaccess: secondary_access.clone(),
+                        });
+                    }
+                } else if !in_secondary && primary_matches {
+                    // `next` closes the interface; its secondary block (if any) is already done.
+                    return found_secondary.take().or_else(|| {
+                        interface.clone().map(|name| MgmtAccess {
+                            interface: name,
+                            secondary_index: None,
+                            allowaccess: primary_access.clone(),
+                        })
+                    });
+                } else if !in_secondary {
+                    if let Some(found) = found_secondary.take() {
+                        return Some(found);
+                    }
+                }
+            } else if trimmed == "end" {
+                in_secondary = false;
+            } else if let Some(rest) = trimmed.strip_prefix("set ip ") {
+                if address_of(rest).as_deref() == Some(management_ip) {
+                    if in_secondary {
+                        secondary_matches = true;
+                    } else {
+                        primary_matches = true;
+                    }
+                }
+            } else if let Some(rest) = trimmed.strip_prefix("set allowaccess ") {
+                let tokens: Vec<String> = rest.split_whitespace().map(str::to_string).collect();
+                if in_secondary {
+                    secondary_access = tokens;
+                } else {
+                    primary_access = tokens;
+                }
+            }
+        }
+        None
+    }
+
+    /// Commands that make sure SNMP queries to the management IP are
+    /// answered: sysinfo on, and `snmp` added to (never replacing) the
+    /// `allowaccess` of the address that owns the management IP.
+    fn snmp_prerequisite_commands(sysinfo_enabled: Option<bool>, access: &Option<MgmtAccess>) -> Vec<String> {
+        let mut commands = Vec::new();
+        if sysinfo_enabled != Some(true) {
+            commands.extend(["config system snmp sysinfo", "set status enable", "end"].map(String::from));
+        }
+        if let Some(access) = access {
+            if !access.allowaccess.iter().any(|a| a == "snmp") {
+                let mut allow = access.allowaccess.clone();
+                allow.push("snmp".to_string());
+                commands.push("config system interface".to_string());
+                commands.push(format!("edit \"{}\"", access.interface));
+                if let Some(index) = access.secondary_index {
+                    commands.push("config secondaryip".to_string());
+                    commands.push(format!("edit {}", index));
+                }
+                commands.push(format!("set allowaccess {}", allow.join(" ")));
+                commands.push("next".to_string());
+                if access.secondary_index.is_some() {
+                    commands.push("end".to_string());
+                    commands.push("next".to_string());
+                }
+                commands.push("end".to_string());
+            }
+        }
+        commands
+    }
+
+    /// Lowest community index from 100 up that is not taken. (Entries added by
+    /// this service live at 100+; indices below that belong to the factory
+    /// config or to people.)
+    fn free_snmp_index(occupied: &std::collections::HashSet<u32>) -> u32 {
+        (100u32..).find(|i| !occupied.contains(i)).expect("an unused index exists")
+    }
+
+    /// `set trap-... disable` + the `config hosts` table for a community with
+    /// `allowed_hosts`; empty for one without. (Hosts are checked up front by
+    /// `check_snmp_limits`; a failure here is logged, not swallowed silently.)
+    fn snmp_allowed_hosts_commands(community: &SnmpCommunity) -> Vec<String> {
+        if community.allowed_hosts.is_empty() {
+            return Vec::new();
+        }
+        match Self::snmp_community_block(0, community) {
+            Ok(block) => {
+                // The part of the block after the shared query settings.
+                let start = block.iter().position(|c| c == "set trap-v1-status disable").unwrap_or(block.len());
+                let end = block.len().saturating_sub(1); // drop the closing `next`
+                block[start..end].to_vec()
+            }
+            Err(e) => {
+                warn!("Skipping allowed_hosts for an SNMP community: {}", e);
+                Vec::new()
+            }
+        }
+    }
+
+    /// The checks that don't depend on switch state: how many communities
+    /// fit, and that every manager list is something this CLI can express.
+    fn check_snmp_limits(snmp: &SnmpConfig) -> Result<(), VendorError> {
+        if snmp.communities.len() > MAX_SNMP_COMMUNITIES {
+            return Err(VendorError::ValidationError(format!(
+                "FortiSwitch holds at most {} SNMP communities, {} are configured (counting any the service adds itself)",
+                MAX_SNMP_COMMUNITIES,
+                snmp.communities.len()
+            )));
+        }
+        for community in &snmp.communities {
+            Self::snmp_community_block(0, community)?;
+        }
+        Ok(())
+    }
+
+    /// `snmp` can't be reached on an address we couldn't identify: say so
+    /// instead of silently leaving SNMP unanswered.
+    fn warn_if_mgmt_access_unknown(&self) {
+        if self.mgmt_access.is_none() {
+            warn!(
+                "Cannot tell which interface owns {}: make sure 'snmp' is in its allowaccess, or SNMP queries get no answer",
+                self.config.management_ip()
+            );
+        }
+    }
+
+    /// One `edit <index> ... next` entry for a community. A community with
+    /// `allowed_hosts` lists them in `config hosts` (which restricts who may
+    /// query it — confirmed on FortiSwitch 108F-POE 7.2.8) and sends no
+    /// traps, because the same table also holds trap receivers; without
+    /// `allowed_hosts` it keeps this service's original trap defaults.
+    fn snmp_community_block(index: u32, community: &SnmpCommunity) -> Result<Vec<String>, VendorError> {
+        let hosts: Vec<(String, String)> = community
+            .allowed_hosts
+            .iter()
+            .map(|h| crate::allowed_hosts::host_to_fortios(h).map_err(|e| VendorError::ValidationError(e.to_string())))
+            .collect::<Result<_, _>>()?;
+        let traps = if hosts.is_empty() { "enable" } else { "disable" };
+
+        let mut block = vec![
+            format!("edit {}", index),
+            format!("set name \"{}\"", community.name),
+            "set status enable".to_string(),
+            "set query-v1-status enable".to_string(),
+            "set query-v2c-status enable".to_string(),
+            format!("set trap-v1-status {}", traps),
+            format!("set trap-v2c-status {}", traps),
+        ];
+        if !hosts.is_empty() {
+            block.push("config hosts".to_string());
+            for (n, (addr, mask)) in hosts.iter().enumerate() {
+                block.push(format!("edit {}", n + 1));
+                block.push(format!("set ip {} {}", addr, mask));
+                block.push("next".to_string());
+            }
+            block.push("end".to_string());
+        }
+        block.push("next".to_string());
+        Ok(block)
+    }
+
+    /// FortiSwitch SNMP is read-only, so a community's access level can't be
+    /// read back. Parsed communities adopt the desired access for the same
+    /// name; otherwise the diff would see a difference after every apply.
+    fn adopt_desired_access(parsed: &mut SnmpConfig, desired: &SnmpConfig) {
+        for community in &mut parsed.communities {
+            if let Some(wanted) = desired.communities.iter().find(|d| d.name == community.name) {
+                community.access = wanted.access;
+            }
         }
     }
 
@@ -440,6 +697,7 @@ impl FortiswitchSwitch {
                 commands.push("set status enable".to_string());
                 commands.push("set query-v1-status enable".to_string());
                 commands.push("set query-v2c-status enable".to_string());
+                commands.extend(Self::snmp_allowed_hosts_commands(community));
                 commands.push("next".to_string());
             }
         } else {
@@ -450,6 +708,7 @@ impl FortiswitchSwitch {
                 commands.push("set status enable".to_string());
                 commands.push("set query-v1-status enable".to_string());
                 commands.push("set query-v2c-status enable".to_string());
+                commands.extend(Self::snmp_allowed_hosts_commands(community));
                 commands.push("next".to_string());
             }
         }
@@ -654,7 +913,13 @@ impl FortiswitchSwitch {
         &mut self,
         snmp_config: &crate::models::SnmpConfig,
     ) -> Result<ConfigResult, VendorError> {
-        let commands = self.generate_snmp_commands(snmp_config);
+        Self::check_snmp_limits(snmp_config)?;
+        let mut commands = Vec::new();
+        if !snmp_config.communities.is_empty() {
+            self.warn_if_mgmt_access_unknown();
+            commands.extend(Self::snmp_prerequisite_commands(self.snmp_sysinfo_enabled, &self.mgmt_access));
+        }
+        commands.extend(self.generate_snmp_commands(snmp_config));
         let client = self
             .client
             .as_mut()
@@ -704,8 +969,26 @@ impl FortiswitchSwitch {
             });
         }
 
+        if let Some(desired) = &self.config.snmp {
+            Self::check_snmp_limits(desired)?;
+        }
+
+        // Reachability first: SNMP only answers once sysinfo is enabled and
+        // `snmp` is allowed on the management address. Only when communities
+        // are being added or rewritten; removing them must not touch it.
+        if !snmp_diff.communities_to_add.is_empty() || !snmp_diff.communities_to_update.is_empty() {
+            self.warn_if_mgmt_access_unknown();
+            commands.extend(Self::snmp_prerequisite_commands(self.snmp_sysinfo_enabled, &self.mgmt_access));
+        }
+
         // FortiSwitch SNMP uses "config system snmp community" -> "edit X" structure
         commands.push("config system snmp community".to_string());
+
+        // Indices that stay occupied: everything on the switch except what
+        // is being removed or rewritten (those are deleted first, so their
+        // slot can be reused by the rewrite itself).
+        let mut occupied: std::collections::HashSet<u32> =
+            self.snmp_community_indices.values().map(|&i| u32::from(i)).collect();
 
         // Remove communities. FortiSwitch's "config system snmp community"
         // is index-based — `delete <name>` is silently a no-op (confirmed
@@ -716,38 +999,47 @@ impl FortiswitchSwitch {
         // remove, but better than sending nothing).
         for community_name in &snmp_diff.communities_to_remove {
             info!("Removing SNMP community: {}", crate::redact::MASK);
-            let target = self.snmp_community_indices.get(community_name)
-                .map(|idx| idx.to_string())
-                .unwrap_or_else(|| community_name.clone());
+            let target = match self.snmp_community_indices.get(community_name) {
+                Some(idx) => {
+                    occupied.remove(&u32::from(*idx));
+                    idx.to_string()
+                }
+                None => community_name.clone(),
+            };
             commands.push(format!("delete {}", target));
             actions.push(format!("removed community '{}'", crate::redact::MASK));
         }
 
-        // Add new communities
-        for (idx, community) in snmp_diff.communities_to_add.iter().enumerate() {
-            info!("Adding SNMP community: {}", crate::redact::MASK);
-            // Use a high index to avoid conflicts
-            let edit_idx = 100 + idx;
-            commands.push(format!("edit {}", edit_idx));
-            commands.push(format!("set name \"{}\"", community.name));
-            commands.push("set status enable".to_string());
-            commands.push("set query-v1-status enable".to_string());
-            commands.push("set query-v2c-status enable".to_string());
-            commands.push("set trap-v1-status enable".to_string());
-            commands.push("set trap-v2c-status enable".to_string());
-            commands.push("next".to_string());
-            actions.push(format!("added community '{}'", crate::redact::MASK));
-        }
-
-        // Update existing communities (mainly for trap receivers)
+        // Update existing communities: FortiOS has no per-field "change the
+        // hosts" for a community we only know by name, so rewrite the entry
+        // at its own index (delete, then add it back with the new settings).
+        // Access levels don't exist on FortiSwitch (SNMP is read-only), so
+        // the allowed-managers list is what an update is about.
         for community in &snmp_diff.communities_to_update {
             info!("Updating SNMP community: {}", crate::redact::MASK);
-            // Would need to find existing index - for now just add new entry
-            commands.push("edit 1".to_string()); // Assuming first community
-            commands.push(format!("set name \"{}\"", community.name));
-            commands.push("set status enable".to_string());
-            commands.push("next".to_string());
+            let index = match self.snmp_community_indices.get(&community.name) {
+                Some(idx) => {
+                    commands.push(format!("delete {}", idx));
+                    u32::from(*idx)
+                }
+                None => {
+                    // Not on the switch under that name: treat as an add.
+                    let free = Self::free_snmp_index(&occupied);
+                    occupied.insert(free);
+                    free
+                }
+            };
+            commands.extend(Self::snmp_community_block(index, community)?);
             actions.push(format!("updated community '{}'", crate::redact::MASK));
+        }
+
+        // Add new communities, each at a free index (never one that stays).
+        for community in &snmp_diff.communities_to_add {
+            info!("Adding SNMP community: {}", crate::redact::MASK);
+            let index = Self::free_snmp_index(&occupied);
+            occupied.insert(index);
+            commands.extend(Self::snmp_community_block(index, community)?);
+            actions.push(format!("added community '{}'", crate::redact::MASK));
         }
 
         commands.push("end".to_string());
@@ -1022,8 +1314,19 @@ impl SwitchVendor for FortiswitchSwitch {
 
         let port_mirrors = self.parse_switch_mirrors(&switch_mirror.lines().collect::<Vec<&str>>());
         let snmp_community_lines: Vec<&str> = snmp_community.lines().collect();
-        let snmp = self.parse_snmp_community(&snmp_community_lines);
+        let mut snmp = self.parse_snmp_community(&snmp_community_lines);
         self.snmp_community_indices = Self::parse_snmp_community_indices(&snmp_community_lines);
+        // Read-only SNMP can't report an access level: adopt the desired one so
+        // it never shows up as a difference (see `adopt_desired_access`).
+        if let (Some(parsed), Some(desired)) = (snmp.as_mut(), self.config.snmp.as_ref()) {
+            Self::adopt_desired_access(parsed, desired);
+        }
+        // What SNMP needs besides a community: the agent switched on, and `snmp`
+        // allowed on the address queries are sent to.
+        let snmp_sysinfo = clean(&raw.snmp_sysinfo);
+        self.snmp_sysinfo_enabled =
+            Some(Self::parse_snmp_sysinfo_enabled(&snmp_sysinfo.lines().collect::<Vec<&str>>()));
+        self.mgmt_access = Self::parse_mgmt_access(&system_interface_lines, self.config.management_ip());
 
         // Verify hardware model by running "get system status"
         // This returns lines like "Version: FortiSwitch-108F-POE v7.2.8,build0660,..."
@@ -1358,6 +1661,11 @@ impl SwitchVendor for FortiswitchSwitch {
             }
         }
 
+        // SNMP: community count and manager lists must fit a FortiSwitch.
+        if let Some(snmp) = &self.config.snmp {
+            Self::check_snmp_limits(snmp)?;
+        }
+
         Ok(())
     }
 
@@ -1524,6 +1832,12 @@ impl FortiswitchSwitch {
             .await
             .map_err(|e| VendorError::CommandError(e.to_string()))?;
 
+        // Whether the SNMP agent is switched on at all (`sysinfo`).
+        let snmp_sysinfo = client
+            .execute_command("show system snmp sysinfo")
+            .await
+            .map_err(|e| VendorError::CommandError(e.to_string()))?;
+
         Ok(FortiSwitchConfigBlocks {
             system_interface,
             switch_vlan,
@@ -1531,6 +1845,7 @@ impl FortiswitchSwitch {
             physical_port,
             switch_mirror,
             snmp_community,
+            snmp_sysinfo,
         })
     }
 
@@ -2037,6 +2352,14 @@ impl FortiswitchSwitch {
 
     /// Parse SNMP communities, trap receivers, and enabled trap events from
     /// `config system snmp community`.
+    ///
+    /// A community's `config hosts` table serves two purposes on FortiOS: trap
+    /// destinations and the managers allowed to query. Which one it is follows
+    /// from the trap status: a community with both `trap-v1-status` and
+    /// `trap-v2c-status` disabled (how this service writes a community with
+    /// `allowed_hosts`) has an allow-list; otherwise the hosts are trap
+    /// receivers. Hosts are collected per community because `set name` can
+    /// come after the `config hosts` block in FortiOS's output.
     fn parse_snmp_community(&self, lines: &[&str]) -> Option<SnmpConfig> {
         let mut communities = Vec::new();
         let mut trap_receivers = Vec::new();
@@ -2047,7 +2370,10 @@ impl FortiswitchSwitch {
         let mut in_community = false;
         let mut community_name: Option<String> = None;
         let mut in_hosts = false;
-        let mut current_host_ip: Option<String> = None;
+        let mut current_host: Option<String> = None;
+        let mut hosts: Vec<String> = Vec::new();
+        let mut trap_v1_disabled = false;
+        let mut trap_v2c_disabled = false;
 
         for line in lines {
             let trimmed = line.trim();
@@ -2087,14 +2413,10 @@ impl FortiswitchSwitch {
 
             if in_hosts {
                 if let Some(rest) = trimmed.strip_prefix("set ip ") {
-                    current_host_ip = Some(rest.trim().to_string());
+                    current_host = Some(rest.trim().to_string());
                 } else if trimmed == "next" {
-                    if let (Some(ip), Some(name)) = (current_host_ip.take(), community_name.clone()) {
-                        trap_receivers.push(SnmpTrapReceiver {
-                            host: ip,
-                            community: name,
-                            version: None,
-                        });
+                    if let Some(host) = current_host.take() {
+                        hosts.push(host);
                     }
                 }
                 continue;
@@ -2107,6 +2429,9 @@ impl FortiswitchSwitch {
             if trimmed.starts_with("edit ") {
                 in_community = true;
                 community_name = None;
+                hosts.clear();
+                trap_v1_disabled = false;
+                trap_v2c_disabled = false;
                 continue;
             }
 
@@ -2121,9 +2446,41 @@ impl FortiswitchSwitch {
                     .split_whitespace()
                     .filter_map(Self::parse_trap_type_from_fortiswitch)
                     .collect();
+            } else if trimmed == "set trap-v1-status disable" {
+                trap_v1_disabled = true;
+            } else if trimmed == "set trap-v2c-status disable" {
+                trap_v2c_disabled = true;
             } else if trimmed == "next" {
                 if let Some(name) = community_name.take() {
-                    communities.push(SnmpCommunity::new(name, SnmpAccess::default()));
+                    let mut community = SnmpCommunity::new(name.clone(), SnmpAccess::default());
+                    if trap_v1_disabled && trap_v2c_disabled {
+                        community.allowed_hosts = hosts
+                            .iter()
+                            .filter_map(|h| {
+                                let mut parts = h.split_whitespace();
+                                let addr = parts.next()?;
+                                match parts.next() {
+                                    Some(mask) => crate::allowed_hosts::host_from_fortios(addr, mask),
+                                    None => crate::models::AllowedHost::try_from(addr.to_string()).ok(),
+                                }
+                            })
+                            .collect();
+                    } else {
+                        for host in hosts.drain(..) {
+                            // `show` prints "<ip> <mask>"; a single host is configured
+                            // (and compared) as the bare address.
+                            let host = host
+                                .strip_suffix(" 255.255.255.255")
+                                .map(str::to_string)
+                                .unwrap_or(host);
+                            trap_receivers.push(SnmpTrapReceiver {
+                                host,
+                                community: name.clone(),
+                                version: None,
+                            });
+                        }
+                    }
+                    communities.push(community);
                 }
                 in_community = false;
             }
@@ -4847,5 +5204,377 @@ mod tests {
         for secret in ["s3cret-added", "s3cret-removed", "s3cret-updated"] {
             assert!(!text.contains(secret), "{secret} leaked into logs:\n{text}");
         }
+    }
+
+    // ========== SNMP: allowed hosts, prerequisites, index handling ==========
+
+    const COMMUNITY_WITH_ALLOWED_HOST: &str = "\
+config system snmp community
+    edit 100
+        config hosts
+            edit 1
+                set ip 192.0.2.1 255.255.255.255
+            next
+        end
+        set name \"poll-community\"
+        set trap-v1-status disable
+        set trap-v2c-status disable
+    next
+end
+";
+
+    const COMMUNITY_WITH_TRAP_RECEIVER: &str = "\
+config system snmp community
+    edit 1
+        config hosts
+            edit 1
+                set ip 192.0.2.50 255.255.255.255
+            next
+        end
+        set name \"trap-community\"
+    next
+end
+";
+
+    fn lines(text: &str) -> Vec<&str> {
+        text.lines().collect()
+    }
+
+    fn community_with_hosts(name: &str, hosts: &[&str]) -> SnmpCommunity {
+        let mut c = SnmpCommunity::new(name, SnmpAccess::Operator);
+        c.allowed_hosts = hosts.iter().map(|h| crate::models::AllowedHost::try_from(h.to_string()).unwrap()).collect();
+        c
+    }
+
+    #[test]
+    fn parse_reads_allowed_hosts_for_a_community_whose_traps_are_disabled() {
+        let switch = create_test_switch();
+        let parsed = switch.parse_snmp_community(&lines(COMMUNITY_WITH_ALLOWED_HOST)).unwrap();
+
+        assert_eq!(parsed.communities.len(), 1);
+        assert_eq!(parsed.communities[0].name, "poll-community");
+        assert_eq!(
+            parsed.communities[0].allowed_hosts,
+            vec![crate::models::AllowedHost::Network("192.0.2.1".to_string())]
+        );
+        assert!(parsed.trap_receivers.is_empty(), "a query allow-list is not a trap receiver");
+    }
+
+    #[test]
+    fn parse_still_reads_hosts_as_trap_receivers_when_traps_are_enabled() {
+        let switch = create_test_switch();
+        let parsed = switch.parse_snmp_community(&lines(COMMUNITY_WITH_TRAP_RECEIVER)).unwrap();
+
+        assert_eq!(parsed.trap_receivers.len(), 1);
+        assert_eq!(parsed.trap_receivers[0].host, "192.0.2.50");
+        assert_eq!(parsed.trap_receivers[0].community, "trap-community", "name comes after the hosts block");
+        assert!(parsed.communities[0].allowed_hosts.is_empty());
+    }
+
+    #[test]
+    fn parse_sysinfo_reports_whether_snmp_is_enabled() {
+        assert!(FortiswitchSwitch::parse_snmp_sysinfo_enabled(&lines(
+            "config system snmp sysinfo\n    set status enable\nend\n"
+        )));
+        assert!(!FortiswitchSwitch::parse_snmp_sysinfo_enabled(&lines("config system snmp sysinfo\nend\n")));
+        assert!(!FortiswitchSwitch::parse_snmp_sysinfo_enabled(&lines("")));
+    }
+
+    const INTERFACES: &str = "\
+config system interface
+    edit \"mgmt\"
+        set ip 198.51.100.5 255.255.255.0
+        set allowaccess ping ssh
+    next
+    edit \"internal\"
+        set mode dhcp
+        set allowaccess ping https ssh
+        set secondary-IP enable
+        config secondaryip
+            edit 1
+                set ip 192.168.1.99 255.255.255.0
+                set allowaccess ping https ssh
+            next
+            edit 2
+                set ip 192.168.1.100 255.255.255.0
+                set allowaccess ping https
+            next
+        end
+    next
+end
+";
+
+    #[test]
+    fn mgmt_access_finds_the_secondary_address_that_owns_the_management_ip() {
+        let found = FortiswitchSwitch::parse_mgmt_access(&lines(INTERFACES), "192.168.1.100").unwrap();
+        assert_eq!(found.interface, "internal");
+        assert_eq!(found.secondary_index, Some(2));
+        assert_eq!(found.allowaccess, vec!["ping".to_string(), "https".to_string()]);
+    }
+
+    #[test]
+    fn mgmt_access_finds_a_primary_address_and_none_for_unknown_ips() {
+        let found = FortiswitchSwitch::parse_mgmt_access(&lines(INTERFACES), "198.51.100.5").unwrap();
+        assert_eq!((found.interface.as_str(), found.secondary_index), ("mgmt", None));
+        assert!(FortiswitchSwitch::parse_mgmt_access(&lines(INTERFACES), "203.0.113.9").is_none());
+    }
+
+    #[test]
+    fn prerequisites_enable_sysinfo_and_append_snmp_without_dropping_existing_access() {
+        let access = FortiswitchSwitch::parse_mgmt_access(&lines(INTERFACES), "192.168.1.100");
+        let commands = FortiswitchSwitch::snmp_prerequisite_commands(Some(false), &access);
+
+        assert_eq!(
+            commands,
+            vec![
+                "config system snmp sysinfo", "set status enable", "end",
+                "config system interface", "edit \"internal\"", "config secondaryip", "edit 2",
+                "set allowaccess ping https snmp", "next", "end", "next", "end",
+            ]
+        );
+    }
+
+    #[test]
+    fn prerequisites_are_empty_when_everything_is_already_on() {
+        let mut access = FortiswitchSwitch::parse_mgmt_access(&lines(INTERFACES), "198.51.100.5");
+        access.as_mut().unwrap().allowaccess.push("snmp".to_string());
+        assert!(FortiswitchSwitch::snmp_prerequisite_commands(Some(true), &access).is_empty());
+    }
+
+    #[test]
+    fn prerequisites_for_a_primary_address_edit_the_interface_directly() {
+        let access = FortiswitchSwitch::parse_mgmt_access(&lines(INTERFACES), "198.51.100.5");
+        let commands = FortiswitchSwitch::snmp_prerequisite_commands(Some(true), &access);
+        assert_eq!(
+            commands,
+            vec!["config system interface", "edit \"mgmt\"", "set allowaccess ping ssh snmp", "next", "end"]
+        );
+    }
+
+    #[test]
+    fn free_index_starts_at_100_and_skips_occupied_ones() {
+        let occupied = |v: &[u32]| v.iter().copied().collect::<std::collections::HashSet<u32>>();
+        assert_eq!(FortiswitchSwitch::free_snmp_index(&occupied(&[])), 100);
+        assert_eq!(FortiswitchSwitch::free_snmp_index(&occupied(&[100])), 101);
+        assert_eq!(FortiswitchSwitch::free_snmp_index(&occupied(&[1, 100, 101, 103])), 102);
+    }
+
+    #[test]
+    fn community_block_without_hosts_keeps_the_existing_trap_defaults() {
+        let block = FortiswitchSwitch::snmp_community_block(100, &SnmpCommunity::new("plain", SnmpAccess::Operator)).unwrap();
+        assert_eq!(
+            block,
+            vec![
+                "edit 100", "set name \"plain\"", "set status enable", "set query-v1-status enable",
+                "set query-v2c-status enable", "set trap-v1-status enable", "set trap-v2c-status enable", "next",
+            ]
+        );
+    }
+
+    #[test]
+    fn community_block_with_hosts_restricts_queries_and_does_not_send_traps() {
+        let block = FortiswitchSwitch::snmp_community_block(
+            101,
+            &community_with_hosts("poll", &["192.0.2.1", "192.0.2.0/24"]),
+        )
+        .unwrap();
+        assert_eq!(
+            block,
+            vec![
+                "edit 101", "set name \"poll\"", "set status enable", "set query-v1-status enable",
+                "set query-v2c-status enable", "set trap-v1-status disable", "set trap-v2c-status disable",
+                "config hosts", "edit 1", "set ip 192.0.2.1 255.255.255.255", "next",
+                "edit 2", "set ip 192.0.2.0 255.255.255.0", "next", "end", "next",
+            ]
+        );
+    }
+
+    #[test]
+    fn community_block_rejects_what_the_switch_cannot_express() {
+        assert!(FortiswitchSwitch::snmp_community_block(100, &community_with_hosts("v6", &["2001:db8::1"])).is_err());
+        let mut unresolved = SnmpCommunity::new("auto", SnmpAccess::Operator);
+        unresolved.allowed_hosts = vec![crate::models::AllowedHost::Auto];
+        assert!(FortiswitchSwitch::snmp_community_block(100, &unresolved).is_err());
+    }
+
+    fn position(sent: &[String], command: &str) -> usize {
+        sent.iter().position(|c| c == command).unwrap_or_else(|| panic!("{command:?} was not sent: {sent:?}"))
+    }
+
+    #[tokio::test]
+    async fn adding_a_community_never_reuses_the_index_of_one_that_stays() {
+        let (client, console) = FakeConsole::spawn(Mode::LoggedIn);
+        let mut switch = create_test_switch();
+        switch.client = Some(ConnectionClient::Serial(client));
+        switch.snmp_community_indices.insert("stays".to_string(), 100);
+
+        let diff = crate::models::SnmpStateDiff {
+            communities_to_add: vec![SnmpCommunity::new("new-one", SnmpAccess::Operator)],
+            ..Default::default()
+        };
+        switch.apply_snmp_diff(&diff).await.unwrap();
+
+        let sent = console.commands();
+        assert!(sent.contains(&"edit 101".to_string()), "new community must take a free index: {sent:?}");
+        assert!(!sent.contains(&"edit 100".to_string()), "must not overwrite the community at index 100: {sent:?}");
+    }
+
+    #[tokio::test]
+    async fn updating_a_community_rewrites_its_own_index_and_never_index_1() {
+        let (client, console) = FakeConsole::spawn(Mode::LoggedIn);
+        let mut switch = create_test_switch();
+        switch.client = Some(ConnectionClient::Serial(client));
+        switch.snmp_community_indices.insert("first".to_string(), 1);
+        switch.snmp_community_indices.insert("poll".to_string(), 100);
+
+        let diff = crate::models::SnmpStateDiff {
+            communities_to_update: vec![community_with_hosts("poll", &["192.0.2.9"])],
+            ..Default::default()
+        };
+        switch.apply_snmp_diff(&diff).await.unwrap();
+
+        let sent = console.commands();
+        // (`edit 1` also appears inside `config hosts`; what matters is which
+        // community entry carries the name.)
+        let name_at = position(&sent, "set name \"poll\"");
+        assert_eq!(sent[name_at - 1], "edit 100", "community must be rewritten at its own index: {sent:?}");
+        assert!(!sent.contains(&"delete 1".to_string()), "must not touch the community at index 1: {sent:?}");
+        assert!(position(&sent, "delete 100") < position(&sent, "edit 100"), "delete then re-add at its own index: {sent:?}");
+        assert!(sent.contains(&"set ip 192.0.2.9 255.255.255.255".to_string()), "new host missing: {sent:?}");
+    }
+
+    #[tokio::test]
+    async fn adding_a_community_first_makes_sure_snmp_is_reachable() {
+        let (client, console) = FakeConsole::spawn(Mode::LoggedIn);
+        let mut switch = create_test_switch();
+        switch.client = Some(ConnectionClient::Serial(client));
+        switch.snmp_sysinfo_enabled = Some(false);
+        switch.mgmt_access = FortiswitchSwitch::parse_mgmt_access(&lines(INTERFACES), "192.168.1.100");
+
+        let diff = crate::models::SnmpStateDiff {
+            communities_to_add: vec![community_with_hosts("poll", &["192.0.2.1"])],
+            ..Default::default()
+        };
+        switch.apply_snmp_diff(&diff).await.unwrap();
+
+        let sent = console.commands();
+        assert!(position(&sent, "set status enable") < position(&sent, "edit 100"), "sysinfo before the community: {sent:?}");
+        assert!(sent.contains(&"set allowaccess ping https snmp".to_string()), "allowaccess must be appended: {sent:?}");
+    }
+
+    #[tokio::test]
+    async fn removing_communities_leaves_the_reachability_settings_alone() {
+        let (client, console) = FakeConsole::spawn(Mode::LoggedIn);
+        let mut switch = create_test_switch();
+        switch.client = Some(ConnectionClient::Serial(client));
+        switch.snmp_sysinfo_enabled = Some(false);
+        switch.snmp_community_indices.insert("old".to_string(), 100);
+
+        let diff = crate::models::SnmpStateDiff { communities_to_remove: vec!["old".to_string()], ..Default::default() };
+        switch.apply_snmp_diff(&diff).await.unwrap();
+
+        let sent = console.commands();
+        assert!(sent.contains(&"delete 100".to_string()));
+        assert!(!sent.iter().any(|c| c.contains("allowaccess") || c == "config system snmp sysinfo"), "{sent:?}");
+    }
+
+    #[test]
+    fn at_most_three_communities_fit_on_a_fortiswitch() {
+        let mut switch = create_test_switch();
+        let community = |n: &str| SnmpCommunity::new(n, SnmpAccess::Operator);
+        switch.config.snmp = Some(SnmpConfig {
+            communities: vec![community("a"), community("b"), community("c")],
+            trap_receivers: vec![],
+            enabled_traps: vec![],
+        });
+        assert!(switch.validate_configuration().is_ok());
+
+        switch.config.snmp.as_mut().unwrap().communities.push(community("d"));
+        let err = switch.validate_configuration().unwrap_err().to_string();
+        assert!(err.contains("3") && err.contains("communit"), "unhelpful error: {err}");
+        assert!(!err.contains("\"d\"") && !err.contains(" d "), "must not echo community strings: {err}");
+    }
+
+    #[test]
+    fn unsupported_allowed_hosts_fail_validation_before_anything_is_sent() {
+        let mut switch = create_test_switch();
+        switch.config.snmp = Some(SnmpConfig {
+            communities: vec![community_with_hosts("v6", &["2001:db8::1"])],
+            trap_receivers: vec![],
+            enabled_traps: vec![],
+        });
+        assert!(switch.validate_configuration().unwrap_err().to_string().contains("IPv6"));
+    }
+
+    #[test]
+    fn access_cannot_be_read_back_so_parsed_communities_adopt_the_desired_access() {
+        let desired = SnmpConfig {
+            communities: vec![SnmpCommunity::new("kept", SnmpAccess::Operator)],
+            trap_receivers: vec![],
+            enabled_traps: vec![],
+        };
+        let mut parsed = SnmpConfig {
+            communities: vec![
+                SnmpCommunity::new("kept", SnmpAccess::Unrestricted),
+                SnmpCommunity::new("unknown", SnmpAccess::Unrestricted),
+            ],
+            trap_receivers: vec![],
+            enabled_traps: vec![],
+        };
+        FortiswitchSwitch::adopt_desired_access(&mut parsed, &desired);
+        assert_eq!(parsed.communities[0].access, SnmpAccess::Operator);
+        assert_eq!(parsed.communities[1].access, SnmpAccess::Unrestricted);
+    }
+
+    #[tokio::test]
+    async fn first_time_snmp_config_also_enables_reachability_and_the_hosts_list() {
+        let (client, console) = FakeConsole::spawn(Mode::LoggedIn);
+        let mut switch = create_test_switch();
+        switch.client = Some(ConnectionClient::Serial(client));
+        switch.snmp_sysinfo_enabled = Some(false);
+        switch.mgmt_access = FortiswitchSwitch::parse_mgmt_access(&lines(INTERFACES), "192.168.1.100");
+        let snmp = SnmpConfig {
+            communities: vec![community_with_hosts("poll", &["192.0.2.1"])],
+            trap_receivers: vec![],
+            enabled_traps: vec![],
+        };
+
+        switch.configure_snmp(&snmp).await.unwrap();
+
+        let sent = console.commands();
+        assert!(position(&sent, "set status enable") < position(&sent, "edit 1"), "sysinfo before communities: {sent:?}");
+        assert!(sent.contains(&"set allowaccess ping https snmp".to_string()), "{sent:?}");
+        assert!(sent.contains(&"set trap-v1-status disable".to_string()), "{sent:?}");
+        assert!(sent.contains(&"set ip 192.0.2.1 255.255.255.255".to_string()), "{sent:?}");
+    }
+
+    #[tokio::test]
+    async fn too_many_communities_are_rejected_before_any_command_is_sent() {
+        let (client, console) = FakeConsole::spawn(Mode::LoggedIn);
+        let mut switch = create_test_switch();
+        switch.client = Some(ConnectionClient::Serial(client));
+        let community = |n: &str| SnmpCommunity::new(n, SnmpAccess::Operator);
+        let snmp = SnmpConfig {
+            communities: vec![community("a"), community("b"), community("c"), community("d")],
+            trap_receivers: vec![],
+            enabled_traps: vec![],
+        };
+
+        assert!(switch.configure_snmp(&snmp).await.is_err());
+        assert!(console.commands().is_empty(), "nothing may be sent: {:?}", console.commands());
+    }
+
+    #[test]
+    fn auto_allowed_hosts_are_resolved_when_the_vendor_is_built() {
+        let mut config = create_test_config();
+        config.management_ip = Some("127.0.0.1".to_string());
+        let mut community = SnmpCommunity::new("poll", SnmpAccess::Operator);
+        community.allowed_hosts = vec![crate::models::AllowedHost::Auto];
+        config.snmp = Some(SnmpConfig { communities: vec![community], trap_receivers: vec![], enabled_traps: vec![] });
+
+        let switch = FortiswitchSwitch::new(config, RuntimeConfig::default(), false);
+
+        let hosts = &switch.config.snmp.as_ref().unwrap().communities[0].allowed_hosts;
+        assert_eq!(hosts, &vec![crate::models::AllowedHost::Network("127.0.0.1".to_string())]);
     }
 }

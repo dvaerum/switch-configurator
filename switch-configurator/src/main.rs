@@ -1,3 +1,4 @@
+mod allowed_hosts;
 mod api;
 mod config;
 mod diff;
