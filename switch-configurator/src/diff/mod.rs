@@ -1026,10 +1026,7 @@ mod tests {
         let mut desired = create_test_switch_config();
         desired.snmp = Some(SnmpConfig {
             communities: vec![
-                SnmpCommunity {
-                    name: "public".to_string(),
-                    access: SnmpAccess::Unrestricted,
-                },
+                SnmpCommunity::new("public".to_string(), SnmpAccess::Unrestricted),
             ],
             trap_receivers: vec![
                 SnmpTrapReceiver {
@@ -1155,10 +1152,7 @@ mod tests {
             port_mirrors: vec![],
             snmp: Some(SnmpConfig {
                 communities: vec![
-                    SnmpCommunity {
-                        name: "public".to_string(),
-                        access: SnmpAccess::Operator,
-                    },
+                    SnmpCommunity::new("public".to_string(), SnmpAccess::Operator),
                 ],
                 trap_receivers: vec![
                     SnmpTrapReceiver {
@@ -1181,10 +1175,7 @@ mod tests {
         let mut desired = create_test_switch_config();
         desired.snmp = Some(SnmpConfig {
             communities: vec![
-                SnmpCommunity {
-                    name: "public".to_string(),
-                    access: SnmpAccess::Operator,
-                },
+                SnmpCommunity::new("public".to_string(), SnmpAccess::Operator),
             ],
             trap_receivers: vec![
                 SnmpTrapReceiver {
@@ -2289,10 +2280,7 @@ mod tests {
             port_mirrors: vec![],
             snmp: Some(SnmpConfig {
                 communities: vec![
-                    SnmpCommunity {
-                        name: "public".to_string(),
-                        access: SnmpAccess::Operator,
-                    },
+                    SnmpCommunity::new("public".to_string(), SnmpAccess::Operator),
                 ],
                 trap_receivers: vec![],
                 enabled_traps: vec![],
@@ -2305,10 +2293,7 @@ mod tests {
         let mut desired = create_test_switch_config();
         desired.snmp = Some(SnmpConfig {
             communities: vec![
-                SnmpCommunity {
-                    name: "public".to_string(),
-                    access: SnmpAccess::Unrestricted,
-                },
+                SnmpCommunity::new("public".to_string(), SnmpAccess::Unrestricted),
             ],
             trap_receivers: vec![],
             enabled_traps: vec![],
@@ -2339,14 +2324,8 @@ mod tests {
             port_mirrors: vec![],
             snmp: Some(SnmpConfig {
                 communities: vec![
-                    SnmpCommunity {
-                        name: "public".to_string(),
-                        access: SnmpAccess::Operator,
-                    },
-                    SnmpCommunity {
-                        name: "private".to_string(),
-                        access: SnmpAccess::Manager,
-                    },
+                    SnmpCommunity::new("public".to_string(), SnmpAccess::Operator),
+                    SnmpCommunity::new("private".to_string(), SnmpAccess::Manager),
                 ],
                 trap_receivers: vec![
                     SnmpTrapReceiver {
@@ -2404,10 +2383,7 @@ mod tests {
             port_mirrors: vec![],
             snmp: Some(SnmpConfig {
                 communities: vec![
-                    SnmpCommunity {
-                        name: "public".to_string(),
-                        access: SnmpAccess::Operator,
-                    },
+                    SnmpCommunity::new("public".to_string(), SnmpAccess::Operator),
                 ],
                 trap_receivers: vec![],
                 enabled_traps: vec![TrapType::MacNotify],
@@ -2420,10 +2396,7 @@ mod tests {
         let mut desired = create_test_switch_config();
         desired.snmp = Some(SnmpConfig {
             communities: vec![
-                SnmpCommunity {
-                    name: "public".to_string(),
-                    access: SnmpAccess::Operator,
-                },
+                SnmpCommunity::new("public".to_string(), SnmpAccess::Operator),
             ],
             trap_receivers: vec![],
             enabled_traps: vec![TrapType::LinkChange],

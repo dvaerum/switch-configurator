@@ -973,15 +973,121 @@ fn default_mirror_direction() -> MirrorDirection {
     MirrorDirection::Both
 }
 
-/// SNMP community configuration
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// SNMP community configuration.
+///
+/// The community string comes from exactly one of `name` (written inline),
+/// `name_file` (path of a file holding it, e.g. a sops-nix secret) or
+/// `name_credential` (a systemd `LoadCredential` id, read from
+/// `$CREDENTIALS_DIRECTORY`). `name` always holds the usable value at
+/// runtime: the file/credential is read into it when the config is
+/// validated (`secrets::resolve_snmp_secrets`). When a reference is set,
+/// only the reference is ever serialised, so the secret never reaches API
+/// responses, previews or overlay files.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct SnmpCommunity {
-    /// Community string
+    /// Community string (inline, or the resolved value of a reference)
+    #[serde(default)]
     pub name: String,
 
     /// Access level
     #[serde(default)]
     pub access: SnmpAccess,
+
+    /// Read the community string from this file
+    #[serde(default)]
+    pub name_file: Option<std::path::PathBuf>,
+
+    /// Read the community string from this systemd credential id
+    #[serde(default)]
+    pub name_credential: Option<String>,
+
+    /// Managers allowed to use this community (empty = no restriction)
+    #[serde(default)]
+    pub allowed_hosts: Vec<AllowedHost>,
+}
+
+impl SnmpCommunity {
+    /// An inline community with no restriction.
+    pub fn new(name: impl Into<String>, access: SnmpAccess) -> Self {
+        Self {
+            name: name.into(),
+            access,
+            name_file: None,
+            name_credential: None,
+            allowed_hosts: Vec::new(),
+        }
+    }
+
+    /// Does the string come from a file or credential rather than the config?
+    pub fn has_reference(&self) -> bool {
+        self.name_file.is_some() || self.name_credential.is_some()
+    }
+}
+
+impl Serialize for SnmpCommunity {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(None)?;
+        if !self.has_reference() {
+            map.serialize_entry("name", &self.name)?;
+        }
+        if let Some(file) = &self.name_file {
+            map.serialize_entry("name_file", file)?;
+        }
+        if let Some(credential) = &self.name_credential {
+            map.serialize_entry("name_credential", credential)?;
+        }
+        map.serialize_entry("access", &self.access)?;
+        if !self.allowed_hosts.is_empty() {
+            map.serialize_entry("allowed_hosts", &self.allowed_hosts)?;
+        }
+        map.end()
+    }
+}
+
+/// A manager allowed to query an SNMP community.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub enum AllowedHost {
+    /// The address this host reaches the switch from (resolved when applied).
+    Auto,
+    /// An IP address or CIDR network, e.g. `192.0.2.1` or `192.0.2.0/24`.
+    Network(String),
+}
+
+impl TryFrom<String> for AllowedHost {
+    type Error = String;
+
+    fn try_from(value: String) -> Result<Self, String> {
+        let value = value.trim().to_string();
+        if value.eq_ignore_ascii_case("auto") {
+            return Ok(Self::Auto);
+        }
+        let (addr, prefix) = match value.split_once('/') {
+            Some((addr, prefix)) => (addr, Some(prefix)),
+            None => (value.as_str(), None),
+        };
+        let ip: std::net::IpAddr = addr
+            .parse()
+            .map_err(|_| format!("allowed_hosts entry '{}' is neither 'auto' nor an IP address/CIDR", value))?;
+        if let Some(prefix) = prefix {
+            let max = if ip.is_ipv4() { 32 } else { 128 };
+            match prefix.parse::<u8>() {
+                Ok(n) if n <= max => {}
+                _ => return Err(format!("allowed_hosts entry '{}' has an invalid prefix length", value)),
+            }
+        }
+        Ok(Self::Network(value))
+    }
+}
+
+impl From<AllowedHost> for String {
+    fn from(host: AllowedHost) -> String {
+        match host {
+            AllowedHost::Auto => "auto".to_string(),
+            AllowedHost::Network(network) => network,
+        }
+    }
 }
 
 /// SNMP access level

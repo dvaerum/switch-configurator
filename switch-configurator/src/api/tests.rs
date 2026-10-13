@@ -4190,4 +4190,77 @@ mod integration_tests {
         assert!(store.mac_table_cache.read().await.contains_key("test-sw-01"));
         assert!(store.port_status_cache.read().await.is_empty());
     }
+
+    // ---- SNMP community secrets through the API ----
+
+    #[tokio::test]
+    async fn test_desired_config_round_trip_keeps_a_file_secret_out_of_responses() {
+        let dir = tempfile::tempdir().unwrap();
+        let secret_file = dir.path().join("snmp-ro");
+        std::fs::write(&secret_file, "api-secret-11\n").unwrap();
+        let store = create_test_config_store();
+        let app = api::create_router(store.clone());
+
+        // Start from the switch as the API shows it, point its SNMP at a file.
+        let get = Request::builder().uri("/switches/test-sw-01/desired-config").body(Body::empty()).unwrap();
+        let response = app.clone().oneshot(get).await.unwrap();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let mut switch: Value = serde_json::from_slice(&body).unwrap();
+        switch["snmp"] = serde_json::json!({
+            "communities": [{"name_file": secret_file.to_str().unwrap(), "access": "operator"}],
+            "trap_receivers": [],
+            "enabled_traps": []
+        });
+        let put = Request::builder()
+            .method("PUT")
+            .uri("/switches/test-sw-01/desired-config")
+            .header("content-type", "application/json")
+            .body(Body::from(switch.to_string()))
+            .unwrap();
+        let response = app.clone().oneshot(put).await.unwrap();
+        let status = response.status();
+        let put_body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(status, StatusCode::OK, "PUT failed: {}", String::from_utf8_lossy(&put_body));
+        assert!(!String::from_utf8_lossy(&put_body).contains("api-secret-11"), "PUT response leaked the secret");
+
+        // The runtime config has the value (it is what gets applied)...
+        let runtime = store.config.read().await;
+        assert_eq!(runtime.switches[0].snmp.as_ref().unwrap().communities[0].name, "api-secret-11");
+        drop(runtime);
+
+        // ...but reading the desired config back shows only the reference.
+        let get = Request::builder().uri("/switches/test-sw-01/desired-config").body(Body::empty()).unwrap();
+        let response = app.oneshot(get).await.unwrap();
+        let text = String::from_utf8(axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap().to_vec()).unwrap();
+        assert!(text.contains("name_file"), "reference missing: {text}");
+        assert!(!text.contains("api-secret-11"), "GET desired-config leaked the secret: {text}");
+    }
+
+    #[tokio::test]
+    async fn test_preview_diff_masks_registered_secrets_read_back_from_the_switch() {
+        crate::secrets::register_secret("preview-secret-12");
+        let store = create_test_config_store(); // test-sw-01 has no SNMP desired
+        let current_state = crate::models::SwitchState {
+            snmp: Some(crate::models::SnmpConfig {
+                communities: vec![crate::models::SnmpCommunity::new("preview-secret-12", crate::models::SnmpAccess::Operator)],
+                trap_receivers: vec![],
+                enabled_traps: vec![],
+            }),
+            ..Default::default()
+        };
+
+        let response = preview_diff(
+            axum::extract::State(store),
+            axum::extract::Path("test-sw-01".to_string()),
+            axum::Json(PreviewDiffRequest { current_state: Some(current_state) }),
+        )
+        .await
+        .map(IntoResponse::into_response)
+        .unwrap_or_else(IntoResponse::into_response);
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let text = String::from_utf8(axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap().to_vec()).unwrap();
+        assert!(text.contains("communities_to_remove"), "expected the community removal in the diff: {text}");
+        assert!(!text.contains("preview-secret-12"), "preview-diff leaked a registered secret: {text}");
+    }
 }

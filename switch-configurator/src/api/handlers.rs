@@ -445,12 +445,14 @@ pub async fn preview_diff(
 
     let commands = vendor.generate_commands_for_diff(&diff);
 
-    Ok(Json(json!({
+    // Community strings read back from the switch may equal a secret that
+    // came from a file/credential: mask those (see `secrets`).
+    Ok(Json(crate::secrets::scrub_json(json!({
         "switch_id": id,
         "has_changes": diff.has_changes(),
         "diff": diff,
         "commands": commands,
-    })))
+    }))))
 }
 
 /// Save switch config changes to an overlay YAML file in the config folder
@@ -888,14 +890,17 @@ pub async fn get_config(
 
     (
         StatusCode::OK,
-        Json(json!({
+        // The switch's own read-back can contain a secret that came from a
+        // file/credential: mask those (see `secrets`). Authored inline names
+        // are left alone (docs/decisions/0002-secret-redaction-scope.md).
+        Json(crate::secrets::scrub_json(json!({
             "id": switch_config.id,
             "hostname": switch_config.hostname,
             "model": switch_config.model,
             "management_ip": switch_config.management_ip,
             "raw_config": running_config,
             "parsed_state": parsed_state
-        })),
+        }))),
     )
         .into_response()
 }

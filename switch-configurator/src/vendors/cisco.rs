@@ -1816,10 +1816,7 @@ mod tests {
 
         let snmp_config = SnmpConfig {
             communities: vec![
-                SnmpCommunity {
-                    name: "public".to_string(),
-                    access: SnmpAccess::Operator,
-                },
+                SnmpCommunity::new("public".to_string(), SnmpAccess::Operator),
             ],
             trap_receivers: vec![],
             enabled_traps: vec![],
@@ -1838,10 +1835,7 @@ mod tests {
 
         let snmp_config = SnmpConfig {
             communities: vec![
-                SnmpCommunity {
-                    name: "public".to_string(),
-                    access: SnmpAccess::Operator,
-                },
+                SnmpCommunity::new("public".to_string(), SnmpAccess::Operator),
             ],
             trap_receivers: vec![
                 SnmpTrapReceiver {

@@ -1,6 +1,11 @@
 { self }:
 
-{ config, lib, pkgs, ... }:
+{
+  config,
+  lib,
+  pkgs,
+  ...
+}:
 
 with lib;
 
@@ -102,7 +107,13 @@ in
     };
 
     logLevel = mkOption {
-      type = types.enum [ "trace" "debug" "info" "warn" "error" ];
+      type = types.enum [
+        "trace"
+        "debug"
+        "info"
+        "warn"
+        "error"
+      ];
       default = "info";
       description = "Logging level";
     };
@@ -142,6 +153,24 @@ in
       '';
     };
 
+    loadCredentials = mkOption {
+      type = types.attrsOf types.path;
+      default = { };
+      description = ''
+        Secret files handed to the service through systemd `LoadCredential=`,
+        keyed by credential id. systemd reads each file as root and gives the
+        service a private copy under `$CREDENTIALS_DIRECTORY`, so the source
+        file can stay `0400 root` and the service user never needs access to
+        it. Reference a credential from the switch config as
+        `name_credential: <id>` (SNMP communities).
+      '';
+      example = literalExpression ''
+        {
+          snmp-ro = config.sops.secrets."snmp-ro".path;
+        }
+      '';
+    };
+
     environmentVariables = mkOption {
       type = types.attrsOf types.str;
       default = { };
@@ -171,7 +200,13 @@ in
       };
 
       logLevel = mkOption {
-        type = types.enum [ "trace" "debug" "info" "warn" "error" ];
+        type = types.enum [
+          "trace"
+          "debug"
+          "info"
+          "warn"
+          "error"
+        ];
         default = cfg.logLevel;
         defaultText = literalExpression "config.services.switch-configurator.logLevel";
         description = "Logging level for the web UI";
@@ -180,6 +215,17 @@ in
   };
 
   config = mkIf cfg.enable {
+    # The service reads credentials as `$CREDENTIALS_DIRECTORY/<id>`: an id
+    # with a slash or dots-only would point outside that directory.
+    assertions = [
+      {
+        assertion = all (id: builtins.match "[A-Za-z0-9._-]+" id != null && id != "." && id != "..") (
+          attrNames cfg.loadCredentials
+        );
+        message = "services.switch-configurator.loadCredentials: credential ids must be plain names (letters, digits, '.', '_', '-'), not paths.";
+      }
+    ];
+
     # Create user and group
     users.users.${cfg.user} = {
       isSystemUser = true;
@@ -210,11 +256,16 @@ in
         Restart = "on-failure";
         RestartSec = "10s";
         RuntimeDirectory = "switch-configurator";
+        LoadCredential = mapAttrsToList (id: path: "${id}:${path}") cfg.loadCredentials;
 
         ExecStart = ''
           ${cfg.package}/bin/switch-configurator \
             --config-file ${cfg.configFile} \
-            ${concatMapStringsSep " " (folder: "--config-folder ${folder}") ([ "/etc/switch-configurator" ] ++ cfg.extraConfigFolders)} \
+            ${
+              concatMapStringsSep " " (folder: "--config-folder ${folder}") (
+                [ "/etc/switch-configurator" ] ++ cfg.extraConfigFolders
+              )
+            } \
             --port ${toString cfg.port} \
             ${optionalString (cfg.socketPath != null) "--socket ${cfg.socketPath}"} \
             ${if cfg.enableFileWatching then "--watch" else "--watch=false"} \
@@ -229,10 +280,15 @@ in
         ProtectSystem = "strict";
         ProtectHome = true;
         PrivateNetwork = false;
-        RestrictAddressFamilies = [ "AF_INET" "AF_INET6" "AF_UNIX" ];
+        RestrictAddressFamilies = [
+          "AF_INET"
+          "AF_INET6"
+          "AF_UNIX"
+        ];
         # Allow writing to config folders for overlay saves (unless readOnly)
-        ReadWritePaths = lib.mkIf (!cfg.readOnly)
-          ([ "/etc/switch-configurator" ] ++ cfg.extraConfigFolders);
+        ReadWritePaths = lib.mkIf (!cfg.readOnly) (
+          [ "/etc/switch-configurator" ] ++ cfg.extraConfigFolders
+        );
       };
     };
 
@@ -263,7 +319,11 @@ in
         ProtectSystem = "strict";
         ProtectHome = true;
         PrivateNetwork = false;
-        RestrictAddressFamilies = [ "AF_INET" "AF_INET6" "AF_UNIX" ];
+        RestrictAddressFamilies = [
+          "AF_INET"
+          "AF_INET6"
+          "AF_UNIX"
+        ];
       };
     };
   };

@@ -51,7 +51,7 @@ Each switch in the `switches` list requires these fields:
 **FortiSwitch:**
 - `Fortiswitch124F_FPOE`
 
-See [CLAUDE.md](../../CLAUDE.md) for detailed vendor implementation information.
+See [AGENTS.md](../../AGENTS.md) for detailed vendor implementation information.
 
 ## Credentials
 
@@ -403,6 +403,20 @@ communities:
   - name: "admin"
     access: unrestricted  # Full administrative access
 ```
+
+**Keeping the string out of the config file.** Give each community exactly one source:
+
+```yaml
+communities:
+  - name: "public"                          # inline, as above
+  - name_file: /run/secrets/snmp-ro         # read from a file (e.g. a sops-nix secret)
+    access: operator
+  - name_credential: snmp-ro                # systemd LoadCredential id ($CREDENTIALS_DIRECTORY/snmp-ro)
+    access: operator
+```
+
+The string is read when the config is loaded or reloaded (`POST /config/reload`), so rotating a secret means updating the file/credential and reloading (a changed credential needs a service restart, as systemd snapshots it at start). A community that references a file or credential is shown and saved as the reference only: the value never appears in `GET .../desired-config`, previews, overlays or logs, and is masked in `GET .../config`. A missing, empty or unreadable secret skips that switch with a validation error that names the source but never the value. Quotes and control characters are not allowed in a community string. See [`docs/decisions/0002-secret-redaction-scope.md`](../decisions/0002-secret-redaction-scope.md).
+
 
 **Access Levels:**
 - `operator` - Read-only (view configuration)
@@ -1052,5 +1066,5 @@ See the [examples directory](../../examples/) for complete, working configuratio
 ## Next Steps
 
 - **[Examples](../../examples/README.md)** - Complete configuration examples
-- **[CLAUDE.md](../../CLAUDE.md)** - Detailed architecture and field reference
+- **[AGENTS.md](../../AGENTS.md)** - Detailed architecture and field reference
 - **[Troubleshooting](troubleshooting.md)** - Common configuration issues
