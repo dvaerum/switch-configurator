@@ -31,10 +31,12 @@ impl SecretContext {
         Self { credentials_dir: std::env::var_os("CREDENTIALS_DIRECTORY").map(PathBuf::from) }
     }
 
+    #[cfg(test)]
     pub fn with_credentials_dir(dir: impl Into<PathBuf>) -> Self {
         Self { credentials_dir: Some(dir.into()) }
     }
 
+    #[cfg(test)]
     pub fn without_credentials() -> Self {
         Self::default()
     }
