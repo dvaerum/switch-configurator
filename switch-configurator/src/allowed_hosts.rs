@@ -92,7 +92,7 @@ pub fn check_vendor_support(switch: &SwitchConfig) -> Result<()> {
     }
     if crate::snmp_reads::reads_enabled(switch) {
         bail!(
-            "switch '{}': snmp.reads is not supported for {:?} switches yet (FortiSwitch only)",
+            "switch '{}': snmp.reads is not supported for {:?} switches yet (FortiSwitch only; see docs/learnings/snmp-aruba-cisco.md)",
             switch.id,
             vendor
         );
@@ -103,7 +103,7 @@ pub fn check_vendor_support(switch: &SwitchConfig) -> Result<()> {
         .is_some_and(|snmp| snmp.communities.iter().any(|c| !c.allowed_hosts.is_empty()));
     if restricted {
         bail!(
-            "switch '{}': SNMP allowed_hosts is not supported for {:?} switches yet (FortiSwitch only); remove it, or the community would be unrestricted",
+            "switch '{}': SNMP allowed_hosts is not supported for {:?} switches yet (FortiSwitch only; see docs/learnings/snmp-aruba-cisco.md); remove it, or the community would be unrestricted",
             switch.id,
             vendor
         );
