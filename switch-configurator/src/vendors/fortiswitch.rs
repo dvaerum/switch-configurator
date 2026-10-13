@@ -57,6 +57,8 @@ struct FortiSwitchConfigBlocks {
     switch_mirror: String,
     snmp_community: String,
     snmp_sysinfo: String,
+    /// `get system interface`: includes DHCP-leased addresses.
+    interface_addresses: String,
 }
 
 /// A VLAN's Layer-3 interface details, when it has one (see `parse_svi_details`).
@@ -197,6 +199,65 @@ impl FortiswitchSwitch {
                     secondary_access = tokens;
                 } else {
                     primary_access = tokens;
+                }
+            }
+        }
+        None
+    }
+
+    /// `get system interface` -> each interface's current address. Unlike
+    /// `show system interface` this includes addresses a DHCP client was
+    /// given (printed as `ip: <addr> <mask>`; `0.0.0.0` when unset).
+    fn parse_interface_addresses(lines: &[&str]) -> std::collections::HashMap<String, String> {
+        let mut addresses = std::collections::HashMap::new();
+        for line in lines {
+            let tokens: Vec<&str> = line.split_whitespace().collect();
+            let after = |key: &str| tokens.iter().position(|t| *t == key).and_then(|i| tokens.get(i + 1)).map(|v| (*v).to_string());
+            if let (Some(name), Some(ip)) = (after("name:"), after("ip:")) {
+                addresses.insert(name, ip);
+            }
+        }
+        addresses
+    }
+
+    /// The management IP's interface: by a configured `set ip` (primary or
+    /// secondary) when there is one, otherwise by whichever interface was
+    /// leased that address. `None` when neither knows it, or when a leasing
+    /// interface's `allowaccess` isn't printed (a default we can't append to
+    /// without risking dropping it).
+    fn resolve_mgmt_access(
+        show_lines: &[&str],
+        leases: &std::collections::HashMap<String, String>,
+        management_ip: &str,
+    ) -> Option<MgmtAccess> {
+        if let Some(found) = Self::parse_mgmt_access(show_lines, management_ip) {
+            return Some(found);
+        }
+        if management_ip.is_empty() || management_ip == "0.0.0.0" {
+            return None;
+        }
+        let owner = leases.iter().find(|(_, ip)| ip.as_str() == management_ip).map(|(name, _)| name.clone())?;
+        let allowaccess = Self::interface_allowaccess(show_lines, &owner)?;
+        Some(MgmtAccess { interface: owner, secondary_index: None, allowaccess })
+    }
+
+    /// The primary `set allowaccess` list of one interface, if it is printed.
+    fn interface_allowaccess(lines: &[&str], interface: &str) -> Option<Vec<String>> {
+        let mut in_target = false;
+        let mut in_secondary = false;
+        for line in lines {
+            let trimmed = line.trim();
+            if let Some(name) = trimmed.strip_prefix("edit ") {
+                if !in_secondary {
+                    in_target = name.trim().trim_matches('"') == interface;
+                }
+            } else if trimmed == "config secondaryip" {
+                in_secondary = true;
+            } else if trimmed == "end" {
+                in_secondary = false;
+            } else if in_target && !in_secondary {
+                if let Some(rest) = trimmed.strip_prefix("set allowaccess ") {
+                    return Some(rest.split_whitespace().map(str::to_string).collect());
                 }
             }
         }
@@ -1326,7 +1387,8 @@ impl SwitchVendor for FortiswitchSwitch {
         let snmp_sysinfo = clean(&raw.snmp_sysinfo);
         self.snmp_sysinfo_enabled =
             Some(Self::parse_snmp_sysinfo_enabled(&snmp_sysinfo.lines().collect::<Vec<&str>>()));
-        self.mgmt_access = Self::parse_mgmt_access(&system_interface_lines, self.config.management_ip());
+        let leases = Self::parse_interface_addresses(&clean(&raw.interface_addresses).lines().collect::<Vec<&str>>());
+        self.mgmt_access = Self::resolve_mgmt_access(&system_interface_lines, &leases, self.config.management_ip());
 
         // Verify hardware model by running "get system status"
         // This returns lines like "Version: FortiSwitch-108F-POE v7.2.8,build0660,..."
@@ -1838,6 +1900,17 @@ impl FortiswitchSwitch {
             .await
             .map_err(|e| VendorError::CommandError(e.to_string()))?;
 
+        // Current interface addresses, DHCP leases included (`show` omits them).
+        // Only used to find which interface owns the management IP, so a
+        // failure is logged, not fatal: SNMP setup then warns it can't tell.
+        let interface_addresses = match client.execute_command("get system interface").await {
+            Ok(output) => output,
+            Err(e) => {
+                warn!("Could not read interface addresses (get system interface): {}", e);
+                String::new()
+            }
+        };
+
         Ok(FortiSwitchConfigBlocks {
             system_interface,
             switch_vlan,
@@ -1846,6 +1919,7 @@ impl FortiswitchSwitch {
             switch_mirror,
             snmp_community,
             snmp_sysinfo,
+            interface_addresses,
         })
     }
 
@@ -5597,5 +5671,82 @@ end
 
         switch.config.snmp.as_mut().unwrap().reads.as_mut().unwrap().mode = crate::models::SnmpReadsMode::Off;
         assert!(switch.validate_configuration().is_ok(), "reads off: only the listed three");
+    }
+
+    // ---- management address leased over DHCP (as on the real 124F's vlan42) ----
+
+    /// The shape of the real IT-02876 switch: `internal` has a static
+    /// secondary only, and `vlan42` holds the management address as a DHCP
+    /// lease that `show system interface` does not print.
+    const DHCP_INTERFACES: &str = "\
+config system interface
+    edit \"internal\"
+        set mode dhcp
+        set allowaccess ping https ssh
+        set secondary-IP enable
+        config secondaryip
+            edit 1
+                set ip 192.168.1.99 255.255.255.0
+                set allowaccess ping https ssh
+            next
+        end
+    next
+    edit \"vlan42\"
+        set mode dhcp
+        set allowaccess ping
+        set description \"Management VLAN\"
+        set vlanid 42
+        set interface \"internal\"
+    next
+end
+";
+
+    const GET_INTERFACES: &str = "\
+== [ internal ]
+name: internal    mode: dhcp    ip: 0.0.0.0 0.0.0.0   status: up    type: physical   mtu-override: disable
+== [ vlan42 ]
+name: vlan42    mode: dhcp    ip: 192.0.2.2 255.255.255.0   status: up    netmask: 24   type: vlan   mtu-override: disable
+";
+
+    #[test]
+    fn get_system_interface_yields_each_interfaces_address() {
+        let addresses = FortiswitchSwitch::parse_interface_addresses(&lines(GET_INTERFACES));
+        assert_eq!(addresses.get("vlan42").map(String::as_str), Some("192.0.2.2"));
+        assert_eq!(addresses.get("internal").map(String::as_str), Some("0.0.0.0"));
+        assert_eq!(addresses.len(), 2);
+    }
+
+    #[test]
+    fn a_leased_management_address_is_found_through_get_system_interface() {
+        let leases = FortiswitchSwitch::parse_interface_addresses(&lines(GET_INTERFACES));
+        let found = FortiswitchSwitch::resolve_mgmt_access(&lines(DHCP_INTERFACES), &leases, "192.0.2.2").unwrap();
+        assert_eq!(found.interface, "vlan42");
+        assert_eq!(found.secondary_index, None);
+        assert_eq!(found.allowaccess, vec!["ping".to_string()]);
+    }
+
+    #[test]
+    fn snmp_is_appended_to_the_leasing_interface_without_dropping_ping() {
+        let leases = FortiswitchSwitch::parse_interface_addresses(&lines(GET_INTERFACES));
+        let access = FortiswitchSwitch::resolve_mgmt_access(&lines(DHCP_INTERFACES), &leases, "192.0.2.2");
+        assert_eq!(
+            FortiswitchSwitch::snmp_prerequisite_commands(Some(true), &access),
+            vec!["config system interface", "edit \"vlan42\"", "set allowaccess ping snmp", "next", "end"]
+        );
+    }
+
+    #[test]
+    fn a_configured_address_wins_over_a_lease_lookup() {
+        let mut leases = std::collections::HashMap::new();
+        leases.insert("vlan42".to_string(), "192.168.1.99".to_string()); // same address as internal's secondary
+        let found = FortiswitchSwitch::resolve_mgmt_access(&lines(DHCP_INTERFACES), &leases, "192.168.1.99").unwrap();
+        assert_eq!((found.interface.as_str(), found.secondary_index), ("internal", Some(1)));
+    }
+
+    #[test]
+    fn an_address_nobody_holds_is_still_unknown() {
+        let leases = FortiswitchSwitch::parse_interface_addresses(&lines(GET_INTERFACES));
+        assert!(FortiswitchSwitch::resolve_mgmt_access(&lines(DHCP_INTERFACES), &leases, "203.0.113.9").is_none());
+        assert!(FortiswitchSwitch::resolve_mgmt_access(&lines(DHCP_INTERFACES), &leases, "0.0.0.0").is_none(), "an unset address is not a match");
     }
 }
