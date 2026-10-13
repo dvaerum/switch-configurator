@@ -1,6 +1,6 @@
 [package]
 name = "switch-configurator"
-version = "0.23.7"
+version = "0.23.8"
 edition = "2024"
 rust-version = "1.85"
 

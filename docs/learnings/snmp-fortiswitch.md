@@ -103,8 +103,36 @@ whose management address is a DHCP lease on `vlan42`.
   0.39s against 12.4s over the console; MAC table 0.12s against 3.5s.
   `x-data-source: snmp` for `source=snmp` and `auto`.
 - One difference: SNMP also lists the `vlan42` VLAN interface (30 rows against
-  the console's 29, which has only the physical ports and `internal`). The
-  mapping covers every interface by design; whether to keep virtual interfaces
-  out is an open decision.
+  the console's 29, which has only the physical ports and `internal`). Facts
+  from walking `ifTable`/`ifXTable` on the bench (31 `ifIndex` rows):
+
+  | ifIndex | ifDescr | ifName | ifType |
+  |---|---|---|---|
+  | 1-28 | `portN(primary)` | `portN` | `ethernetCsmacd(6)` |
+  | 29 | `internal(primary)` | `internal` | `ethernetCsmacd(6)` |
+  | 30 | `internal` | `internal` | `ethernetCsmacd(6)` |
+  | 31 | `Management VLAN` | `vlan42` | `l2vlan(135)` |
+
+  The `internal` rows are the inter-processor link, not a front port; they have
+  the same type as real ports, so `ifType` cannot tell them apart (the mapping
+  already merges the pair into one row). `vlan42` is the only `l2vlan` row.
+  Recommendation (not implemented): if virtual interfaces should stay out of
+  `port-status`, filter on `ifType == l2vlan(135)` (a standard, vendor-neutral
+  signal, unlike matching `vlan*` names, which depend on how an admin named the
+  interface); drop `internal` by name only if it should also match the console,
+  since the console lists it.
 - Not exercised on this unit: the console fallback with SNMP switched off
   (covered by unit tests only) and SNMPv3.
+
+## SNMPv3 build feasibility
+
+`async-snmp` 0.18.1 has the features `crypto-rustcrypto` (pure Rust, its
+default) and `crypto-fips` (`aws-lc-rs`); the project builds it with
+`default-features = false`, so no v3 authentication/privacy exists. Enabling
+`features = ["crypto-rustcrypto"]` on the dependency in
+`switch-configurator/Cargo.toml` makes `cargo check` pass in a scratch worktree
+(it pulls in `aes`, `cbc`, `cfb-mode`, `des`, `digest`, `hmac`, `md-5`,
+`sha1`, `sha2`; all registry crates, so `package.nix`'s `cargoLock` needs no
+extra hashes). Not enabled: it only compiles the crypto, and using it still
+needs config fields for user/auth/priv (secrets via credentials) and a lab test
+against a real agent.
