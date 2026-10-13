@@ -20,6 +20,8 @@ seconds' settling time between a change and the query):
 4. If the community has a `config hosts` table, the querying address must be
    in it (below).
 
+**The management address may be a DHCP lease.** On the IT-02876 switch (124F-FPOE) the management IP is leased by the `vlan42` interface (`set mode dhcp`, `set allowaccess ping`); `show system interface` prints no `set ip` for it, but `get system interface` lists it (`name: vlan42  mode: dhcp  ip: <addr> <mask>`). `snmp` has to be added to that interface's `allowaccess`.
+
 ## `config hosts` restricts who may query
 
 Tested with `edit 1` / `set ip <addr> <mask>` inside the community
