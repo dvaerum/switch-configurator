@@ -1,4 +1,5 @@
 // Library entry point for integration tests
+pub mod allowed_hosts;
 pub mod api;
 pub mod config;
 pub mod diff;

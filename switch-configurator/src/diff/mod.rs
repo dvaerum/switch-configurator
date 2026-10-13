@@ -450,6 +450,16 @@ fn diff_snmp(current: &SwitchState, desired: &SwitchConfig, diff: &mut StateDiff
     }
 }
 
+/// Are two `allowed_hosts` lists the same set of managers (order-insensitive)?
+fn same_hosts(a: &[crate::models::AllowedHost], b: &[crate::models::AllowedHost]) -> bool {
+    let key = |hosts: &[crate::models::AllowedHost]| {
+        let mut keys: Vec<String> = hosts.iter().cloned().map(String::from).collect();
+        keys.sort();
+        keys
+    };
+    key(a) == key(b)
+}
+
 /// Compute granular diff between two SNMP configurations
 fn compute_snmp_diff(
     current: &crate::models::SnmpConfig,
@@ -486,14 +496,22 @@ fn compute_snmp_diff(
         }
     }
 
-    // Communities to update (same name but different access level)
+    // Communities to update (same name but different access level or allowed managers)
     for (name, desired_community) in &desired_communities {
         if let Some(current_community) = current_communities.get(name) {
-            if current_community.access != desired_community.access {
+            if current_community.access != desired_community.access
+                || !same_hosts(&current_community.allowed_hosts, &desired_community.allowed_hosts)
+            {
                 snmp_diff.communities_to_update.push((*desired_community).clone());
             }
         }
     }
+
+    // The maps above iterate in arbitrary order; a stable order keeps the
+    // generated commands (and so the tests and the logs) reproducible.
+    snmp_diff.communities_to_add.sort_by(|a, b| a.name.cmp(&b.name));
+    snmp_diff.communities_to_remove.sort();
+    snmp_diff.communities_to_update.sort_by(|a, b| a.name.cmp(&b.name));
 
     // Compare trap receivers by host (the primary identifier)
     let current_receivers: HashMap<&str, &crate::models::SnmpTrapReceiver> = current
@@ -2671,5 +2689,60 @@ mod tests {
         assert_eq!(diff.ports_to_configure.len(), 1,
                    "Port with leftover tagged VLANs must be detected as needing config");
         assert_eq!(diff.ports_to_configure[0].port_id, "13");
+    }
+
+    // ---- SNMP community diff: allowed_hosts and determinism ----
+
+    fn snmp_config(communities: Vec<crate::models::SnmpCommunity>) -> crate::models::SnmpConfig {
+        crate::models::SnmpConfig { communities, trap_receivers: vec![], enabled_traps: vec![] }
+    }
+
+    fn community_with_hosts(name: &str, hosts: &[&str]) -> crate::models::SnmpCommunity {
+        let mut c = crate::models::SnmpCommunity::new(name, crate::models::SnmpAccess::Operator);
+        c.allowed_hosts = hosts
+            .iter()
+            .map(|h| crate::models::AllowedHost::try_from(h.to_string()).unwrap())
+            .collect();
+        c
+    }
+
+    #[test]
+    fn snmp_diff_treats_a_changed_allowed_hosts_list_as_an_update() {
+        let current = snmp_config(vec![community_with_hosts("c", &["192.0.2.1"])]);
+        let desired = snmp_config(vec![community_with_hosts("c", &["192.0.2.2"])]);
+
+        let diff = compute_snmp_diff(&current, &desired);
+
+        assert_eq!(diff.communities_to_update.len(), 1);
+        assert_eq!(diff.communities_to_update[0].name, "c");
+        assert!(diff.communities_to_add.is_empty() && diff.communities_to_remove.is_empty());
+    }
+
+    #[test]
+    fn snmp_diff_ignores_the_order_of_allowed_hosts() {
+        let current = snmp_config(vec![community_with_hosts("c", &["192.0.2.1", "192.0.2.0/24"])]);
+        let desired = snmp_config(vec![community_with_hosts("c", &["192.0.2.0/24", "192.0.2.1"])]);
+
+        assert!(!compute_snmp_diff(&current, &desired).has_changes());
+    }
+
+    #[test]
+    fn snmp_diff_adding_a_host_restriction_is_an_update() {
+        let current = snmp_config(vec![community_with_hosts("c", &[])]);
+        let desired = snmp_config(vec![community_with_hosts("c", &["192.0.2.1"])]);
+
+        assert_eq!(compute_snmp_diff(&current, &desired).communities_to_update.len(), 1);
+    }
+
+    #[test]
+    fn snmp_diff_lists_adds_and_removes_in_a_stable_order() {
+        let current = snmp_config(vec![community_with_hosts("z-old", &[]), community_with_hosts("a-old", &[])]);
+        let desired = snmp_config(vec![community_with_hosts("m-new", &[]), community_with_hosts("b-new", &[])]);
+
+        let diff = compute_snmp_diff(&current, &desired);
+
+        let added: Vec<&str> = diff.communities_to_add.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(added, vec!["b-new", "m-new"]);
+        assert_eq!(diff.communities_to_remove, vec!["a-old".to_string(), "z-old".to_string()]);
     }
 }

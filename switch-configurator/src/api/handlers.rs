@@ -385,6 +385,13 @@ pub async fn preview_diff(
         })?
         .clone();
 
+    // The vendor resolves SNMP `auto` managers when it is built; the preview
+    // must diff against the same concrete addresses.
+    let mut switch_config = switch_config;
+    if let Err(e) = crate::allowed_hosts::resolve_auto_hosts(&mut switch_config) {
+        warn!("{:#}", e);
+    }
+
     let current_state = match body.current_state {
         Some(state) => state,
         None => {

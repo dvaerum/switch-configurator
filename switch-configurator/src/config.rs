@@ -1507,6 +1507,7 @@ pub fn validate_switch_config(switch: &mut SwitchConfig) -> Result<()> {
     // name_credential) into the runtime config. Errors are switch-scoped and
     // never contain the value.
     crate::secrets::resolve_snmp_secrets(switch, &crate::secrets::SecretContext::from_env())?;
+    crate::allowed_hosts::check_vendor_support(switch)?;
 
     // Step 3b: Resolve VLAN name references (ports may reference VLANs by name).
     // Must run after required-field/structural validation (so `vlans` is populated)
@@ -1550,6 +1551,7 @@ pub fn validate_overlay_config(
     // overlay stores the reference, and the file/credential may not even be
     // readable where it is edited.
     crate::secrets::check_snmp_secret_sources(switch)?;
+    crate::allowed_hosts::check_vendor_support(switch)?;
 
     // Expand port ranges (e.g., "1-5" → individual ports)
     expand_port_ranges(switch)
@@ -3974,5 +3976,23 @@ switches:
         .unwrap();
         let err = validate_overlay_config(&mut switch, &std::collections::HashSet::new()).unwrap_err().to_string();
         assert!(err.contains("no source"), "unhelpful error: {err}");
+    }
+
+    #[test]
+    fn load_refuses_snmp_allowed_hosts_on_a_vendor_that_cannot_enforce_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.yaml");
+        // snmp_yaml() is an Aruba2930F switch.
+        std::fs::write(
+            &config_path,
+            snmp_yaml("        - name: public\n          access: operator\n          allowed_hosts: [auto]"),
+        )
+        .unwrap();
+
+        let (config, failures) = AppConfig::load(&config_path).unwrap();
+
+        assert!(config.switches.is_empty());
+        assert_eq!(failures.len(), 1);
+        assert!(failures[0].error.contains("allowed_hosts"), "unhelpful error: {}", failures[0].error);
     }
 }
