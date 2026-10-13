@@ -63,6 +63,11 @@ switches:
         allowed_vlans: [10, 20, 30]
         description: "Trunk"
         enabled: true
+    port_mirrors:
+      - session_id: "1"
+        source_ports: ["2", "3"]
+        destination_port: "20"
+        direction: both
     snmp:
       communities:
         - name: public

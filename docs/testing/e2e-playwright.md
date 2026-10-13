@@ -17,6 +17,8 @@ are git-ignored). The repo's flake dev shell does not provide Playwright.
 - A `LD_LIBRARY_PATH` that points at a different glibc than the browser's (seen:
   `alsa-lib` built against glibc 2.43 while the browsers use 2.42) makes Firefox fail with
   `GLIBC_2.43 not found`. Run with `env -u LD_LIBRARY_PATH tests/e2e/run-e2e.sh`.
-- Status when this was written: 23 of 26 tests pass. Failing: "Edit Ports CRUD > shows all
-  port fields as editable", "Edit Ports CRUD > add a port ...", and "Edit Mirrors CRUD > add
-  a mirror session ...". These were not investigated (spec/UI drift is suspected).
+- All 26 tests pass. The demo config in `run-e2e.sh` must declare one mirror session whose
+  destination port (20) is not a configured port; validation rejects a destination that is also
+  in `ports` and the backend then skips the whole switch.
+- `locator.count()` does not auto-wait. Assert the URL (or another web-first condition) after a
+  navigation click before counting rows.
