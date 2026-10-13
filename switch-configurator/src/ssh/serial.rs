@@ -16,6 +16,8 @@ pub struct SerialClient {
     dry_run: bool,
     /// When true, all commands execute regardless of dry_run (used during login/enable auth)
     auth_mode: bool,
+    /// Masks SNMP secrets in command/wire logs (see `crate::redact`).
+    redactor: crate::redact::CommandRedactor,
 }
 
 impl SerialClient {
@@ -27,6 +29,7 @@ impl SerialClient {
             debug_mode: false,
             dry_run: false,
             auth_mode: false,
+            redactor: crate::redact::CommandRedactor::new(),
         }
     }
 
@@ -222,7 +225,7 @@ impl SerialClient {
                     result = port.read(&mut temp_buf) => {
                         match result {
                             Ok(n) if n > 0 => {
-                                trace!("Serial clear_buffer: discarding {} bytes: {:?}", n, String::from_utf8_lossy(&temp_buf[..n]));
+                                trace!("Serial clear_buffer: discarding {} bytes: {:?}", n, self.redactor.peek_text(&String::from_utf8_lossy(&temp_buf[..n])));
                                 total_cleared += n;
                                 // Keep reading - there might be more data
                                 continue;
@@ -699,7 +702,7 @@ impl SerialClient {
                         match result {
                             Ok(n) if n > 0 => {
                                 let data = String::from_utf8_lossy(&buf[..n]);
-                                trace!("Serial RX (check_state): {} bytes: {:?}", n, data);
+                                trace!("Serial RX (check_state): {} bytes: {:?}", n, self.redactor.peek_text(&data));
                                 accumulated.push_str(&data);
                                 last_data_time = tokio::time::Instant::now();
                             }
@@ -730,7 +733,7 @@ impl SerialClient {
                 }
             }
 
-            trace!("Serial check_state result: {:?}", accumulated);
+            trace!("Serial check_state result: {:?}", self.redactor.peek_text(&accumulated));
             Ok(accumulated)
         } else {
             anyhow::bail!("Not connected")
@@ -749,7 +752,7 @@ impl SerialClient {
                 data.to_string()
             };
 
-            trace!("Serial TX (raw): {:?}", data_with_cr);
+            trace!("Serial TX (raw): {:?}", self.redactor.peek_sent(&data_with_cr));
             AsyncWriteExt::write_all(port, data_with_cr.as_bytes()).await?;
             AsyncWriteExt::flush(port).await?;
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -836,7 +839,7 @@ impl SerialClient {
                                 trace!(
                                     "Serial RX: {} bytes: {:?}",
                                     n,
-                                    String::from_utf8_lossy(&buf[..n])
+                                    self.redactor.peek_text(&String::from_utf8_lossy(&buf[..n]))
                                 );
 
                                 output.extend_from_slice(&buf[..n]);
@@ -849,7 +852,7 @@ impl SerialClient {
                                 }
 
                                 let text = String::from_utf8_lossy(&output);
-                                trace!("Accumulated: {} bytes (total: {}), last 100 chars: {:?}", n, output.len(), &text[text.len().saturating_sub(100)..]);
+                                trace!("Accumulated: {} bytes (total: {}), last 100 chars: {:?}", n, output.len(), self.redactor.peek_text(&text[text.len().saturating_sub(100)..]));
 
                                 // Remove ANSI escape sequences for checking
                                 let clean = ansi_regex.replace_all(&text, "");
@@ -924,7 +927,7 @@ impl SerialClient {
                                     // output happens to match the prompt pattern.
                                     trace!(
                                         "Potential prompt detected: {:?} (starting {}ms confirmation wait)",
-                                        last_nonempty_line,
+                                        self.redactor.peek_text(last_nonempty_line),
                                         prompt_confirm_delay.as_millis()
                                     );
                                     prompt_detected_at = Some(tokio::time::Instant::now());
@@ -996,7 +999,7 @@ impl SerialClient {
                                 || clean.lines().rev().take(3).any(|l| prompt_regex.is_match(l.trim()));
 
                             if has_prompt {
-                                trace!("Prompt detected in idle-settle path: {:?}", last_nonempty_line);
+                                trace!("Prompt detected in idle-settle path: {:?}", self.redactor.peek_text(last_nonempty_line));
                                 return Ok(text.to_string());
                             }
                         }
@@ -1010,7 +1013,10 @@ impl SerialClient {
 
     /// Execute a command and return the output
     pub async fn execute_command(&mut self, command: &str) -> Result<String> {
-        info!("📝 Command: {}", command);
+        // Advances the redactor's block state; every later log for this
+        // command (and its echoed output) goes through `peek_text`.
+        let shown = self.redactor.redact(command);
+        info!("📝 Command: {}", shown);
 
         // Debug mode: prompt for confirmation
         if self.debug_mode {
@@ -1072,7 +1078,7 @@ impl SerialClient {
         if let Some(port) = &mut self.port {
             // Send the command with \r (not \r\n)
             let cmd = format!("{}\r", command);
-            trace!("Serial TX: {:?}", cmd);
+            trace!("Serial TX: {:?}", self.redactor.peek_sent(&cmd));
             AsyncWriteExt::write_all(port, cmd.as_bytes()).await?;
             AsyncWriteExt::flush(port).await?;
 
@@ -1094,13 +1100,13 @@ impl SerialClient {
                 || output.contains("Unknown command");
 
             if has_error {
-                warn!("Command may have failed: {}", command);
+                warn!("Command may have failed: {}", shown);
                 debug!("Output contains error indication: {}", output.trim());
             }
 
             if !output.is_empty() {
                 debug!("Command output: {} bytes, {} lines", output.len(), output.lines().count());
-                trace!("Output (first 200 chars): {}", &output.chars().take(200).collect::<String>());
+                trace!("Output (first 200 chars): {}", self.redactor.peek_text(&output.chars().take(200).collect::<String>()));
             }
 
             Ok(output)

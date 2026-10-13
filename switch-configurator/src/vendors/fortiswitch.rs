@@ -715,17 +715,17 @@ impl FortiswitchSwitch {
         // community there (shouldn't happen for something we're trying to
         // remove, but better than sending nothing).
         for community_name in &snmp_diff.communities_to_remove {
-            info!("Removing SNMP community: {}", community_name);
+            info!("Removing SNMP community: {}", crate::redact::MASK);
             let target = self.snmp_community_indices.get(community_name)
                 .map(|idx| idx.to_string())
                 .unwrap_or_else(|| community_name.clone());
             commands.push(format!("delete {}", target));
-            actions.push(format!("removed community '{}'", community_name));
+            actions.push(format!("removed community '{}'", crate::redact::MASK));
         }
 
         // Add new communities
         for (idx, community) in snmp_diff.communities_to_add.iter().enumerate() {
-            info!("Adding SNMP community: {}", community.name);
+            info!("Adding SNMP community: {}", crate::redact::MASK);
             // Use a high index to avoid conflicts
             let edit_idx = 100 + idx;
             commands.push(format!("edit {}", edit_idx));
@@ -736,18 +736,18 @@ impl FortiswitchSwitch {
             commands.push("set trap-v1-status enable".to_string());
             commands.push("set trap-v2c-status enable".to_string());
             commands.push("next".to_string());
-            actions.push(format!("added community '{}'", community.name));
+            actions.push(format!("added community '{}'", crate::redact::MASK));
         }
 
         // Update existing communities (mainly for trap receivers)
         for community in &snmp_diff.communities_to_update {
-            info!("Updating SNMP community: {}", community.name);
+            info!("Updating SNMP community: {}", crate::redact::MASK);
             // Would need to find existing index - for now just add new entry
             commands.push("edit 1".to_string()); // Assuming first community
             commands.push(format!("set name \"{}\"", community.name));
             commands.push("set status enable".to_string());
             commands.push("next".to_string());
-            actions.push(format!("updated community '{}'", community.name));
+            actions.push(format!("updated community '{}'", crate::redact::MASK));
         }
 
         commands.push("end".to_string());
@@ -791,7 +791,7 @@ impl FortiswitchSwitch {
 
         // Execute the commands
         info!("Applying {} SNMP changes: {:?}", actions.len(), actions);
-        debug!("SNMP diff commands: {:?}", commands);
+        debug!("SNMP diff commands: {:?}", crate::redact::redact_commands(&commands));
 
         let client = self.client.as_mut()
             .ok_or_else(|| VendorError::SshError("Not connected".to_string()))?;
@@ -976,7 +976,7 @@ impl SwitchVendor for FortiswitchSwitch {
         trace!("RAW show switch interface:\n{}", switch_interface);
         trace!("RAW show switch physical-port:\n{}", physical_port);
         trace!("RAW show switch mirror:\n{}", switch_mirror);
-        trace!("RAW show system snmp community:\n{}", snmp_community);
+        trace!("RAW show system snmp community:\n{}", crate::redact::redact_config_text(&snmp_community));
 
         let system_interface_lines: Vec<&str> = system_interface.lines().collect();
 
@@ -4843,5 +4843,30 @@ mod tests {
     async fn resume_session_fails_without_an_open_session() {
         let mut switch = create_test_switch();
         assert!(switch.resume_session().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn apply_snmp_diff_never_logs_community_strings() {
+        use crate::models::{SnmpAccess, SnmpCommunity, SnmpStateDiff};
+        let (logs, _installed) = crate::ssh::fake_console::capture_logs();
+        let (client, console) = FakeConsole::spawn(Mode::LoggedIn);
+        let mut switch = create_test_switch();
+        switch.client = Some(ConnectionClient::Serial(client));
+        switch.snmp_community_indices.insert("s3cret-removed".to_string(), 7);
+
+        let diff = SnmpStateDiff {
+            communities_to_add: vec![SnmpCommunity { name: "s3cret-added".to_string(), access: SnmpAccess::Unrestricted }],
+            communities_to_remove: vec!["s3cret-removed".to_string()],
+            communities_to_update: vec![SnmpCommunity { name: "s3cret-updated".to_string(), access: SnmpAccess::Operator }],
+            ..Default::default()
+        };
+        switch.apply_snmp_diff(&diff).await.expect("apply over fake console");
+
+        let sent = console.commands().join("\n");
+        assert!(sent.contains("s3cret-added"), "the switch must still get the real community: {sent}");
+        let text = logs.text();
+        for secret in ["s3cret-added", "s3cret-removed", "s3cret-updated"] {
+            assert!(!text.contains(secret), "{secret} leaked into logs:\n{text}");
+        }
     }
 }

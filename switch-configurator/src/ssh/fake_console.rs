@@ -30,6 +30,8 @@ struct Shared {
     awaiting_password: bool,
     logins: usize,
     commands: Vec<String>,
+    /// (command prefix, canned output) pairs; first match wins.
+    outputs: Vec<(String, String)>,
 }
 
 /// Handle to the scripted peer; the peer task stops when this is dropped
@@ -77,6 +79,11 @@ impl FakeConsole {
         shared.awaiting_password = false;
     }
 
+    /// Answer commands starting with `prefix` with `output` instead of `OK`.
+    pub fn set_output(&self, prefix: &str, output: &str) {
+        self.shared.lock().unwrap().outputs.push((prefix.to_string(), output.to_string()));
+    }
+
     /// Successful logins so far.
     pub fn logins(&self) -> usize {
         self.shared.lock().unwrap().logins
@@ -97,7 +104,12 @@ fn respond(shared: &Arc<Mutex<Shared>>, line: String) -> String {
                 format!("\r\n{PROMPT}")
             } else {
                 s.commands.push(line.clone());
-                format!("{line}\r\nOK\r\n{PROMPT}")
+                let output = s
+                    .outputs
+                    .iter()
+                    .find(|(prefix, _)| line.starts_with(prefix.as_str()))
+                    .map_or("OK".to_string(), |(_, out)| out.clone());
+                format!("{line}\r\n{output}\r\n{PROMPT}")
             }
         }
         mode @ (Mode::LoggedOut | Mode::Terminated) => {
@@ -115,6 +127,46 @@ fn respond(shared: &Arc<Mutex<Shared>>, line: String) -> String {
             }
         }
     }
+}
+
+/// Collects everything the `tracing` macros emit while it is installed.
+#[derive(Clone, Default)]
+pub(crate) struct LogBuffer(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogBuffer {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogBuffer {
+    type Writer = LogBuffer;
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+impl LogBuffer {
+    pub(crate) fn text(&self) -> String {
+        String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+    }
+}
+
+
+/// Install a log collector for the current thread: everything logged by the
+/// `tracing` macros until the returned guard drops lands in the buffer.
+pub(crate) fn capture_logs() -> (LogBuffer, tracing::subscriber::DefaultGuard) {
+    let logs = LogBuffer::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(logs.clone())
+        .with_max_level(tracing::Level::TRACE)
+        .with_ansi(false)
+        .finish();
+    (logs, tracing::subscriber::set_default(subscriber))
 }
 
 #[cfg(test)]
@@ -159,5 +211,42 @@ mod tests {
         let (mut client, console) = FakeConsole::spawn(Mode::LoggedIn);
         client.probe_session().await.unwrap();
         assert!(console.commands().is_empty(), "probe must only poke the prompt");
+    }
+
+    #[tokio::test]
+    async fn command_log_masks_snmp_secrets() {
+        let (logs, _installed) = capture_logs();
+
+        let (mut client, console) = FakeConsole::spawn(Mode::LoggedIn);
+        client.execute_command("snmp-server community \"s3cret-community\" unrestricted").await.unwrap();
+        client.execute_command("config system snmp community").await.unwrap();
+        client.execute_command("set name \"s3cret-forti\"").await.unwrap();
+        client.execute_command("end").await.unwrap();
+
+        // The switch still receives the real command...
+        assert!(console.commands().iter().any(|c| c.contains("s3cret-community")));
+        assert!(console.commands().iter().any(|c| c.contains("s3cret-forti")));
+        // ...but nothing in the logs shows it.
+        let text = logs.text();
+        assert!(text.contains("Command"), "expected command logging, got: {text}");
+        assert!(!text.contains("s3cret-community"), "community leaked into logs:\n{text}");
+        assert!(!text.contains("s3cret-forti"), "FortiOS community leaked into logs:\n{text}");
+    }
+
+    #[tokio::test]
+    async fn trace_logs_withhold_show_output_that_may_hold_secrets() {
+        let (logs, _installed) = capture_logs();
+        let (mut client, console) = FakeConsole::spawn(Mode::LoggedIn);
+        console.set_output(
+            "show system snmp community",
+            "config system snmp community\r\n    edit 100\r\n        set name \"s3cret-readback\"\r\n    next\r\nend",
+        );
+
+        let output = client.execute_command("show system snmp community").await.unwrap();
+
+        assert!(output.contains("s3cret-readback"), "callers still get the real output");
+        let text = logs.text();
+        assert!(text.contains("show system snmp community"), "the command itself stays visible:\n{text}");
+        assert!(!text.contains("s3cret-readback"), "read-back leaked into trace logs:\n{text}");
     }
 }

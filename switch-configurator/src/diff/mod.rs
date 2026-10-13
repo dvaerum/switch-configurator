@@ -430,9 +430,10 @@ fn diff_snmp(current: &SwitchState, desired: &SwitchConfig, diff: &mut StateDiff
 
             if snmp_diff.has_changes() {
                 debug!("  SNMP granular diff:");
-                debug!("    Communities to add: {:?}", snmp_diff.communities_to_add.iter().map(|c| &c.name).collect::<Vec<_>>());
-                debug!("    Communities to remove: {:?}", snmp_diff.communities_to_remove);
-                debug!("    Communities to update: {:?}", snmp_diff.communities_to_update.iter().map(|c| &c.name).collect::<Vec<_>>());
+                // Counts only: community names are secrets.
+                debug!("    Communities to add: {}", snmp_diff.communities_to_add.len());
+                debug!("    Communities to remove: {}", snmp_diff.communities_to_remove.len());
+                debug!("    Communities to update: {}", snmp_diff.communities_to_update.len());
                 debug!("    Trap receivers to add: {:?}", snmp_diff.trap_receivers_to_add.iter().map(|r| &r.host).collect::<Vec<_>>());
                 debug!("    Trap receivers to remove: {:?}", snmp_diff.trap_receivers_to_remove);
                 debug!("    Traps to enable: {:?}", snmp_diff.traps_to_enable);

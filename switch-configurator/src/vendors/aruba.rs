@@ -1158,14 +1158,14 @@ impl ArubaSwitch {
 
         // Remove communities that are no longer wanted
         for community_name in &snmp_diff.communities_to_remove {
-            info!("Removing SNMP community: {}", community_name);
+            info!("Removing SNMP community: {}", crate::redact::MASK);
             commands.push(format!("no snmp-server community \"{}\"", community_name));
-            actions.push(format!("removed community '{}'", community_name));
+            actions.push(format!("removed community '{}'", crate::redact::MASK));
         }
 
         // Update communities (remove old, add new with different access)
         for community in &snmp_diff.communities_to_update {
-            info!("Updating SNMP community: {} -> {:?}", community.name, community.access);
+            info!("Updating SNMP community: {} -> {:?}", crate::redact::MASK, community.access);
             commands.push(format!("no snmp-server community \"{}\"", community.name));
             let access_str = match community.access {
                 crate::models::SnmpAccess::Unrestricted => "unrestricted",
@@ -1173,19 +1173,19 @@ impl ArubaSwitch {
                 crate::models::SnmpAccess::Operator => "operator",
             };
             commands.push(format!("snmp-server community \"{}\" {}", community.name, access_str));
-            actions.push(format!("updated community '{}' to {:?}", community.name, community.access));
+            actions.push(format!("updated community '{}' to {:?}", crate::redact::MASK, community.access));
         }
 
         // Add new communities
         for community in &snmp_diff.communities_to_add {
-            info!("Adding SNMP community: {} ({:?})", community.name, community.access);
+            info!("Adding SNMP community: {} ({:?})", crate::redact::MASK, community.access);
             let access_str = match community.access {
                 crate::models::SnmpAccess::Unrestricted => "unrestricted",
                 crate::models::SnmpAccess::Manager => "manager",
                 crate::models::SnmpAccess::Operator => "operator",
             };
             commands.push(format!("snmp-server community \"{}\" {}", community.name, access_str));
-            actions.push(format!("added community '{}'", community.name));
+            actions.push(format!("added community '{}'", crate::redact::MASK));
         }
 
         // Remove trap receivers that are no longer wanted
