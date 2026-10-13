@@ -1345,7 +1345,8 @@ impl SwitchVendor for ArubaSwitch {
                     self.config.credentials().port,
                 )
                 .with_debug_mode(self.runtime_config.debug)
-                .with_dry_run(self.runtime_config.dry_run);
+                .with_dry_run(self.runtime_config.dry_run)
+                .with_connect_timeout(std::time::Duration::from_secs(self.config.settings.ssh_timeout_secs));
 
                 // Use connect_with_retry for retry logic
                 ssh_client
