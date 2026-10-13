@@ -23,6 +23,8 @@ pub struct SshClient {
     /// own, so an unreachable or silent host would otherwise wait for the OS
     /// TCP timeout (minutes) per attempt.
     connect_timeout: Duration,
+    /// Masks SNMP secrets in command/wire logs (see `crate::redact`).
+    redactor: crate::redact::CommandRedactor,
 }
 
 struct Handler;
@@ -51,6 +53,7 @@ impl SshClient {
             dry_run: false,
             jump_chain: None,
             connect_timeout: DEFAULT_CONNECT_TIMEOUT,
+            redactor: crate::redact::CommandRedactor::new(),
         }
     }
 
@@ -291,7 +294,7 @@ impl SshClient {
                             }
 
                             let text = String::from_utf8_lossy(&output);
-                            trace!("Received {} bytes (total: {}), last 100 chars: {:?}", data.len(), output.len(), &text[text.len().saturating_sub(100)..]);
+                            trace!("Received {} bytes (total: {}), last 100 chars: {:?}", data.len(), output.len(), self.redactor.peek_text(&text[text.len().saturating_sub(100)..]));
 
                             let clean = ansi_regex.replace_all(&text, "");
 
@@ -354,7 +357,7 @@ impl SshClient {
                             if has_prompt || has_prompt_in_recent || has_prompt_at_end {
                                 trace!(
                                     "Potential prompt detected: {:?} (starting {}ms confirmation wait)",
-                                    last_nonempty_line,
+                                    self.redactor.peek_text(last_nonempty_line),
                                     prompt_confirm_delay.as_millis()
                                 );
                                 prompt_detected_at = Some(tokio::time::Instant::now());
@@ -398,7 +401,7 @@ impl SshClient {
                             || end_prompt_regex.is_match(last_nonempty_line)
                             || clean.lines().rev().take(3).any(|l| prompt_regex.is_match(l.trim()))
                         {
-                            trace!("Prompt detected in idle-settle path: {:?}", last_nonempty_line);
+                            trace!("Prompt detected in idle-settle path: {:?}", self.redactor.peek_text(last_nonempty_line));
                             return Ok(text.to_string());
                         }
                     }
@@ -409,7 +412,10 @@ impl SshClient {
 
     /// Execute a command and return the output
     pub async fn execute_command(&mut self, command: &str) -> Result<String> {
-        info!("📝 Command: {}", command);
+        // Advances the redactor's block state; later logs for this command
+        // (and its echoed output) go through `peek_text`.
+        let shown = self.redactor.redact(command);
+        info!("📝 Command: {}", shown);
 
         // Debug mode: prompt for confirmation
         if self.debug_mode {
