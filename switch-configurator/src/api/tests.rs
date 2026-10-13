@@ -12,6 +12,16 @@ use axum::{
 use serde_json::Value;
 use tower::ServiceExt; // for `oneshot` method
 
+/// Unreachable test switches must fail fast instead of waiting out the
+/// default 30s x 3 attempts of a real connection.
+fn test_settings() -> Settings {
+    Settings {
+        ssh_timeout_secs: 1,
+        max_retries: 1,
+        ..Settings::default()
+    }
+}
+
 async fn create_test_config_store_async() -> ConfigStore {
     let switch1 = SwitchConfig {
         id: "test-sw-01".to_string(),
@@ -55,7 +65,7 @@ async fn create_test_config_store_async() -> ConfigStore {
         port_mirrors: vec![],
         snmp: None,
         validation: None,
-        settings: Settings::default(),
+        settings: test_settings(),
         vendor_specific: std::collections::HashMap::new(),
             management_vlan: None,
     };
@@ -88,7 +98,7 @@ async fn create_test_config_store_async() -> ConfigStore {
         port_mirrors: vec![],
         snmp: None,
         validation: None,
-        settings: Settings::default(),
+        settings: test_settings(),
         vendor_specific: std::collections::HashMap::new(),
             management_vlan: None,
 
@@ -150,7 +160,7 @@ fn create_test_config_store() -> ConfigStore {
         port_mirrors: vec![],
         snmp: None,
         validation: None,
-        settings: Settings::default(),
+        settings: test_settings(),
         vendor_specific: std::collections::HashMap::new(),
         management_vlan: None,
 
@@ -184,7 +194,7 @@ fn create_test_config_store() -> ConfigStore {
         port_mirrors: vec![],
         snmp: None,
         validation: None,
-        settings: Settings::default(),
+        settings: test_settings(),
         vendor_specific: std::collections::HashMap::new(),
         management_vlan: None,
 
@@ -225,7 +235,7 @@ fn create_test_config_store() -> ConfigStore {
         port_mirrors: vec![],
         snmp: None,
         validation: None,
-        settings: Settings::default(),
+        settings: test_settings(),
         vendor_specific: std::collections::HashMap::new(),
         management_vlan: None,
     };
@@ -3408,7 +3418,7 @@ mod integration_tests {
             port_mirrors: vec![],
             snmp: None,
             validation: None,
-            settings: Settings::default(),
+            settings: test_settings(),
             vendor_specific: std::collections::HashMap::new(),
             management_vlan: None,
         };
@@ -3444,7 +3454,7 @@ mod integration_tests {
             port_mirrors: vec![],
             snmp: None,
             validation: None,
-            settings: Settings::default(),
+            settings: test_settings(),
             vendor_specific: std::collections::HashMap::new(),
             management_vlan: None,
         };
@@ -3932,5 +3942,28 @@ mod integration_tests {
         assert_eq!(store.status.queued_count("test-sw-forti").await, 1);
         request.abort();
         drop(holder);
+    }
+
+    #[tokio::test]
+    async fn test_vendor_connect_honours_ssh_timeout_secs() {
+        // TEST-NET-1 never answers; with ssh_timeout_secs=1 and one attempt
+        // the vendor must give up quickly instead of waiting for the OS TCP
+        // timeout (minutes), which is what made the get_config tests crawl.
+        let store = create_test_config_store();
+        let mut cfg = store.config.read().await.switches[0].clone();
+        cfg.management_ip = Some("192.0.2.1".to_string());
+        cfg.settings.ssh_timeout_secs = 1;
+        cfg.settings.max_retries = 1;
+
+        let mut vendor = crate::vendors::create_vendor_with_runtime(
+            &cfg,
+            &crate::config::RuntimeConfig::default(),
+            false,
+        )
+        .unwrap();
+
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), vendor.connect()).await;
+        assert!(outcome.is_ok(), "connect() ignored ssh_timeout_secs and was still waiting after 5s");
+        assert!(outcome.unwrap().is_err());
     }
 }

@@ -8,6 +8,9 @@ use tracing::{debug, info, trace, warn};
 use crate::models::{Credentials, JumpHost};
 use crate::ssh::jump_chain::JumpHostChain;
 
+/// Matches `Settings::ssh_timeout_secs`' default.
+const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+
 pub struct SshClient {
     session: Option<russh::client::Handle<Handler>>,
     shell_channel: Option<russh::Channel<russh::client::Msg>>,
@@ -16,6 +19,10 @@ pub struct SshClient {
     debug_mode: bool,
     dry_run: bool,
     jump_chain: Option<JumpHostChain>,
+    /// Upper bound for connect + authenticate; russh has no timeout of its
+    /// own, so an unreachable or silent host would otherwise wait for the OS
+    /// TCP timeout (minutes) per attempt.
+    connect_timeout: Duration,
 }
 
 struct Handler;
@@ -43,7 +50,14 @@ impl SshClient {
             debug_mode: false,
             dry_run: false,
             jump_chain: None,
+            connect_timeout: DEFAULT_CONNECT_TIMEOUT,
         }
+    }
+
+    /// Bound how long `connect_with_credentials` may take (connect + auth).
+    pub fn with_connect_timeout(mut self, timeout: Duration) -> Self {
+        self.connect_timeout = timeout;
+        self
     }
 
     /// Enable debug mode (prompts before each command)
@@ -516,6 +530,14 @@ impl SshClient {
 
     /// Connect with credentials (auto-detects jump host usage)
     pub async fn connect_with_credentials(&mut self, creds: &Credentials) -> Result<()> {
+        let limit = self.connect_timeout;
+        let target = format!("{}:{}", self.host, self.port);
+        tokio::time::timeout(limit, self.connect_with_credentials_unbounded(creds))
+            .await
+            .map_err(|_| anyhow::anyhow!("SSH connection to {} timed out after {}s", target, limit.as_secs()))?
+    }
+
+    async fn connect_with_credentials_unbounded(&mut self, creds: &Credentials) -> Result<()> {
         // Check if jump hosts are configured
         if let Some(jump_hosts) = &creds.jump_hosts {
             if !jump_hosts.is_empty() {
@@ -969,5 +991,33 @@ mod tests {
         let error_msg = result.unwrap_err().to_string();
         // Should have made 1 attempt
         assert!(error_msg.contains("1 attempts"));
+    }
+
+    #[tokio::test]
+    async fn test_connect_times_out_when_server_never_speaks() {
+        // Accepts TCP (kernel backlog) but never sends an SSH banner: without
+        // a connect timeout this hangs until the caller gives up.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mut client = SshClient::new("127.0.0.1".to_string(), port)
+            .with_connect_timeout(Duration::from_secs(1));
+        let creds = Credentials {
+            username: "admin".to_string(),
+            password: Some("password".to_string()),
+            connection_type: ConnectionType::Ssh,
+            port,
+            serial_device: None,
+            baud_rate: 9600,
+            ssh_key_path: None,
+            jump_hosts: None,
+            enable_secret: None,
+        };
+
+        let started = std::time::Instant::now();
+        let err = client.connect_with_credentials(&creds).await.unwrap_err().to_string();
+
+        assert!(started.elapsed() < Duration::from_secs(5), "took {:?}", started.elapsed());
+        assert!(err.contains("timed out"), "unexpected error: {err}");
+        drop(listener);
     }
 }
