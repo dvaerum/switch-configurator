@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **More Aruba/Cisco SNMP lab evidence** (`switch-configurator` 0.23.3): `docs/learnings/snmp-aruba-cisco.md` now records the Cisco per-community ACL gate (a standard ACL on `snmp-server community`: no answer from a host outside it, answered once permitted), and same-moment comparisons of SNMP against the console on both lab switches (port admin/link state, speed and duplex, per-VLAN MAC table, PoE admin state). Result: state, MACs and PoE agree; speed and duplex are only trustworthy while the link is up. No code change; Aruba/Cisco `snmp.reads` and `allowed_hosts` stay refused.
+
 ### Fixed
 - **UI: a community set by file or credential showed a blank name on the read-only SNMP tab** (`switch-configurator-ui` 0.7.1): found by driving the real UI in Firefox. The edit page already labelled such rows `from file <path>` / `from credential <name>` (never the secret); the SNMP tab of the switch detail page read only `name`, so those rows were empty. It now shows the same labels.
 - **FortiSwitch SNMP setup couldn't find a DHCP-leased management interface** (`switch-configurator` 0.23.2): found by reading the real IT-02876 switch (a 124F-FPOE) before enabling SNMP there: its management address is a DHCP lease on `vlan42`, which `show system interface` does not print, so the interface that must have `snmp` in its `allowaccess` was never identified (the service only warned) and SNMP would have stayed unanswered. The service now also reads `get system interface` (which lists leased addresses) and, when no configured `set ip` matches `management_ip`, uses the interface that was leased it; `snmp` is appended to that interface's existing `allowaccess` (not replacing it). If the leasing interface's `allowaccess` is not printed (a default that can't be appended to safely) it still warns instead of guessing.
