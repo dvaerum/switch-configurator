@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Persistent console session for FortiSwitch** (`switch-configurator` 0.18.0): every request used to open its own console session (~10s of login, privilege check and setup commands before ~4s of real work). A per-switch `SessionPool` (`src/session_pool.rs`) now keeps the logged-in session open between operations, so a burst of queued operations shares one login: on the lab FortiSwitch the first uncached call takes ~10.5s and the following ones ~2s each, and three queued `poe-on` calls finish in 25s instead of ~42s with a single login. Details that matter on a shared, exclusive serial line:
+  - The queue turn (`StatusTracker::acquire_configuring_queued`) is still the only exclusion; the pool just holds the open session between turns.
+  - A kept session is closed after 30s with nothing using it (`DEFAULT_IDLE_CLOSE`), so a technician can attach to the console afterwards.
+  - Before reuse the session is probed (`SerialClient::probe_session`: sends only a newline and requires a visible command prompt; a login prompt, "Session Terminated" or silence means stale) and the CLI is reset with `end`; a failed probe, an error, or a timeout closes the session and the next request opens a fresh one. A kept session is also never reused after any connection setting (address, credentials, timeouts) changes.
+  - `apply`, `get_config`, `preview_diff` and the file watcher open their own connection, so they close a kept-open session first (they hold, or have checked, the switch's turn).
+  - Only FortiSwitch opts in (`SwitchVendor::supports_session_reuse`); Aruba and Cisco keep one session per operation until their `resume_session` is verified on hardware. `get_mac_table` and `get_port_status` moved onto the `SwitchVendor` trait (default: unsupported) so handlers can use any pooled vendor.
+  - Test harness: `ssh::fake_console` (a scripted FortiOS-style console on a pty pair) drives the real `SerialClient` login and probe code without hardware. `examples/console_exec.rs` runs commands from stdin on a serial console with the service's own login logic (password via `CONSOLE_PASSWORD`).
+
 ### Fixed
 - **SSH connects to unreachable or silent switches now honour `ssh_timeout_secs`** (`switch-configurator` 0.17.1): `Settings.ssh_timeout_secs` was parsed but never used, so `SshClient` waited for the OS TCP timeout (minutes) per attempt, times `max_retries` and the 5s retry delay. `SshClient::with_connect_timeout` now bounds the whole connect + authenticate step (default 30s, the same as the setting's default), and the Aruba, Cisco and FortiSwitch vendors pass `ssh_timeout_secs` through. A server that accepts TCP but never speaks now fails with `SSH connection to host:port timed out after Ns`. The API test stores use a 1s timeout and one attempt, so the full `cargo test` run drops from ~7 minutes to ~100s (the `api::` tests from ~400s to ~1s).
 

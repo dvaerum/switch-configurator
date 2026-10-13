@@ -30,6 +30,8 @@ mock! {
         fn generate_commands_for_diff(&self, diff: &StateDiff) -> crate::models::CommandPreview;
         async fn execute_raw_commands(&mut self, commands: &[String]) -> Result<Vec<String>, VendorError>;
         fn get_warnings(&self) -> Vec<String>;
+        fn supports_session_reuse(&self) -> bool;
+        async fn resume_session(&mut self) -> Result<(), VendorError>;
     }
 }
 

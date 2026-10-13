@@ -89,7 +89,7 @@ pub async fn start(
                     store.status.initialize_switches(&new_config.switches).await;
 
                     // Apply configuration to all switches (with conflict detection)
-                    if let Err(e) = apply_all_configurations(&new_config, &store.status).await {
+                    if let Err(e) = apply_all_configurations(&new_config, &store.status, &store.session_pool).await {
                         error!("Failed to apply configurations: {}", e);
                     }
                 }
@@ -149,7 +149,11 @@ fn should_reload_config(event: &Event) -> bool {
 // Currently switches are configured sequentially to simplify conflict detection and error handling.
 // Parallel configuration would improve performance when managing many switches.
 
-async fn apply_all_configurations(config: &AppConfig, status: &StatusTracker) -> Result<()> {
+async fn apply_all_configurations(
+    config: &AppConfig,
+    status: &StatusTracker,
+    pool: &crate::session_pool::SessionPool,
+) -> Result<()> {
     info!("Applying configuration to {} switches", config.switches.len());
 
     let mut success_count = 0;
@@ -175,7 +179,7 @@ async fn apply_all_configurations(config: &AppConfig, status: &StatusTracker) ->
         };
 
         // Apply configuration to this switch (handles pending reloads internally)
-        match apply_switch_with_pending(switch_config, status, guard).await {
+        match apply_switch_with_pending(switch_config, status, pool, guard).await {
             Ok(()) => success_count += 1,
             Err(_) => failure_count += 1,
         }
@@ -203,9 +207,15 @@ async fn apply_all_configurations(config: &AppConfig, status: &StatusTracker) ->
 async fn apply_switch_with_pending(
     switch_config: &crate::models::SwitchConfig,
     status: &StatusTracker,
+    pool: &crate::session_pool::SessionPool,
     guard: crate::status::ConfiguringGuard,
 ) -> Result<()> {
     let switch_id = &switch_config.id;
+
+    // Apply opens its own connection and the console is exclusive: free a
+    // session kept open by an earlier lookup (we hold the switch's turn, so
+    // nothing else can be using it).
+    pool.close_idle(switch_id).await;
 
     info!("Configuring switch: {} ({})", switch_id, switch_config.hostname());
 

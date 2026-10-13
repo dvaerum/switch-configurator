@@ -266,6 +266,11 @@ async fn apply_config_impl(
 
     info!("Applying configuration to switch: {} ({})", id, switch_config.hostname.as_ref().unwrap_or(&id));
 
+    // Apply opens its own connection and the console is exclusive: free a
+    // session kept open by an earlier lookup (we hold the switch's turn via
+    // `guard`, so nothing else can be using it).
+    store.session_pool.close_idle(&id).await;
+
     // Create vendor-specific implementation
     let mut vendor = match vendors::create_vendor_with_runtime(&switch_config, &crate::config::RuntimeConfig::default(), enforce_port_config) {
         Ok(v) => v,
@@ -385,6 +390,9 @@ pub async fn preview_diff(
         None => {
             // Connect to switch and parse current state
             drop(config);
+            // Opens its own connection; the console is exclusive, so free a
+            // kept-open session first (only ever closes an idle one).
+            store.session_pool.close_idle(&id).await;
             let mut vendor = vendors::create_vendor_with_runtime(
                 &switch_config,
                 &crate::config::RuntimeConfig::default(),
@@ -825,6 +833,11 @@ pub async fn get_config(
         )
             .into_response();
     }
+
+    // Opens its own connection; the console is exclusive, so free a kept-open
+    // session first (only ever closes an idle one: the busy check above
+    // already turned away a switch that is mid-operation).
+    store.session_pool.close_idle(&id).await;
 
     // Create vendor-specific implementation
     let mut vendor = match vendors::create_vendor_with_runtime(&switch_config, &crate::config::RuntimeConfig::default(), enforce_port_config) {
@@ -1767,15 +1780,9 @@ async fn poe_set_impl(
 
     emit("connecting", None);
 
-    let mut vendor = vendors::create_vendor_with_runtime(
-        switch_config,
-        &crate::config::RuntimeConfig::default(),
-        switch_config.settings.enforce_port_config,
-    )
-    .map_err(|e| format!("Failed to create vendor: {}", e))?;
-
-    vendor
-        .connect()
+    let mut session = store
+        .session_pool
+        .checkout(switch_config)
         .await
         .map_err(|e| format!("Connection failed: {}", e))?;
 
@@ -1783,8 +1790,8 @@ async fn poe_set_impl(
     let commands = if turn_on { &enable_cmds } else { &disable_cmds };
 
     emit("setting", None);
-    if let Err(e) = vendor.execute_raw_commands(commands).await {
-        let _ = vendor.disconnect().await;
+    if let Err(e) = session.vendor().execute_raw_commands(commands).await {
+        session.discard().await;
         return Err(format!(
             "Failed to turn PoE {} on port {}: {}",
             action, port_id, e
@@ -1792,7 +1799,7 @@ async fn poe_set_impl(
     }
 
     info!("PoE turned {} on port {}", action, port_id);
-    let _ = vendor.disconnect().await;
+    session.release().await;
 
     Ok(())
 }
@@ -1958,7 +1965,10 @@ async fn mac_table_cache_response(
 ///
 /// Extracted vendor-dispatch fetch logic (`fetch_mac_table_live`) is shared
 /// with the background refresher so the two can never drift.
-async fn fetch_mac_table_live(switch_config: &SwitchConfig) -> Result<(Vec<crate::models::MacTableEntry>, String), String> {
+async fn fetch_mac_table_live(
+    pool: &crate::session_pool::SessionPool,
+    switch_config: &SwitchConfig,
+) -> Result<(Vec<crate::models::MacTableEntry>, String), String> {
     // Bounded overall budget as a defense-in-depth safety net: even if some
     // future bug reintroduces an unbounded wait deeper in the vendor/serial
     // stack (the actual root cause of a real incident on IT-02876-sw1 —
@@ -1967,45 +1977,21 @@ async fn fetch_mac_table_live(switch_config: &SwitchConfig) -> Result<(Vec<crate
     // on an I/O call with no timeout of its own, permanently stuck busy
     // until the service was restarted), this guarantees a caller (this
     // function's own caller holds the busy-flag guard) can't be stuck past
-    // this bound.
+    // this bound. A timed-out session is dropped (closing its connection),
+    // never returned to the pool.
     const MAC_TABLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
     match tokio::time::timeout(MAC_TABLE_TIMEOUT, async {
-        match switch_config.model().vendor() {
-            Vendor::Fortiswitch => {
-                let mut vendor = vendors::fortiswitch::FortiswitchSwitch::new(
-                    switch_config.clone(),
-                    crate::config::RuntimeConfig::default(),
-                    switch_config.settings.enforce_port_config,
-                );
-                vendor.connect().await.map_err(|e| format!("Connection failed: {}", e))?;
-                let outcome = vendor.get_mac_table().await.map_err(|e| e.to_string());
-                let _ = vendor.disconnect().await;
-                outcome
-            }
-            Vendor::Aruba => {
-                let mut vendor = vendors::aruba::ArubaSwitch::new(
-                    switch_config.clone(),
-                    crate::config::RuntimeConfig::default(),
-                    switch_config.settings.enforce_port_config,
-                );
-                vendor.connect().await.map_err(|e| format!("Connection failed: {}", e))?;
-                let outcome = vendor.get_mac_table().await.map_err(|e| e.to_string());
-                let _ = vendor.disconnect().await;
-                outcome
-            }
-            Vendor::Cisco => {
-                let mut vendor = vendors::cisco::CiscoSwitch::new(
-                    switch_config.clone(),
-                    crate::config::RuntimeConfig::default(),
-                    switch_config.settings.enforce_port_config,
-                );
-                vendor.connect().await.map_err(|e| format!("Connection failed: {}", e))?;
-                let outcome = vendor.get_mac_table().await.map_err(|e| e.to_string());
-                let _ = vendor.disconnect().await;
-                outcome
-            }
+        let mut session = pool
+            .checkout(switch_config)
+            .await
+            .map_err(|e| format!("Connection failed: {}", e))?;
+        let outcome = session.vendor().get_mac_table().await.map_err(|e| e.to_string());
+        match outcome {
+            Ok(_) => session.release().await,
+            Err(_) => session.discard().await,
         }
+        outcome
     })
     .await
     {
@@ -2077,7 +2063,7 @@ pub(crate) async fn refresh_all_mac_tables_once(store: &ConfigStore) {
             }
         };
 
-        match fetch_mac_table_live(&switch_config).await {
+        match fetch_mac_table_live(&store.session_pool, &switch_config).await {
             Ok((entries, raw)) => {
                 let fetched_at = chrono::Utc::now();
                 let generation_id = uuid::Uuid::new_v4();
@@ -2164,7 +2150,7 @@ pub async fn get_mac_table(
     // on an I/O call with no timeout of its own, permanently stuck busy
     // until the service was restarted), this guarantees the busy flag
     // (held by `guard`, released on drop) can't stay stuck past this bound.
-    let result = fetch_mac_table_live(&switch_config).await;
+    let result = fetch_mac_table_live(&store.session_pool, &switch_config).await;
 
     guard.release().await;
 
@@ -2253,14 +2239,16 @@ pub async fn get_port_status(
 
     let result: Result<(Vec<crate::models::PortStatusEntry>, String), String> =
         match tokio::time::timeout(PORT_STATUS_TIMEOUT, async {
-            let mut vendor = vendors::fortiswitch::FortiswitchSwitch::new(
-                switch_config.clone(),
-                crate::config::RuntimeConfig::default(),
-                switch_config.settings.enforce_port_config,
-            );
-            vendor.connect().await.map_err(|e| format!("Connection failed: {}", e))?;
-            let outcome = vendor.get_port_status().await.map_err(|e| e.to_string());
-            let _ = vendor.disconnect().await;
+            let mut session = store
+                .session_pool
+                .checkout(&switch_config)
+                .await
+                .map_err(|e| format!("Connection failed: {}", e))?;
+            let outcome = session.vendor().get_port_status().await.map_err(|e| e.to_string());
+            match outcome {
+                Ok(_) => session.release().await,
+                Err(_) => session.discard().await,
+            }
             outcome
         })
         .await
@@ -2397,23 +2385,17 @@ async fn poe_reset_impl(
 
     emit("connecting", None);
 
-    let mut vendor = vendors::create_vendor_with_runtime(
-        switch_config,
-        &crate::config::RuntimeConfig::default(),
-        switch_config.settings.enforce_port_config,
-    )
-    .map_err(|e| format!("Failed to create vendor: {}", e))?;
-
-    vendor
-        .connect()
+    let mut session = store
+        .session_pool
+        .checkout(switch_config)
         .await
         .map_err(|e| format!("Connection failed: {}", e))?;
 
     let (disable_cmds, enable_cmds) = poe_commands_for(switch_config, port_id);
 
     emit("disabling", None);
-    if let Err(e) = vendor.execute_raw_commands(&disable_cmds).await {
-        let _ = vendor.disconnect().await;
+    if let Err(e) = session.vendor().execute_raw_commands(&disable_cmds).await {
+        session.discard().await;
         return Err(format!("Failed to disable PoE: {}", e));
     }
 
@@ -2426,14 +2408,14 @@ async fn poe_reset_impl(
     }
 
     emit("enabling", None);
-    if let Err(e) = vendor.execute_raw_commands(&enable_cmds).await {
+    if let Err(e) = session.vendor().execute_raw_commands(&enable_cmds).await {
         warn!(
             "First PoE re-enable attempt failed for port {}: {}. Retrying...",
             port_id, e
         );
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-        if let Err(e2) = vendor.execute_raw_commands(&enable_cmds).await {
-            let _ = vendor.disconnect().await;
+        if let Err(e2) = session.vendor().execute_raw_commands(&enable_cmds).await {
+            session.discard().await;
             return Err(format!(
                 "PoE was DISABLED on port {} but re-enable FAILED after retry: {}. Manual intervention required.",
                 port_id, e2
@@ -2442,7 +2424,7 @@ async fn poe_reset_impl(
     }
 
     info!("PoE re-enabled on port {}", port_id);
-    let _ = vendor.disconnect().await;
+    session.release().await;
 
     Ok(())
 }

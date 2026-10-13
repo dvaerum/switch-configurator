@@ -246,6 +246,8 @@ A switch handles one console session at a time (~10-14s each over serial). Opera
 
 `GET /api/status` lists switches with waiting operations in `queued_operations` (`{"switch-01": 2}`). A queued `mac-table` request re-checks the cache once it gets its turn, so requests that piled up behind a refresh are served from it without extra console sessions. `reload` (single or all) and the file watcher keep their previous "skip/queue-one" behaviour.
 
+**Session reuse (FortiSwitch):** the console session stays open between queued operations (one login for a burst) and is closed after 30s idle, so a lookup that arrives right behind another costs ~2s instead of ~12s. A stale or failed session is replaced automatically.
+
 ---
 
 ### Reload and Apply Configuration (Single Switch)

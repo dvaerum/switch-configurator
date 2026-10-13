@@ -4,7 +4,7 @@ pub mod fortiswitch;
 pub mod traits;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 pub use traits::SwitchVendor;
 

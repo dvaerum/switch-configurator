@@ -2,6 +2,7 @@ mod api;
 mod config;
 mod diff;
 mod models;
+mod session_pool;
 mod ssh;
 mod status;
 mod validation;
