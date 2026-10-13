@@ -1,6 +1,7 @@
 use super::traits::{SwitchVendor, VendorError};
 use crate::models::{
-    ConfigResult, ConnectionType, Credentials, MirrorDirection, Port, PortMirror, PortMode,
+    ConfigResult, ConnectionType, Credentials, MacTableEntry, MirrorDirection, Port, PortMirror, PortMode,
+    PortStatusEntry,
     StateDiff, SwitchConfig, SwitchModel,
     SwitchState, Vlan, VlanIpConfig,
 };
@@ -32,6 +33,8 @@ mock! {
         fn get_warnings(&self) -> Vec<String>;
         fn supports_session_reuse(&self) -> bool;
         async fn resume_session(&mut self) -> Result<(), VendorError>;
+        async fn get_mac_table(&mut self) -> Result<(Vec<MacTableEntry>, String), VendorError>;
+        async fn get_port_status(&mut self) -> Result<(Vec<PortStatusEntry>, String), VendorError>;
     }
 }
 

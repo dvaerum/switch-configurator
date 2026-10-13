@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`GET /switches/:id/port-status` is cached, and the refresher fetches it together with the mac-table** (`switch-configurator` 0.19.0): same contract as the mac-table cache (60s default max-age; `?fresh=true` and `?max_age_seconds=N`; `ETag`/`Age`/`Cache-Control`/`Last-Modified`, `304` on a matching `If-None-Match`; see `docs/decisions/0001-cached-api-response-contract.md`). A cache miss waits for its turn in the switch's queue and then re-checks the cache, so requests that piled up behind a refresh cost no extra session. The background refresher (renamed `spawn_lookup_refresher` / `refresh_all_lookups_once`) now runs the mac-table and, on FortiSwitch, the port-status lookup in **one** pooled session instead of two logins; a failure of either lookup discards the session instead of keeping it. Both caches are pruned when a switch is deleted or a reload drops it. On the lab FortiSwitch: first call ~10s (login), cached call ~1ms, conditional request `304`.
+
+### Added
 - **Persistent console session for FortiSwitch** (`switch-configurator` 0.18.0): every request used to open its own console session (~10s of login, privilege check and setup commands before ~4s of real work). A per-switch `SessionPool` (`src/session_pool.rs`) now keeps the logged-in session open between operations, so a burst of queued operations shares one login: on the lab FortiSwitch the first uncached call takes ~10.5s and the following ones ~2s each, and three queued `poe-on` calls finish in 25s instead of ~42s with a single login. Details that matter on a shared, exclusive serial line:
   - The queue turn (`StatusTracker::acquire_configuring_queued`) is still the only exclusion; the pool just holds the open session between turns.
   - A kept session is closed after 30s with nothing using it (`DEFAULT_IDLE_CLOSE`), so a technician can attach to the console afterwards.
