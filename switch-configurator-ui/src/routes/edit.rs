@@ -640,7 +640,7 @@ pub async fn add_snmp_community(
     let snmp = draft.edited.snmp.get_or_insert_with(|| SnmpConfig {
         communities: vec![],
         trap_receivers: vec![],
-        enabled_traps: vec![],
+        enabled_traps: vec![], reads: None,
     });
 
     if !snmp.communities.iter().any(|c| c.name == form.name) {
@@ -688,7 +688,7 @@ pub async fn add_snmp_trap_receiver(
     let snmp = draft.edited.snmp.get_or_insert_with(|| SnmpConfig {
         communities: vec![],
         trap_receivers: vec![],
-        enabled_traps: vec![],
+        enabled_traps: vec![], reads: None,
     });
 
     snmp.trap_receivers.push(SnmpTrapReceiver {
@@ -739,7 +739,7 @@ pub async fn update_snmp_traps(
     let snmp = draft.edited.snmp.get_or_insert_with(|| SnmpConfig {
         communities: vec![],
         trap_receivers: vec![],
-        enabled_traps: vec![],
+        enabled_traps: vec![], reads: None,
     });
 
     snmp.enabled_traps.clear();

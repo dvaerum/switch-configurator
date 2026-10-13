@@ -1032,6 +1032,7 @@ fn merge_snmp_configs(configs: &[ConfigWithMetadata]) -> Result<Option<crate::mo
     let mut communities_priority: Option<u16> = None;
     let mut trap_receivers_priority: Option<u16> = None;
     let mut enabled_traps_priority: Option<u16> = None;
+    let mut reads_priority: Option<u16> = None;
 
     for config in configs {
         let switch = &config.config.switches[0];
@@ -1042,7 +1043,7 @@ fn merge_snmp_configs(configs: &[ConfigWithMetadata]) -> Result<Option<crate::mo
                 merged_snmp = Some(crate::models::SnmpConfig {
                     communities: Vec::new(),
                     trap_receivers: Vec::new(),
-                    enabled_traps: Vec::new(),
+                    enabled_traps: Vec::new(), reads: None,
                 });
             }
 
@@ -1070,6 +1071,14 @@ fn merge_snmp_configs(configs: &[ConfigWithMetadata]) -> Result<Option<crate::mo
                     merged.enabled_traps = snmp.enabled_traps.clone();
                     enabled_traps_priority = Some(config.merge_priority);
                 }
+            }
+
+            // Merge the service's own read community block (replace if higher priority)
+            if snmp.reads.is_some()
+                && (reads_priority.is_none() || config.merge_priority < reads_priority.unwrap())
+            {
+                merged.reads = snmp.reads.clone();
+                reads_priority = Some(config.merge_priority);
             }
         }
     }
@@ -3994,5 +4003,67 @@ switches:
         assert!(config.switches.is_empty());
         assert_eq!(failures.len(), 1);
         assert!(failures[0].error.contains("allowed_hosts"), "unhelpful error: {}", failures[0].error);
+    }
+
+    // ---- snmp.reads across config files ----
+
+    fn forti_switch_yaml(priority: u16, snmp_block: &str) -> String {
+        format!(
+            r#"
+merge_priority: {priority}
+switches:
+  - id: sw-reads
+    hostname: reads-switch
+    model: Fortiswitch124F_FPOE
+    management_ip: 192.0.2.1
+    credentials:
+      username: admin
+      password: password
+      connection_type: ssh
+      port: 22
+    vlans:
+      - id: 10
+        name: vlan10
+    ports: []
+{snmp_block}
+"#
+        )
+    }
+
+    #[test]
+    fn snmp_reads_merges_across_files_and_the_higher_priority_file_wins() {
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("overlays");
+        std::fs::create_dir(&folder).unwrap();
+        let main = dir.path().join("main.yaml");
+        std::fs::write(
+            &main,
+            forti_switch_yaml(
+                5,
+                "    snmp:\n      communities:\n        - name: listed\n          access: operator\n      reads:\n        mode: off\n        community:\n          name: main-read",
+            ),
+        )
+        .unwrap();
+        // Lower priority number = higher priority: the main file's `reads` must win...
+        std::fs::write(
+            folder.join("low.yaml"),
+            forti_switch_yaml(50, "    snmp:\n      reads:\n        mode: auto\n        community:\n          name: overlay-read"),
+        )
+        .unwrap();
+
+        let (config, failures) = AppConfig::load_multi(&main, &[folder.clone()]).unwrap();
+        assert!(failures.is_empty(), "{:?}", failures.iter().map(|f| &f.error).collect::<Vec<_>>());
+        let snmp = config.switches[0].snmp.as_ref().unwrap();
+        assert_eq!(snmp.communities[0].name, "listed", "communities still come from the main file");
+        let reads = snmp.reads.as_ref().expect("reads merged");
+        assert_eq!(reads.mode, crate::models::SnmpReadsMode::Off);
+        assert_eq!(reads.community.as_ref().unwrap().name, "main-read");
+
+        // ...and when only an overlay sets it, the overlay supplies it.
+        std::fs::write(&main, forti_switch_yaml(5, "    snmp:\n      communities:\n        - name: listed\n          access: operator")).unwrap();
+        let (config, _) = AppConfig::load_multi(&main, &[folder]).unwrap();
+        let reads = config.switches[0].snmp.as_ref().unwrap().reads.as_ref().expect("overlay supplies reads");
+        assert_eq!(reads.mode, crate::models::SnmpReadsMode::Auto);
+        assert_eq!(reads.community.as_ref().unwrap().name, "overlay-read");
     }
 }

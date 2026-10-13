@@ -4244,7 +4244,7 @@ mod integration_tests {
             snmp: Some(crate::models::SnmpConfig {
                 communities: vec![crate::models::SnmpCommunity::new("preview-secret-12", crate::models::SnmpAccess::Operator)],
                 trap_receivers: vec![],
-                enabled_traps: vec![],
+                enabled_traps: vec![], reads: None,
             }),
             ..Default::default()
         };

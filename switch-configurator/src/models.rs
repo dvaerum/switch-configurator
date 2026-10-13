@@ -1154,6 +1154,35 @@ pub struct SnmpConfig {
     /// Types of traps to enable
     #[serde(default)]
     pub enabled_traps: Vec<TrapType>,
+
+    /// The community the service itself uses to read from the switch over
+    /// SNMP (see `snmp_reads`); separate from the communities you list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reads: Option<SnmpReads>,
+}
+
+/// Whether the service sets up SNMP read access for itself.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SnmpReadsMode {
+    /// The service keeps `reads.community` configured on the switch,
+    /// alongside the communities you list.
+    Auto,
+    /// Nothing is added; the communities you list are all there is.
+    #[default]
+    Off,
+}
+
+/// `snmp.reads`: the community the service reads with. Its string comes from
+/// a file or credential like any other (`name_file` / `name_credential`);
+/// `allowed_hosts` defaults to `auto` (only this host may use it).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SnmpReads {
+    #[serde(default)]
+    pub mode: SnmpReadsMode,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub community: Option<SnmpCommunity>,
 }
 
 /// Complete switch configuration

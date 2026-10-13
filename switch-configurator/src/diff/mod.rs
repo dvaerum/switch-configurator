@@ -377,7 +377,10 @@ fn diff_snmp(current: &SwitchState, desired: &SwitchConfig, diff: &mut StateDiff
     use crate::models::SnmpStateDiff;
 
     let current_snmp = current.snmp.as_ref();
-    let desired_snmp = desired.snmp.as_ref();
+    // The listed communities plus, with `snmp.reads` on, the service's own: one
+    // desired list, so a single apply writes both (see `snmp_reads`).
+    let effective = crate::snmp_reads::effective_snmp(desired);
+    let desired_snmp = effective.as_ref();
 
     match (current_snmp, desired_snmp) {
         (None, None) => {
@@ -1053,7 +1056,7 @@ mod tests {
                     version: None,
                 },
             ],
-            enabled_traps: vec![TrapType::MacNotify],
+            enabled_traps: vec![TrapType::MacNotify], reads: None,
         });
 
         let diff = compute_diff(&current, &desired, false);
@@ -1184,7 +1187,7 @@ mod tests {
                         version: Some("2c".to_string()),
                     },
                 ],
-                enabled_traps: vec![TrapType::MacNotify],
+                enabled_traps: vec![TrapType::MacNotify], reads: None,
             }),
             management_vlan: None,
             warnings: vec![],
@@ -1202,7 +1205,7 @@ mod tests {
                     version: Some("2c".to_string()),
                 },
             ],
-            enabled_traps: vec![TrapType::MacNotify],
+            enabled_traps: vec![TrapType::MacNotify], reads: None,
         });
 
         let diff = compute_diff(&current, &desired, false);
@@ -2301,7 +2304,7 @@ mod tests {
                     SnmpCommunity::new("public".to_string(), SnmpAccess::Operator),
                 ],
                 trap_receivers: vec![],
-                enabled_traps: vec![],
+                enabled_traps: vec![], reads: None,
             }),
             management_vlan: None,
             warnings: vec![],
@@ -2314,7 +2317,7 @@ mod tests {
                 SnmpCommunity::new("public".to_string(), SnmpAccess::Unrestricted),
             ],
             trap_receivers: vec![],
-            enabled_traps: vec![],
+            enabled_traps: vec![], reads: None,
         });
 
         let diff = compute_diff(&current, &desired, false);
@@ -2352,7 +2355,7 @@ mod tests {
                         version: Some("2c".to_string()),
                     },
                 ],
-                enabled_traps: vec![TrapType::MacNotify, TrapType::LinkChange],
+                enabled_traps: vec![TrapType::MacNotify, TrapType::LinkChange], reads: None,
             }),
             management_vlan: None,
             warnings: vec![],
@@ -2404,7 +2407,7 @@ mod tests {
                     SnmpCommunity::new("public".to_string(), SnmpAccess::Operator),
                 ],
                 trap_receivers: vec![],
-                enabled_traps: vec![TrapType::MacNotify],
+                enabled_traps: vec![TrapType::MacNotify], reads: None,
             }),
             management_vlan: None,
             warnings: vec![],
@@ -2417,7 +2420,7 @@ mod tests {
                 SnmpCommunity::new("public".to_string(), SnmpAccess::Operator),
             ],
             trap_receivers: vec![],
-            enabled_traps: vec![TrapType::LinkChange],
+            enabled_traps: vec![TrapType::LinkChange], reads: None,
         });
 
         let diff = compute_diff(&current, &desired, false);
@@ -2694,7 +2697,7 @@ mod tests {
     // ---- SNMP community diff: allowed_hosts and determinism ----
 
     fn snmp_config(communities: Vec<crate::models::SnmpCommunity>) -> crate::models::SnmpConfig {
-        crate::models::SnmpConfig { communities, trap_receivers: vec![], enabled_traps: vec![] }
+        crate::models::SnmpConfig { communities, trap_receivers: vec![], enabled_traps: vec![], reads: None }
     }
 
     fn community_with_hosts(name: &str, hosts: &[&str]) -> crate::models::SnmpCommunity {
@@ -2744,5 +2747,93 @@ mod tests {
         let added: Vec<&str> = diff.communities_to_add.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(added, vec!["b-new", "m-new"]);
         assert_eq!(diff.communities_to_remove, vec!["a-old".to_string(), "z-old".to_string()]);
+    }
+
+    // ---- snmp.reads: the service's own community merged into the desired list ----
+
+    fn reads_community() -> SnmpCommunity {
+        // As after secret resolution: the string is in `name`.
+        let mut c = SnmpCommunity::new("service-read-secret", SnmpAccess::Operator);
+        c.name_credential = Some("snmp-ro".to_string());
+        c
+    }
+
+    fn desired_with_reads(listed: Vec<SnmpCommunity>, mode: crate::models::SnmpReadsMode) -> SwitchConfig {
+        let mut desired = create_test_switch_config();
+        desired.snmp = Some(SnmpConfig {
+            communities: listed,
+            trap_receivers: vec![],
+            enabled_traps: vec![],
+            reads: Some(crate::models::SnmpReads { mode, community: Some(reads_community()) }),
+        });
+        desired
+    }
+
+    fn current_with(communities: Vec<SnmpCommunity>) -> SwitchState {
+        SwitchState {
+            snmp: Some(SnmpConfig { communities, trap_receivers: vec![], enabled_traps: vec![], reads: None }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn reads_auto_adds_the_service_community_alongside_the_listed_ones() {
+        let current = current_with(vec![SnmpCommunity::new("mine", SnmpAccess::Operator)]);
+        let desired = desired_with_reads(
+            vec![SnmpCommunity::new("mine", SnmpAccess::Operator)],
+            crate::models::SnmpReadsMode::Auto,
+        );
+
+        let snmp_diff = compute_diff(&current, &desired, false).snmp_diff.unwrap();
+
+        let added: Vec<&str> = snmp_diff.communities_to_add.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(added, vec!["service-read-secret"]);
+        assert!(snmp_diff.communities_to_remove.is_empty(), "the listed community must stay");
+    }
+
+    #[test]
+    fn once_both_are_on_the_switch_nothing_is_left_to_do() {
+        let current = current_with(vec![
+            SnmpCommunity::new("mine", SnmpAccess::Operator),
+            SnmpCommunity::new("service-read-secret", SnmpAccess::Operator),
+        ]);
+        let desired = desired_with_reads(
+            vec![SnmpCommunity::new("mine", SnmpAccess::Operator)],
+            crate::models::SnmpReadsMode::Auto,
+        );
+
+        assert!(!compute_diff(&current, &desired, false).has_changes());
+    }
+
+    #[test]
+    fn an_apply_of_the_listed_communities_never_removes_the_service_community() {
+        // The service's community is on the switch, and the YAML doesn't list it.
+        let current = current_with(vec![SnmpCommunity::new("service-read-secret", SnmpAccess::Operator)]);
+        let desired = desired_with_reads(vec![], crate::models::SnmpReadsMode::Auto);
+
+        let diff = compute_diff(&current, &desired, false);
+
+        assert!(diff.snmp_diff.is_none_or(|d| d.communities_to_remove.is_empty()));
+    }
+
+    #[test]
+    fn turning_reads_off_removes_the_service_community_like_any_unwanted_one() {
+        let current = current_with(vec![SnmpCommunity::new("service-read-secret", SnmpAccess::Operator)]);
+        let desired = desired_with_reads(vec![], crate::models::SnmpReadsMode::Off);
+
+        let snmp_diff = compute_diff(&current, &desired, false).snmp_diff.unwrap();
+
+        assert_eq!(snmp_diff.communities_to_remove, vec!["service-read-secret".to_string()]);
+    }
+
+    #[test]
+    fn rotating_the_secret_removes_the_old_string_and_adds_the_new_one() {
+        let current = current_with(vec![SnmpCommunity::new("old-read-secret", SnmpAccess::Operator)]);
+        let desired = desired_with_reads(vec![], crate::models::SnmpReadsMode::Auto);
+
+        let snmp_diff = compute_diff(&current, &desired, false).snmp_diff.unwrap();
+
+        assert_eq!(snmp_diff.communities_to_remove, vec!["old-read-secret".to_string()]);
+        assert_eq!(snmp_diff.communities_to_add[0].name, "service-read-secret");
     }
 }

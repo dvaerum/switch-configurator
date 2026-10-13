@@ -929,7 +929,7 @@ impl ArubaSwitch {
             Some(crate::models::SnmpConfig {
                 communities,
                 trap_receivers,
-                enabled_traps,
+                enabled_traps, reads: None,
             })
         } else {
             None
@@ -2712,7 +2712,7 @@ mod tests {
                     version: None,
                 },
             ],
-            enabled_traps: vec![TrapType::MacNotify, TrapType::LinkChange],
+            enabled_traps: vec![TrapType::MacNotify, TrapType::LinkChange], reads: None,
         };
 
         // Test with no currently enabled traps (fresh config)
@@ -3130,7 +3130,7 @@ management_vlan: None,
                     version: None,
                 },
             ],
-            enabled_traps: vec![],
+            enabled_traps: vec![], reads: None,
         };
 
         // Test with no currently enabled traps
@@ -3277,7 +3277,7 @@ snmp-server host 192.168.1.99 community public
         let snmp = SnmpConfig {
             communities: vec![],
             trap_receivers: vec![],
-            enabled_traps: vec![TrapType::LinkChange],
+            enabled_traps: vec![TrapType::LinkChange], reads: None,
         };
 
         // Test with no currently enabled traps - should only enable, not disable
@@ -3296,7 +3296,7 @@ snmp-server host 192.168.1.99 community public
         let snmp_new = SnmpConfig {
             communities: vec![],
             trap_receivers: vec![],
-            enabled_traps: vec![TrapType::LinkChange],  // Only want link-change
+            enabled_traps: vec![TrapType::LinkChange], reads: None,  // Only want link-change
         };
         let commands2 = switch.generate_snmp_commands(&snmp_new, &current_traps);
 
@@ -3526,7 +3526,7 @@ snmp-server community "private" operator unrestricted
                     version: Some("2c".to_string()),
                 },
             ],
-            enabled_traps: vec![TrapType::MacNotify],
+            enabled_traps: vec![TrapType::MacNotify], reads: None,
         };
 
         // Test with no currently enabled traps
@@ -3758,7 +3758,7 @@ snmp-server host 192.168.1.1 community "public"
             enabled_traps: vec![
                 crate::models::TrapType::LinkChange,
                 crate::models::TrapType::MacNotify,
-            ],
+            ], reads: None,
         };
 
         // Current state: link-change enabled (default)
@@ -3792,7 +3792,7 @@ snmp-server host 192.168.1.1 community "public"
             enabled_traps: vec![
                 // Only mac-notify, NOT link-change
                 crate::models::TrapType::MacNotify,
-            ],
+            ], reads: None,
         };
 
         // Current state: link-change enabled (default), mac-notify disabled
@@ -3823,7 +3823,7 @@ snmp-server host 192.168.1.1 community "public"
             trap_receivers: vec![],
             enabled_traps: vec![
                 crate::models::TrapType::LinkChange,
-            ],
+            ], reads: None,
         };
 
         // Current state: link-change disabled (unusual, but possible)

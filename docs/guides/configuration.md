@@ -417,6 +417,22 @@ communities:
 
 The string is read when the config is loaded or reloaded (`POST /config/reload`), so rotating a secret means updating the file/credential and reloading (a changed credential needs a service restart, as systemd snapshots it at start). A community that references a file or credential is shown and saved as the reference only: the value never appears in `GET .../desired-config`, previews, overlays or logs, and is masked in `GET .../config`. **Restricting who may query a community (FortiSwitch).** `allowed_hosts` lists the managers that may use a community: `auto` (the address this host reaches the switch from, found through the routing table when the config is applied), an IPv4 address, or an IPv4 CIDR. On FortiSwitch this becomes the community's `config hosts` table (verified: other addresses get no answer) and the community sends no traps. When communities are added or rewritten the service also makes SNMP reachable: it turns on `sysinfo` and appends `snmp` to the `allowaccess` of the interface address that owns `management_ip` (existing access is kept). A FortiSwitch holds at most 3 communities, IPv6 managers are not supported yet, and Aruba/Cisco switches reject `allowed_hosts` with a validation error (it would otherwise be silently unrestricted). Details and evidence: [`docs/learnings/snmp-fortiswitch.md`](../learnings/snmp-fortiswitch.md).
 
+**A community for the service itself (`snmp.reads`).** The service can read from the switch over SNMP (faster than the console, and without taking the switch's single console session). Turn that on with its own block, next to the communities you list:
+
+```yaml
+snmp:
+  communities:
+    - name_credential: monitoring-ro   # yours, as before
+      access: operator
+  reads:
+    mode: auto                         # off (default) | auto
+    community:
+      name_credential: snmp-ro         # or name_file / name; same rules as above
+      allowed_hosts: [auto]            # default when omitted: only this host
+```
+
+With `mode: auto` the service keeps its read community on the switch **in addition to** yours: both are merged into one desired list, so an apply of your communities never removes the service's and vice versa. The service's community is always read-only. Rotate its secret by changing the file/credential and reloading: the old string is removed and the new one added, and your communities are not touched. Turning `mode` back to `off` removes only the service's community. It counts towards the FortiSwitch limit of 3 communities, and is FortiSwitch-only for now (Aruba/Cisco reject it with a validation error). The `reads` block follows the usual merge priority between config files.
+
 A missing, empty or unreadable secret skips that switch with a validation error that names the source but never the value. Quotes and control characters are not allowed in a community string. See [`docs/decisions/0002-secret-redaction-scope.md`](../decisions/0002-secret-redaction-scope.md).
 
 
