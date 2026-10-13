@@ -210,6 +210,29 @@ sudo chown switch-configurator:switch-configurator /var/lib/switch-configurator/
 sudo chmod 640 /var/lib/switch-configurator/config.yaml
 ```
 
+### SNMP community strings: `loadCredentials`
+
+Keep SNMP community strings out of the YAML (which lands in the world-readable nix store) by handing them to the service as systemd credentials:
+
+```nix
+{
+  sops.secrets."snmp-ro" = { };   # root-only (0400) is fine
+
+  services.switch-configurator.loadCredentials = {
+    snmp-ro = config.sops.secrets."snmp-ro".path;   # LoadCredential=snmp-ro:<path>
+  };
+}
+```
+
+```yaml
+snmp:
+  communities:
+    - name_credential: snmp-ro
+      access: operator
+```
+
+systemd reads the file as root and gives the service a private copy under `$CREDENTIALS_DIRECTORY`, so the service user needs no access to the source file. Credential ids must be plain names (the module asserts this). Changing the secret needs a service restart.
+
 ### Option 3: Secrets Management (Production)
 
 #### Using agenix
@@ -499,7 +522,7 @@ systemctl restart switch-configurator
 
 ## Complete Example
 
-See [examples/nixos-module.nix](../../examples/nixos-module.nix) for a complete, annotated example.
+See [nixos-module.nix](../../nixos-module.nix) for every option with its description.
 
 ## Next Steps
 

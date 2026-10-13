@@ -3,6 +3,7 @@ mod config;
 mod diff;
 mod models;
 mod redact;
+mod secrets;
 mod session_pool;
 mod ssh;
 mod status;

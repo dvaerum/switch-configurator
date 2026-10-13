@@ -573,8 +573,11 @@ struct EditSnmpTemplate {
 
 #[derive(Debug, Clone)]
 pub struct EditableSnmpCommunity {
+    /// Inline name, or a label for a file/credential reference (never the
+    /// secret itself: referenced communities are managed in the config files).
     pub name: String,
     pub access: String,
+    pub from_reference: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -599,8 +602,15 @@ pub async fn edit_snmp(
         switch_id: id,
         hostname: draft.edited.hostname.clone().unwrap_or_default(),
         communities: snmp.map(|s| s.communities.iter().map(|c| EditableSnmpCommunity {
-            name: c.name.clone(),
+            name: if let Some(file) = &c.name_file {
+                format!("from file {}", file.display())
+            } else if let Some(credential) = &c.name_credential {
+                format!("from credential {}", credential)
+            } else {
+                c.name.clone()
+            },
             access: format!("{:?}", c.access).to_lowercase(),
+            from_reference: c.has_reference(),
         }).collect()).unwrap_or_default(),
         trap_receivers: snmp.map(|s| s.trap_receivers.iter().map(|r| EditableSnmpTrapReceiver {
             host: r.host.clone(),
@@ -634,10 +644,7 @@ pub async fn add_snmp_community(
     });
 
     if !snmp.communities.iter().any(|c| c.name == form.name) {
-        snmp.communities.push(SnmpCommunity {
-            name: form.name,
-            access: parse_snmp_access(&form.access),
-        });
+        snmp.communities.push(SnmpCommunity::new(form.name, parse_snmp_access(&form.access)));
     }
 
     state.drafts.update(&id, draft.edited).await;

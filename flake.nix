@@ -6,8 +6,14 @@
     flake-utils.url = "github:numtide/flake-utils";
   };
 
-  outputs = { self, nixpkgs, flake-utils }:
-    flake-utils.lib.eachDefaultSystem (system:
+  outputs =
+    {
+      self,
+      nixpkgs,
+      flake-utils,
+    }:
+    flake-utils.lib.eachDefaultSystem (
+      system:
       let
         pkgs = import nixpkgs { inherit system; };
 
@@ -17,13 +23,16 @@
           openssl
         ];
 
-        buildInputs = with pkgs; [
-          openssl
-          libiconv
-        ] ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
-          pkgs.darwin.apple_sdk.frameworks.Security
-          pkgs.darwin.apple_sdk.frameworks.SystemConfiguration
-        ];
+        buildInputs =
+          with pkgs;
+          [
+            openssl
+            libiconv
+          ]
+          ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
+            pkgs.darwin.apple_sdk.frameworks.Security
+            pkgs.darwin.apple_sdk.frameworks.SystemConfiguration
+          ];
 
       in
       {
@@ -45,8 +54,8 @@
             cargo-audit
 
             # Fast linkers for quicker builds
-            mold        # Much faster linker than GNU ld
-            clang       # Needed for mold
+            mold # Much faster linker than GNU ld
+            clang # Needed for mold
 
             # Additional tools
             jq
@@ -98,8 +107,74 @@
           type = "app";
           program = "${self.packages.${system}.default}/bin/switch-configurator-ui";
         };
+
+        # Evaluation-only module checks (no VM): cheap enough for `nix flake check`.
+        checks = pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
+          module-load-credentials =
+            let
+              eval = nixpkgs.lib.nixosSystem {
+                inherit system;
+                modules = [
+                  self.nixosModules.default
+                  {
+                    services.switch-configurator = {
+                      enable = true;
+                      package = self.packages.${system}.default;
+                      configFile = ./examples/config.example.yaml;
+                      loadCredentials.snmp-ro = "/run/secrets/snmp-ro";
+                    };
+                    # Minimal host so the module system accepts the evaluation.
+                    boot.loader.grub.enable = false;
+                    fileSystems."/" = {
+                      device = "none";
+                      fsType = "tmpfs";
+                    };
+                    system.stateVersion = "24.11";
+                  }
+                ];
+              };
+              got = eval.config.systemd.services.switch-configurator.serviceConfig.LoadCredential;
+              want = [ "snmp-ro:/run/secrets/snmp-ro" ];
+            in
+            pkgs.runCommand "module-load-credentials" { } (
+              if got == want then
+                "touch $out"
+              else
+                "echo 'LoadCredential: unexpected value ${builtins.toJSON got}' >&2; exit 1"
+            );
+
+          # A credential id that is a path would point outside $CREDENTIALS_DIRECTORY.
+          module-load-credentials-rejects-path-ids =
+            let
+              eval = nixpkgs.lib.nixosSystem {
+                inherit system;
+                modules = [
+                  self.nixosModules.default
+                  {
+                    services.switch-configurator = {
+                      enable = true;
+                      package = self.packages.${system}.default;
+                      configFile = ./examples/config.example.yaml;
+                      loadCredentials."../escape" = "/run/secrets/x";
+                    };
+                    boot.loader.grub.enable = false;
+                    fileSystems."/" = {
+                      device = "none";
+                      fsType = "tmpfs";
+                    };
+                    system.stateVersion = "24.11";
+                  }
+                ];
+              };
+              rejected = builtins.any (a: !a.assertion) eval.config.assertions;
+            in
+            pkgs.runCommand "module-load-credentials-rejects-path-ids" { } (
+              if rejected then "touch $out" else "echo 'path-like credential id was accepted' >&2; exit 1"
+            );
+        };
       }
-    ) // {
+    )
+    // {
       # NixOS module - imported from nixos-module.nix
       nixosModules.default = import ./nixos-module.nix { inherit self; };
 
@@ -113,13 +188,16 @@
             pkg-config
             openssl
           ];
-          buildInputs = with final; [
-            openssl
-            libiconv
-          ] ++ final.lib.optionals final.stdenv.isDarwin [
-            final.darwin.apple_sdk.frameworks.Security
-            final.darwin.apple_sdk.frameworks.SystemConfiguration
-          ];
+          buildInputs =
+            with final;
+            [
+              openssl
+              libiconv
+            ]
+            ++ final.lib.optionals final.stdenv.isDarwin [
+              final.darwin.apple_sdk.frameworks.Security
+              final.darwin.apple_sdk.frameworks.SystemConfiguration
+            ];
         };
       };
 

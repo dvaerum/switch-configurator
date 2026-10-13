@@ -1503,6 +1503,11 @@ pub fn validate_switch_config(switch: &mut SwitchConfig) -> Result<()> {
         )
     })?;
 
+    // Step 3a: Read SNMP community strings given by reference (name_file /
+    // name_credential) into the runtime config. Errors are switch-scoped and
+    // never contain the value.
+    crate::secrets::resolve_snmp_secrets(switch, &crate::secrets::SecretContext::from_env())?;
+
     // Step 3b: Resolve VLAN name references (ports may reference VLANs by name).
     // Must run after required-field/structural validation (so `vlans` is populated)
     // and before VLAN-reference validation (which checks numeric ids).
@@ -1541,6 +1546,11 @@ pub fn validate_overlay_config(
     switch: &mut SwitchConfig,
     known_external_vlan_ids: &std::collections::HashSet<u16>,
 ) -> Result<()> {
+    // Each community must name a source. Only checked, not resolved: an
+    // overlay stores the reference, and the file/credential may not even be
+    // readable where it is edited.
+    crate::secrets::check_snmp_secret_sources(switch)?;
+
     // Expand port ranges (e.g., "1-5" → individual ports)
     expand_port_ranges(switch)
         .with_context(|| format!("Port range expansion failed for switch '{}'", switch.id))?;
@@ -3891,5 +3901,78 @@ switches:
         let known_external = std::collections::HashSet::new();
 
         assert!(validate_overlay_config(&mut switch, &known_external).is_ok());
+    }
+
+    // ---- SNMP community secret sources (name_file / name_credential) ----
+
+    fn snmp_yaml(community_block: &str) -> String {
+        format!(
+            r#"
+switches:
+  - id: sw-snmp
+    hostname: snmp-switch
+    model: Aruba2930F
+    management_ip: 192.0.2.1
+    credentials:
+      username: admin
+      password: password
+      connection_type: ssh
+      port: 22
+    vlans:
+      - id: 10
+        name: vlan10
+    ports: []
+    snmp:
+      communities:
+{community_block}
+"#
+        )
+    }
+
+    #[test]
+    fn load_resolves_a_name_file_community_into_the_runtime_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let secret = dir.path().join("snmp-ro");
+        std::fs::write(&secret, "loaded-secret-10\n").unwrap();
+        let config_path = dir.path().join("config.yaml");
+        std::fs::write(
+            &config_path,
+            snmp_yaml(&format!("        - name_file: {}\n          access: operator", secret.display())),
+        )
+        .unwrap();
+
+        let (config, failures) = AppConfig::load(&config_path).unwrap();
+
+        assert!(failures.is_empty(), "unexpected failures: {:?}", failures.iter().map(|f| &f.error).collect::<Vec<_>>());
+        let community = &config.switches[0].snmp.as_ref().unwrap().communities[0];
+        assert_eq!(community.name, "loaded-secret-10");
+        assert!(!serde_yaml::to_string(&config.switches[0]).unwrap().contains("loaded-secret-10"));
+    }
+
+    #[test]
+    fn load_skips_a_switch_whose_secret_cannot_be_read_and_says_why() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.yaml");
+        std::fs::write(
+            &config_path,
+            snmp_yaml("        - name_file: /nonexistent/snmp-ro\n          access: operator"),
+        )
+        .unwrap();
+
+        let (config, failures) = AppConfig::load(&config_path).unwrap();
+
+        assert!(config.switches.is_empty(), "a switch with an unreadable secret must not load");
+        assert_eq!(failures.len(), 1);
+        assert!(failures[0].error.contains("SNMP community #1"), "unhelpful error: {}", failures[0].error);
+    }
+
+    #[test]
+    fn overlay_validation_requires_each_community_to_name_a_source() {
+        let mut switch: SwitchConfig = serde_yaml::from_str(
+            &snmp_yaml("        - access: operator").trim_start().replace("switches:\n  - ", "").replace("\n    ", "\n"),
+        )
+        .unwrap();
+        let err = validate_overlay_config(&mut switch, &std::collections::HashSet::new()).unwrap_err().to_string();
+        assert!(err.contains("no source"), "unhelpful error: {err}");
     }
 }

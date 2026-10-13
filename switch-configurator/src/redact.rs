@@ -89,7 +89,9 @@ impl CommandRedactor {
         if p.cisco_host.is_match(command) && !command.to_ascii_lowercase().contains("version 3") {
             return p.cisco_host.replace(command, format!("${{1}}{MASK}")).into_owned();
         }
-        command.to_string()
+        // Whatever the patterns above missed: mask secret values we know
+        // (read from files/credentials), wherever they appear.
+        crate::secrets::scrub(command)
     }
 }
 
@@ -100,6 +102,11 @@ impl CommandRedactor {
     pub fn peek_text(&self, text: &str) -> String {
         if self.show_output {
             return format!("<{} bytes of show output withheld>", text.len());
+        }
+        if self.snmp_community_depth > 0 {
+            // The device echo of a `set name "<community>"` line can arrive
+            // cut mid-line, which no line pattern would recognise.
+            return format!("<{} bytes withheld inside an SNMP community block>", text.len());
         }
         self.peek_sent(text)
     }
@@ -115,7 +122,7 @@ impl CommandRedactor {
                 let tail = &piece[line.len()..];
                 format!("{}{}", scratch.redact(line), tail)
             })
-            .collect()
+            .collect::<String>()
     }
 }
 
@@ -262,5 +269,27 @@ mod tests {
         // The next non-show command ends the withholding.
         redactor.redact("vlan 10");
         assert_eq!(redactor.peek_text("vlan 10\r\n"), "vlan 10\r\n");
+    }
+
+    #[test]
+    fn wire_output_is_withheld_inside_a_community_block_even_when_chunks_split_a_line() {
+        let mut redactor = CommandRedactor::new();
+        redactor.redact("config system snmp community");
+        redactor.redact("set name \"s3cret-split\"");
+        // The device echo can arrive cut mid-line, so no pattern would match it.
+        let shown = redactor.peek_text("me \"s3cret-split\"\r\n");
+        assert!(!shown.contains("s3cret-split"), "split echo leaked: {shown}");
+
+        redactor.redact("end");
+        assert_eq!(redactor.peek_text("plain\r\n"), "plain\r\n", "withholding stops with the block");
+    }
+
+    #[test]
+    fn registered_secret_values_are_masked_wherever_the_redactor_outputs() {
+        crate::secrets::register_secret("registered-secret-13");
+        let mut redactor = CommandRedactor::new();
+        assert_eq!(redactor.redact("some command with registered-secret-13 in it"), format!("some command with {MASK} in it"));
+        assert_eq!(redactor.peek_sent("x registered-secret-13\r"), format!("x {MASK}\r"));
+        assert_eq!(redactor.peek_text("y registered-secret-13\r\n"), format!("y {MASK}\r\n"));
     }
 }

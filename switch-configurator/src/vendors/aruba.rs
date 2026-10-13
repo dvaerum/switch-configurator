@@ -897,7 +897,7 @@ impl ArubaSwitch {
                             "operator" => crate::models::SnmpAccess::Operator,
                             _ => crate::models::SnmpAccess::Unrestricted,
                         };
-                        communities.push(crate::models::SnmpCommunity { name, access });
+                        communities.push(crate::models::SnmpCommunity::new(name, access));
                     }
                 }
             }
@@ -2702,14 +2702,8 @@ mod tests {
 
         let snmp = SnmpConfig {
             communities: vec![
-                SnmpCommunity {
-                    name: "public".to_string(),
-                    access: SnmpAccess::Unrestricted,
-                },
-                SnmpCommunity {
-                    name: "private".to_string(),
-                    access: SnmpAccess::Manager,
-                },
+                SnmpCommunity::new("public".to_string(), SnmpAccess::Unrestricted),
+                SnmpCommunity::new("private".to_string(), SnmpAccess::Manager),
             ],
             trap_receivers: vec![
                 SnmpTrapReceiver {
@@ -3127,10 +3121,7 @@ management_vlan: None,
 
         let snmp = SnmpConfig {
             communities: vec![
-                SnmpCommunity {
-                    name: "public".to_string(),
-                    access: SnmpAccess::Unrestricted,
-                },
+                SnmpCommunity::new("public".to_string(), SnmpAccess::Unrestricted),
             ],
             trap_receivers: vec![
                 SnmpTrapReceiver {
@@ -3526,10 +3517,7 @@ snmp-server community "private" operator unrestricted
 
         let snmp = SnmpConfig {
             communities: vec![
-                SnmpCommunity {
-                    name: "public".to_string(),
-                    access: crate::models::SnmpAccess::Operator,
-                },
+                SnmpCommunity::new("public".to_string(), crate::models::SnmpAccess::Operator),
             ],
             trap_receivers: vec![
                 SnmpTrapReceiver {
@@ -3758,10 +3746,7 @@ snmp-server host 192.168.1.1 community "public"
 
         let snmp_config = crate::models::SnmpConfig {
             communities: vec![
-                crate::models::SnmpCommunity {
-                    name: "public".to_string(),
-                    access: crate::models::SnmpAccess::Operator,
-                },
+                SnmpCommunity::new("public".to_string(), crate::models::SnmpAccess::Operator),
             ],
             trap_receivers: vec![
                 crate::models::SnmpTrapReceiver {
@@ -3801,10 +3786,7 @@ snmp-server host 192.168.1.1 community "public"
 
         let snmp_config = crate::models::SnmpConfig {
             communities: vec![
-                crate::models::SnmpCommunity {
-                    name: "public".to_string(),
-                    access: crate::models::SnmpAccess::Operator,
-                },
+                SnmpCommunity::new("public".to_string(), crate::models::SnmpAccess::Operator),
             ],
             trap_receivers: vec![],
             enabled_traps: vec![

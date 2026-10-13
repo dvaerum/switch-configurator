@@ -51,6 +51,14 @@ switches:
         - name: "private"
           access: unrestricted  # Read-write
 
+        # Keep the community string out of the YAML (and out of the nix store):
+        # exactly one of `name`, `name_file`, `name_credential` per community.
+        #   name_file:       path of a file holding the string (e.g. a sops-nix secret)
+        #   name_credential: systemd LoadCredential id, read from $CREDENTIALS_DIRECTORY
+        #                    (NixOS: services.switch-configurator.loadCredentials.<id>)
+        # - name_credential: snmp-ro
+        #   access: operator
+
       # SNMP trap receivers (monitoring servers)
       trap_receivers:
         - host: "192.168.1.100"

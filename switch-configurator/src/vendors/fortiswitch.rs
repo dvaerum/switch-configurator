@@ -2123,7 +2123,7 @@ impl FortiswitchSwitch {
                     .collect();
             } else if trimmed == "next" {
                 if let Some(name) = community_name.take() {
-                    communities.push(SnmpCommunity { name, access: SnmpAccess::default() });
+                    communities.push(SnmpCommunity::new(name, SnmpAccess::default()));
                 }
                 in_community = false;
             }
@@ -3328,10 +3328,7 @@ mod tests {
     fn test_generate_snmp_commands_single_community_no_traps() {
         let switch = create_test_switch();
         let snmp_config = SnmpConfig {
-            communities: vec![SnmpCommunity {
-                name: "public".to_string(),
-                access: SnmpAccess::Operator,
-            }],
+            communities: vec![SnmpCommunity::new("public".to_string(), SnmpAccess::Operator)],
             trap_receivers: vec![],
             enabled_traps: vec![],
         };
@@ -3351,10 +3348,7 @@ mod tests {
     fn test_generate_snmp_commands_with_trap_receiver() {
         let switch = create_test_switch();
         let snmp_config = SnmpConfig {
-            communities: vec![SnmpCommunity {
-                name: "public".to_string(),
-                access: SnmpAccess::Operator,
-            }],
+            communities: vec![SnmpCommunity::new("public".to_string(), SnmpAccess::Operator)],
             trap_receivers: vec![SnmpTrapReceiver {
                 host: "192.168.1.200".to_string(),
                 community: "public".to_string(),
@@ -3379,14 +3373,8 @@ mod tests {
         let switch = create_test_switch();
         let snmp_config = SnmpConfig {
             communities: vec![
-                SnmpCommunity {
-                    name: "public".to_string(),
-                    access: SnmpAccess::Operator,
-                },
-                SnmpCommunity {
-                    name: "private".to_string(),
-                    access: SnmpAccess::Unrestricted,
-                },
+                SnmpCommunity::new("public".to_string(), SnmpAccess::Operator),
+                SnmpCommunity::new("private".to_string(), SnmpAccess::Unrestricted),
             ],
             trap_receivers: vec![SnmpTrapReceiver {
                 host: "192.168.1.200".to_string(),
@@ -3412,10 +3400,7 @@ mod tests {
     fn test_generate_snmp_commands_multiple_trap_receivers() {
         let switch = create_test_switch();
         let snmp_config = SnmpConfig {
-            communities: vec![SnmpCommunity {
-                name: "public".to_string(),
-                access: SnmpAccess::Operator,
-            }],
+            communities: vec![SnmpCommunity::new("public".to_string(), SnmpAccess::Operator)],
             trap_receivers: vec![
                 SnmpTrapReceiver {
                     host: "192.168.1.200".to_string(),
@@ -3443,10 +3428,7 @@ mod tests {
     fn test_generate_snmp_commands_all_trap_types() {
         let switch = create_test_switch();
         let snmp_config = SnmpConfig {
-            communities: vec![SnmpCommunity {
-                name: "public".to_string(),
-                access: SnmpAccess::Operator,
-            }],
+            communities: vec![SnmpCommunity::new("public".to_string(), SnmpAccess::Operator)],
             trap_receivers: vec![SnmpTrapReceiver {
                 host: "192.168.1.200".to_string(),
                 community: "public".to_string(),
@@ -3614,10 +3596,7 @@ mod tests {
             direction: MirrorDirection::Both,
         }];
         config.snmp = Some(SnmpConfig {
-            communities: vec![SnmpCommunity {
-                name: "public".to_string(),
-                access: SnmpAccess::Operator,
-            }],
+            communities: vec![SnmpCommunity::new("public".to_string(), SnmpAccess::Operator)],
             trap_receivers: vec![SnmpTrapReceiver {
                 host: "192.168.1.200".to_string(),
                 community: "public".to_string(),
@@ -4855,9 +4834,9 @@ mod tests {
         switch.snmp_community_indices.insert("s3cret-removed".to_string(), 7);
 
         let diff = SnmpStateDiff {
-            communities_to_add: vec![SnmpCommunity { name: "s3cret-added".to_string(), access: SnmpAccess::Unrestricted }],
+            communities_to_add: vec![SnmpCommunity::new("s3cret-added".to_string(), SnmpAccess::Unrestricted)],
             communities_to_remove: vec!["s3cret-removed".to_string()],
-            communities_to_update: vec![SnmpCommunity { name: "s3cret-updated".to_string(), access: SnmpAccess::Operator }],
+            communities_to_update: vec![SnmpCommunity::new("s3cret-updated".to_string(), SnmpAccess::Operator)],
             ..Default::default()
         };
         switch.apply_snmp_diff(&diff).await.expect("apply over fake console");
