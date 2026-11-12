@@ -502,11 +502,15 @@ impl FortiswitchSwitch {
                 commands.push("set status down".to_string());
             }
 
-            // PoE configuration
-            if port.poe_enabled {
-                commands.push("set poe-status enable".to_string());
-            } else {
-                commands.push("set poe-status disable".to_string());
+            // PoE configuration: only ports that have PoE (the 124E has none,
+            // the 124F's SFP+ uplinks have none) know the setting; elsewhere
+            // FortiOS answers with a parse error.
+            if self.config.model().port_supports_poe(&port.port_id) {
+                if port.poe_enabled {
+                    commands.push("set poe-status enable".to_string());
+                } else {
+                    commands.push("set poe-status disable".to_string());
+                }
             }
 
             // Speed and duplex
@@ -2696,24 +2700,37 @@ impl FortiswitchSwitch {
     }
 
     /// Reset ports to default state (disabled, VLAN 1, access mode, no description)
-    async fn reset_ports(&mut self, port_ids: &[String]) -> Result<ConfigResult, VendorError> {
+    /// Commands that put unconfigured ports back to a default, disabled state.
+    /// VLAN settings live in `switch interface`; up/down and PoE are
+    /// `switch physical-port` settings (FortiOS has no `set admin`).
+    fn generate_reset_commands(&self, port_ids: &[String]) -> Vec<String> {
         let mut commands = vec!["config switch interface".to_string()];
-
         for port_id in port_ids {
-            let interface = self.normalize_port_id(port_id);
-            debug!("  Resetting port {} to default state", port_id);
-
-            commands.push(format!("edit {}", interface));
+            commands.push(format!("edit {}", self.normalize_port_id(port_id)));
             commands.push("unset description".to_string());  // Remove description
             commands.push("set native-vlan 1".to_string());  // Set to default VLAN
             commands.push("set allowed-vlans 1".to_string());  // Only allow default VLAN
             commands.push("set default-cos 0".to_string());  // Reset CoS
-            commands.push("set poe-status enable".to_string());  // Enable PoE
-            commands.push("set admin down".to_string());  // Disable the port
             commands.push("next".to_string());
         }
-
         commands.push("end".to_string());
+
+        commands.push("config switch physical-port".to_string());
+        for port_id in port_ids {
+            commands.push(format!("edit {}", self.normalize_port_id(port_id)));
+            commands.push("set status down".to_string());  // Disable the port
+            if self.config.model().port_supports_poe(port_id) {
+                commands.push("set poe-status enable".to_string());  // Back to the default
+            }
+            commands.push("next".to_string());
+        }
+        commands.push("end".to_string());
+        commands
+    }
+
+    async fn reset_ports(&mut self, port_ids: &[String]) -> Result<ConfigResult, VendorError> {
+        debug!("Resetting {} unconfigured ports to default state", port_ids.len());
+        let commands = self.generate_reset_commands(port_ids);
 
         let client = self
             .client
@@ -5748,5 +5765,73 @@ name: vlan42    mode: dhcp    ip: 192.0.2.2 255.255.255.0   status: up    netmas
         let leases = FortiswitchSwitch::parse_interface_addresses(&lines(GET_INTERFACES));
         assert!(FortiswitchSwitch::resolve_mgmt_access(&lines(DHCP_INTERFACES), &leases, "203.0.113.9").is_none());
         assert!(FortiswitchSwitch::resolve_mgmt_access(&lines(DHCP_INTERFACES), &leases, "0.0.0.0").is_none(), "an unset address is not a match");
+    }
+
+    // ---- port reset and PoE commands per model ----
+
+    fn switch_for(model: crate::models::SwitchModel) -> FortiswitchSwitch {
+        let mut config = create_test_config();
+        config.model = Some(model);
+        FortiswitchSwitch::new(config, RuntimeConfig::default(), false)
+    }
+
+    fn access_port(id: &str, poe: bool) -> Port {
+        serde_yaml::from_str(&format!("port_id: \"{id}\"\nvlan: 1\nenabled: true\npoe_enabled: {poe}")).unwrap()
+    }
+
+    /// The commands of one `config switch <section>` block.
+    fn section<'a>(commands: &'a [String], header: &str) -> &'a [String] {
+        let start = commands.iter().position(|c| c == header).unwrap_or_else(|| panic!("no `{header}` in {commands:?}"));
+        let len = commands[start..].iter().position(|c| c == "end").expect("block is closed");
+        &commands[start..start + len]
+    }
+
+    #[test]
+    fn reset_disables_the_port_through_physical_port_status_not_a_nonexistent_admin_setting() {
+        // FortiOS has no `set admin` and rejects it, so before this the
+        // unconfigured ports stayed up and the diff never converged.
+        let commands = switch_for(crate::models::SwitchModel::Fortiswitch124F_FPOE)
+            .generate_reset_commands(&["9".to_string(), "25".to_string()]);
+
+        assert!(!commands.iter().any(|c| c.contains("admin")), "{commands:?}");
+        let physical = section(&commands, "config switch physical-port");
+        assert!(physical.windows(2).any(|w| w[0] == "edit port9" && w[1] == "set status down"), "{physical:?}");
+        assert!(physical.iter().any(|c| c == "edit port25") && physical.iter().filter(|c| *c == "set status down").count() == 2);
+        let interface = section(&commands, "config switch interface");
+        assert!(interface.iter().any(|c| c == "set allowed-vlans 1"), "VLAN settings stay in the interface block");
+        assert!(!interface.iter().any(|c| c.starts_with("set poe-status")), "poe-status is a physical-port setting: {interface:?}");
+    }
+
+    #[test]
+    fn reset_re_enables_poe_only_on_ports_that_have_it() {
+        let commands = switch_for(crate::models::SwitchModel::Fortiswitch124F_FPOE)
+            .generate_reset_commands(&["9".to_string(), "25".to_string()]);
+        let physical = section(&commands, "config switch physical-port");
+        let port9 = physical.iter().position(|c| c == "edit port9").unwrap();
+        let port25 = physical.iter().position(|c| c == "edit port25").unwrap();
+        assert!(physical[port9..port25].iter().any(|c| c == "set poe-status enable"), "port 9 is PoE");
+        assert!(!physical[port25..].iter().any(|c| c.starts_with("set poe-status")), "port 25 is an SFP+ uplink: {physical:?}");
+    }
+
+    #[test]
+    fn a_model_without_poe_never_gets_poe_commands() {
+        let switch = switch_for(crate::models::SwitchModel::Fortiswitch124E);
+        let reset = switch.generate_reset_commands(&["9".to_string()]);
+        let configure = switch.generate_port_commands(&[access_port("1", false), access_port("25", true)]);
+        for c in reset.iter().chain(configure.iter()) {
+            assert!(!c.contains("poe-status"), "the 124E has no PoE, but got `{c}`");
+        }
+        assert!(configure.iter().any(|c| c == "set status up"), "still configures status and speed");
+    }
+
+    #[test]
+    fn a_poe_model_configures_poe_on_its_poe_ports_only() {
+        let configure = switch_for(crate::models::SwitchModel::Fortiswitch124F_FPOE)
+            .generate_port_commands(&[access_port("1", true), access_port("25", false)]);
+        let physical = section(&configure, "config switch physical-port");
+        let port1 = physical.iter().position(|c| c == "edit port1").unwrap();
+        let port25 = physical.iter().position(|c| c == "edit port25").unwrap();
+        assert!(physical[port1..port25].iter().any(|c| c == "set poe-status enable"));
+        assert!(!physical[port25..].iter().any(|c| c.starts_with("set poe-status")), "{physical:?}");
     }
 }
