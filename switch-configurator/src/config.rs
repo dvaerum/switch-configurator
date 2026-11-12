@@ -523,13 +523,9 @@ fn scan_config_folder(folder_path: &Path) -> Result<Vec<ConfigWithMetadata>> {
     let mut entries: Vec<_> = std::fs::read_dir(folder_path)
         .with_context(|| format!("Failed to read config folder: {:?}", folder_path))?
         .filter_map(|entry| entry.ok())
-        .filter(|entry| {
-            if let Ok(file_type) = entry.file_type() {
-                file_type.is_file()
-            } else {
-                false
-            }
-        })
+        // `Path::is_file` follows symlinks (NixOS config folders are made of
+        // them); a dangling link is not a file and is skipped.
+        .filter(|entry| entry.path().is_file())
         .filter(|entry| {
             let path = entry.path();
             path.extension().map(|ext| ext == "yaml" || ext == "yml").unwrap_or(false)
@@ -4116,6 +4112,32 @@ switches:
         assert!(config.switches.is_empty());
         assert_eq!(failures.len(), 1);
         assert!(failures[0].error.contains("allowed_hosts"), "unhelpful error: {}", failures[0].error);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_multi_reads_a_folder_config_that_is_a_symlink() {
+        // NixOS builds config folders with symlinks into the store
+        // (`pkgs.linkFarm`), so a symlinked file is the normal case there.
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        let folder = dir.path().join("overlays");
+        std::fs::create_dir(&real).unwrap();
+        std::fs::create_dir(&folder).unwrap();
+        let main = dir.path().join("main.yaml");
+        std::fs::write(&main, forti_switch_yaml(5, "")).unwrap();
+        let target = real.join("other.yaml");
+        std::fs::write(&target, forti_switch_yaml(50, "").replace("sw-reads", "sw-linked")).unwrap();
+        std::os::unix::fs::symlink(&target, folder.join("other.yaml")).unwrap();
+        // A dangling link must not break loading the folder.
+        std::os::unix::fs::symlink(real.join("missing.yaml"), folder.join("dangling.yaml")).unwrap();
+
+        let (config, failures) = AppConfig::load_multi(&main, &[folder]).unwrap();
+
+        assert!(failures.is_empty(), "{:?}", failures.iter().map(|f| &f.error).collect::<Vec<_>>());
+        let mut ids: Vec<_> = config.switches.iter().map(|s| s.id.as_str()).collect();
+        ids.sort();
+        assert_eq!(ids, vec!["sw-linked", "sw-reads"], "the symlinked file must be loaded");
     }
 
     #[test]
