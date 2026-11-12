@@ -29,10 +29,10 @@ Switch Configurator is a Rust-based service that automates network switch config
 ### Supported Switch Models
 
 - **Aruba**: 2530-24G PoE+, 2530-8G PoE+, 2530-48G-2SFP+ (J9855A), 2540-24G, 2540-48G-4SFP+ (JL355A), 2930F
-- **FortiSwitch**: 124F-FPOE
+- **FortiSwitch**: 124E (no PoE), 124F-FPOE
 - **Cisco**: Catalyst 9300-24P UPoE
 
-Corresponding `SwitchModel` enum values: `Aruba2530_24G_POE`, `Aruba2530_8G_POE`, `Aruba2530_48G_2SFP`, `Aruba2540_24G`, `Aruba2540_48G_4SFP`, `Aruba2930F`, `Fortiswitch124F_FPOE`, `CiscoCatalyst9300_24P_UPOE`
+Corresponding `SwitchModel` enum values: `Aruba2530_24G_POE`, `Aruba2530_8G_POE`, `Aruba2530_48G_2SFP`, `Aruba2540_24G`, `Aruba2540_48G_4SFP`, `Aruba2930F`, `Fortiswitch124E`, `Fortiswitch124F_FPOE`, `CiscoCatalyst9300_24P_UPOE`
 
 ### PoE Support by Model
 
@@ -42,7 +42,7 @@ Corresponding `SwitchModel` enum values: `Aruba2530_24G_POE`, `Aruba2530_8G_POE`
 - `CiscoCatalyst9300_24P_UPOE`
 
 **Non-PoE Models** (PoE commands are skipped):
-- `Aruba2530_48G_2SFP`, `Aruba2540_24G`, `Aruba2540_48G_4SFP`
+- `Aruba2530_48G_2SFP`, `Aruba2540_24G`, `Aruba2540_48G_4SFP`, `Fortiswitch124E`
 
 Use `SwitchModel::supports_poe()` to check programmatically.
 

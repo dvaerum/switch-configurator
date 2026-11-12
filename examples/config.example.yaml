@@ -50,7 +50,7 @@ switches:
         destination_port: "24"
         direction: both
 
-  # FortiSwitch 124F-FPOE
+  # FortiSwitch 124F-FPOE (a 124E uses `model: Fortiswitch124E`; it has no PoE)
   - id: fortiswitch-01
     hostname: fortiswitch-01
     model: Fortiswitch124F_FPOE

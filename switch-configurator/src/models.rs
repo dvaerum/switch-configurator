@@ -22,6 +22,7 @@ pub enum SwitchModel {
     Aruba2540_24G,
     Aruba2540_48G_4SFP,  // JL355A: 48 GigE ports + 4 SFP+ uplinks
     Aruba2930F,
+    Fortiswitch124E,      // 24 GE RJ45 + 4 GE SFP, no PoE
     Fortiswitch124F_FPOE,
     CiscoCatalyst9300_24P_UPOE,
 }
@@ -31,7 +32,7 @@ impl SwitchModel {
         match self {
             Self::Aruba2530_24G_POE | Self::Aruba2530_8G_POE | Self::Aruba2530_48G_2SFP
             | Self::Aruba2540_24G | Self::Aruba2540_48G_4SFP | Self::Aruba2930F => Vendor::Aruba,
-            Self::Fortiswitch124F_FPOE => Vendor::Fortiswitch,
+            Self::Fortiswitch124E | Self::Fortiswitch124F_FPOE => Vendor::Fortiswitch,
             Self::CiscoCatalyst9300_24P_UPOE => Vendor::Cisco,
         }
     }
@@ -63,8 +64,8 @@ impl SwitchModel {
             Self::Aruba2930F => {
                 vec![Auto, TenHalf, TenFull, HundredHalf, HundredFull, ThousandFull, TenGFull]
             }
-            // FortiSwitch 124F: Gigabit switch with SFP uplinks
-            Self::Fortiswitch124F_FPOE => {
+            // FortiSwitch 124E / 124F: Gigabit copper (the SFP/SFP+ uplinks are per-port, see port_capabilities)
+            Self::Fortiswitch124E | Self::Fortiswitch124F_FPOE => {
                 vec![Auto, TenHalf, TenFull, HundredHalf, HundredFull, ThousandFull]
             }
             // Cisco Catalyst 9300: Gigabit with 10G uplinks
@@ -117,7 +118,7 @@ impl SwitchModel {
             Self::Aruba2540_24G => 28,
             Self::Aruba2540_48G_4SFP => 52,
             Self::Aruba2930F => 52, // Max config
-            Self::Fortiswitch124F_FPOE => 28,
+            Self::Fortiswitch124E | Self::Fortiswitch124F_FPOE => 28,
             Self::CiscoCatalyst9300_24P_UPOE => 24,
         }
     }
@@ -219,6 +220,26 @@ impl SwitchModel {
                 }
             }
 
+            // FortiSwitch 124E (no PoE; the -POE/-FPOE variants are separate models)
+            // - Ports 1-24: 1G copper
+            // - Ports 25-28: 1G SFP uplinks (per Fortinet's datasheet; not yet confirmed on real hardware)
+            Self::Fortiswitch124E => {
+                if port_num >= 1 && port_num <= 24 {
+                    Some(PortCapabilities::standard_1g_copper(port_num))
+                } else if port_num >= 25 && port_num <= 28 {
+                    Some(PortCapabilities {
+                        port_type: PortType::Sfp,
+                        poe_support: None,
+                        supported_speeds: vec![SpeedDuplex::ThousandFull],
+                        max_speed_gbps: 1,
+                        is_uplink: true,
+                        port_number: port_num,
+                    })
+                } else {
+                    None
+                }
+            }
+
             // FortiSwitch 124F-FPOE
             // - Ports 1-24: 1G copper with PoE+ (30W)
             // - Ports 25-28: 10G SFP+ uplinks (confirmed on real hardware)
@@ -304,6 +325,7 @@ impl SwitchModel {
             | Self::Aruba2540_48G_4SFP
             | Self::Aruba2930F
             | Self::CiscoCatalyst9300_24P_UPOE
+            | Self::Fortiswitch124E
             | Self::Fortiswitch124F_FPOE => vec![1],
         }
     }
@@ -311,7 +333,7 @@ impl SwitchModel {
     pub fn supports_vlan_description(&self) -> bool {
         matches!(
             self,
-            Self::Fortiswitch124F_FPOE | Self::CiscoCatalyst9300_24P_UPOE
+            Self::Fortiswitch124E | Self::Fortiswitch124F_FPOE | Self::CiscoCatalyst9300_24P_UPOE
         )
     }
 
@@ -331,7 +353,7 @@ impl SwitchModel {
             Self::CiscoCatalyst9300_24P_UPOE => 32,
 
             // FortiSwitch: 63 character limit (FortiOS allows longer names)
-            Self::Fortiswitch124F_FPOE => 63,
+            Self::Fortiswitch124E | Self::Fortiswitch124F_FPOE => 63,
         }
     }
 
@@ -348,6 +370,7 @@ impl SwitchModel {
             Self::Aruba2540_24G => &["JL354A"],                // 2540-24G
             Self::Aruba2540_48G_4SFP => &["JL355A"],           // 2540-48G-4SFP+
             Self::Aruba2930F => &["JL253A", "JL254A", "JL255A", "JL256A", "JL258A", "JL261A", "JL262A", "JL263A", "JL264A"],
+            Self::Fortiswitch124E => &["FortiSwitch-124E"],
             Self::Fortiswitch124F_FPOE => &["FortiSwitch-124F-FPOE", "S124F"],
             Self::CiscoCatalyst9300_24P_UPOE => &["c9300-24u", "C9300-24U", "C9300-24P"],
         }
@@ -2070,6 +2093,51 @@ mod tests {
         assert!(!port28.supports_poe());
 
         assert!(model.port_capabilities("29").is_none(), "only 28 ports exist");
+    }
+
+    #[test]
+    fn test_fortiswitch_124e_is_a_non_poe_fortiswitch_with_four_gigabit_sfp_uplinks() {
+        let model = SwitchModel::Fortiswitch124E;
+        assert_eq!(model.vendor(), Vendor::Fortiswitch);
+        assert_eq!(model.total_ports(), 28);
+        assert!(!model.supports_poe(), "the plain 124E has no PoE (the -POE/-FPOE variants are other models)");
+        assert!(model.poe_capable_ports().is_empty());
+
+        // Ports 1-24: gigabit copper, no PoE
+        let port24 = model.port_capabilities("24").unwrap();
+        assert_eq!(port24.port_type, PortType::Copper);
+        assert!(!port24.supports_poe());
+        assert!(!port24.is_uplink);
+
+        // Ports 25-28: 1G SFP uplinks (the 124F has 10G SFP+ here)
+        for id in ["25", "28"] {
+            let port = model.port_capabilities(id).unwrap();
+            assert_eq!(port.port_type, PortType::Sfp, "port {id}");
+            assert_eq!(port.max_speed_gbps, 1, "port {id}");
+            assert!(port.is_uplink && !port.supports_poe(), "port {id}");
+        }
+        assert!(model.port_capabilities("29").is_none(), "only 28 ports exist");
+        assert!(!model.has_10g_uplinks());
+        assert!(!model.supported_speeds().contains(&SpeedDuplex::TenGFull));
+    }
+
+    #[test]
+    fn test_fortiswitch_124e_shares_the_fortios_conventions_of_the_other_fortiswitch() {
+        let model = SwitchModel::Fortiswitch124E;
+        assert_eq!(model.parse_port_number("port24"), Some(24));
+        assert_eq!(model.implicit_vlans(), vec![1]);
+        assert!(model.supports_vlan_description());
+        assert_eq!(model.max_vlan_name_length(), 63);
+        assert!(!model.uses_legacy_mirror_syntax());
+        // Matched exactly against `Version: FortiSwitch-124E v...`, so the
+        // -POE/-FPOE variants and the 124F are reported as a mismatch.
+        assert_eq!(model.product_numbers(), &["FortiSwitch-124E"]);
+    }
+
+    #[test]
+    fn test_fortiswitch_124e_parses_from_yaml() {
+        let model: SwitchModel = serde_yaml::from_str("Fortiswitch124E").unwrap();
+        assert_eq!(model, SwitchModel::Fortiswitch124E);
     }
 
     #[test]

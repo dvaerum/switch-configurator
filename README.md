@@ -121,6 +121,7 @@ See the [examples directory](examples/) for complete, working configurations:
 - Catalyst 9300-24P UPoE
 
 **FortiSwitch:**
+- 124E (no PoE)
 - 124F-FPOE
 
 ## Building

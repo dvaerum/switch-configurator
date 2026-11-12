@@ -65,7 +65,7 @@ switch-configurator/
 - `SwitchModel` - Enum of supported switch models
   - Aruba: 2530-24G, 2530-8G, 2530-48G, 2540-24G, 2540-48G, 2930F
   - Cisco: Catalyst 9300-24P UPoE
-  - FortiSwitch: 124F-FPOE
+  - FortiSwitch: 124E, 124F-FPOE
 - `SwitchConfig` - Complete switch configuration
 - `Port` - Port configuration (mode, VLAN, PoE, MAC notify, speed)
 - `Vlan` - VLAN definition with IP config (dhcp/static/none)
@@ -294,7 +294,7 @@ pub trait SwitchVendor {
 #### vendors/fortiswitch.rs (1,033 lines)
 **FortiSwitch Implementation**
 
-**Supported Models**: 124F-FPOE
+**Supported Models**: 124E, 124F-FPOE
 
 **Command Syntax**: FortiOS
 - `config switch interface` blocks

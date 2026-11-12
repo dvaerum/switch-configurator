@@ -9,10 +9,10 @@ Switch Configurator is a Rust-based service that automates network switch config
 ## Supported Switch Models
 
 - **Aruba**: 2530-24G PoE+, 2530-8G PoE+, 2540-24G, 2930F
-- **FortiSwitch**: 124F-FPOE
+- **FortiSwitch**: 124E (no PoE), 124F-FPOE
 - **Cisco**: Catalyst 9300-24P UPoE
 
-Corresponding `SwitchModel` enum values: `Aruba2530_24G_POE`, `Aruba2530_8G_POE`, `Aruba2540_24G`, `Aruba2930F`, `Fortiswitch124F_FPOE`, `CiscoCatalyst9300_24P_UPOE`
+Corresponding `SwitchModel` enum values: `Aruba2530_24G_POE`, `Aruba2530_8G_POE`, `Aruba2540_24G`, `Aruba2930F`, `Fortiswitch124E`, `Fortiswitch124F_FPOE`, `CiscoCatalyst9300_24P_UPOE`
 
 ## Build and Run Commands
 

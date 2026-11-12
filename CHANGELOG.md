@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **FortiSwitch 124E support** (`switch-configurator` 0.24.0): new model `Fortiswitch124E` (`model: Fortiswitch124E`). 28 ports: 1-24 gigabit copper, 25-28 gigabit SFP uplinks, **no PoE** (the 124E-POE/-FPOE are different models and are not supported yet). It is configured like the other FortiSwitch (FortiOS commands, VLAN descriptions, 63-character VLAN names, VLAN 1 implicit). The hardware check compares `Version: FortiSwitch-124E` exactly, so a 124E-POE or a 124F configured as `Fortiswitch124E` (and the reverse) raises a model-mismatch warning. The port layout comes from Fortinet's datasheet; it has not yet been confirmed on a real 124E.
+
 ### Changed
 - **No duplicated timestamps and colour codes under systemd** (`switch-configurator` 0.23.10, `switch-configurator-ui` 0.7.2): when stderr is the systemd journal, log lines no longer carry the service's own timestamp or ANSI colours (the journal adds the time and unit itself). Detection compares `JOURNAL_STREAM` with the stream stderr really is, so an inherited variable on a redirected run doesn't switch it. Terminal and file output is unchanged.
 - **Browser E2E suite is green again, 26 of 26** (`switch-configurator` 0.23.9): the three failing tests were spec/fixture drift, not UI bugs. The Edit Ports specs now follow the batch-save table and separate Add Port form; the demo config in `run-e2e.sh` gained the mirror session the mirror spec assumed; the port-add test waits for the page before counting rows. No UI change.

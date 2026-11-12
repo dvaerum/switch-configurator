@@ -56,7 +56,7 @@ This directory contains example configurations for the switch-configurator servi
 
 ### Deployment
 
-- **[nixos-module.nix](nixos-module.nix)** - NixOS module usage
+- **[nixos-module.nix](../nixos-module.nix)** - NixOS module usage
   - Systemd service deployment
   - Security hardening
   - Serial device access configuration
@@ -161,6 +161,7 @@ port_id: "port1-24"
 - `CiscoCatalyst9300_24P_UPOE` - Cisco Catalyst 9300 with UPoE
 
 ### FortiSwitch
+- `Fortiswitch124E` - FortiSwitch 124E (24 GE + 4 GE SFP, no PoE)
 - `Fortiswitch124F_FPOE` - FortiSwitch 124F with PoE
 
 ## Port ID Formats

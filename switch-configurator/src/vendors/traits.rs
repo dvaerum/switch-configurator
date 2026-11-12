@@ -347,6 +347,22 @@ mod tests {
     }
 
     #[test]
+    fn test_forti_model_detection_124e() {
+        let output = "Version: FortiSwitch-124E v7.2.5,build0453,230707 (GA)\nSerial-Number: S124EFTF00000000\n";
+        assert!(verify_hardware_model(output, &SwitchModel::Fortiswitch124E, &forti_pattern()).is_empty());
+
+        // The PoE variants and the 124F are different hardware: warn.
+        for other in ["FortiSwitch-124E-POE", "FortiSwitch-124E-FPOE", "FortiSwitch-124F-FPOE"] {
+            let output = format!("Version: {other} v7.2.5,build0453,230707 (GA)\n");
+            let warnings = verify_hardware_model(&output, &SwitchModel::Fortiswitch124E, &forti_pattern());
+            assert_eq!(warnings.len(), 1, "{other} on a 124E config should warn");
+        }
+        let output = "Version: FortiSwitch-124E v7.2.5,build0453,230707 (GA)\n";
+        let warnings = verify_hardware_model(output, &SwitchModel::Fortiswitch124F_FPOE, &forti_pattern());
+        assert_eq!(warnings.len(), 1, "a 124E on a 124F config should warn");
+    }
+
+    #[test]
     fn test_forti_model_detection_no_version_line() {
         let output = "Serial-Number: S108FPTV21002683\nHostname: test\n";
         let warnings = verify_hardware_model(output, &SwitchModel::Fortiswitch124F_FPOE, &forti_pattern());
@@ -368,6 +384,7 @@ mod tests {
         assert!(!SwitchModel::Aruba2930F.product_numbers().is_empty(), "Aruba 2930F");
         assert!(!SwitchModel::CiscoCatalyst9300_24P_UPOE.product_numbers().is_empty(), "Cisco C9300");
         assert!(!SwitchModel::Fortiswitch124F_FPOE.product_numbers().is_empty(), "FortiSwitch 124F");
+        assert!(!SwitchModel::Fortiswitch124E.product_numbers().is_empty(), "FortiSwitch 124E");
     }
 
     // ============================================================================
