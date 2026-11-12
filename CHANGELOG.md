@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- **No duplicated timestamps and colour codes under systemd** (`switch-configurator` 0.23.10, `switch-configurator-ui` 0.7.2): when stderr is the systemd journal, log lines no longer carry the service's own timestamp or ANSI colours (the journal adds the time and unit itself). Detection compares `JOURNAL_STREAM` with the stream stderr really is, so an inherited variable on a redirected run doesn't switch it. Terminal and file output is unchanged.
 - **Browser E2E suite is green again, 26 of 26** (`switch-configurator` 0.23.9): the three failing tests were spec/fixture drift, not UI bugs. The Edit Ports specs now follow the batch-save table and separate Add Port form; the demo config in `run-e2e.sh` gained the mirror session the mirror spec assumed; the port-add test waits for the page before counting rows. No UI change.
 - **124F SNMP interface table facts and SNMPv3 build feasibility recorded** (`switch-configurator` 0.23.8): `docs/learnings/snmp-fortiswitch.md` now lists the bench's `ifType` per row (`vlan42` is the only `l2vlan(135)`; both `internal` rows are `ethernetCsmacd`) with a filtering recommendation, and notes that `async-snmp`'s `crypto-rustcrypto` feature compiles. No behaviour change.
 - `.claude/scheduled_tasks.lock` (a runtime lock file of the agent tooling that changed on every session) is no longer tracked; `.claude/*.lock` is ignored (`switch-configurator` 0.23.4).

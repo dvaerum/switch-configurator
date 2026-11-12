@@ -3,6 +3,7 @@ pub mod allowed_hosts;
 pub mod api;
 pub mod config;
 pub mod diff;
+pub mod logging;
 pub mod models;
 pub mod redact;
 pub mod secrets;

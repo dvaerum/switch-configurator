@@ -2,6 +2,7 @@ mod allowed_hosts;
 mod api;
 mod config;
 mod diff;
+mod logging;
 mod models;
 mod redact;
 mod secrets;
@@ -18,7 +19,6 @@ use anyhow::Result;
 use clap::Parser;
 use std::path::PathBuf;
 use tracing::{info, warn, Level};
-use tracing_subscriber;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -85,10 +85,7 @@ async fn main() -> Result<()> {
     let args = Args::parse();
 
     // Initialize logging
-    tracing_subscriber::fmt()
-        .with_max_level(args.log_level)
-        .with_target(false)
-        .init();
+    logging::init(args.log_level, false);
 
     info!("Starting switch-configurator v{}", env!("CARGO_PKG_VERSION"));
     info!("Configuration file: {:?}", args.config_file);

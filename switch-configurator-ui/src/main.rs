@@ -1,4 +1,5 @@
 mod config;
+mod logging;
 mod proxy;
 mod routes;
 mod state;
@@ -32,9 +33,7 @@ struct Args {
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
-    tracing_subscriber::fmt()
-        .with_max_level(args.log_level)
-        .init();
+    logging::init(args.log_level, true);
 
     let backend = if let Some(socket) = &args.backend_socket {
         info!("Connecting to backend via unix socket: {}", socket.display());
