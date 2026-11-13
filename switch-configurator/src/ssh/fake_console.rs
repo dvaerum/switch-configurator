@@ -22,13 +22,21 @@ pub enum Mode {
     Terminated,
     /// Never answers (hung console / locked line).
     Silent,
+    /// Right after a logout: the screen still shows the old `login:` text, but
+    /// the switch's login program is restarting and discards everything typed
+    /// for this long, then behaves like `LoggedOut`.
+    Restarting(std::time::Duration),
 }
 
 #[derive(Default)]
 struct Shared {
     mode: Option<Mode>,
+    /// When a `Restarting` console starts accepting input again.
+    restart_until: Option<std::time::Instant>,
+    stale_prompt_shown: bool,
     awaiting_password: bool,
     logins: usize,
+    passwords: Vec<String>,
     commands: Vec<String>,
     /// (command prefix, canned output) pairs; first match wins.
     outputs: Vec<(String, String)>,
@@ -44,7 +52,11 @@ impl FakeConsole {
     /// A client attached to a fake console that starts in `mode`.
     pub fn spawn(mode: Mode) -> (SerialClient, FakeConsole) {
         let (client_end, mut console_end) = SerialStream::pair().expect("pty pair");
-        let shared = Arc::new(Mutex::new(Shared { mode: Some(mode), ..Default::default() }));
+        let restart_until = match mode {
+            Mode::Restarting(window) => Some(std::time::Instant::now() + window),
+            _ => None,
+        };
+        let shared = Arc::new(Mutex::new(Shared { mode: Some(mode), restart_until, ..Default::default() }));
 
         let peer = shared.clone();
         tokio::spawn(async move {
@@ -89,6 +101,11 @@ impl FakeConsole {
         self.shared.lock().unwrap().logins
     }
 
+    /// Passwords the console received, in order.
+    pub fn passwords_tried(&self) -> Vec<String> {
+        self.shared.lock().unwrap().passwords.clone()
+    }
+
     /// Commands received while logged in, in order.
     pub fn commands(&self) -> Vec<String> {
         self.shared.lock().unwrap().commands.clone()
@@ -97,7 +114,18 @@ impl FakeConsole {
 
 fn respond(shared: &Arc<Mutex<Shared>>, line: String) -> String {
     let mut s = shared.lock().unwrap();
+    if let (Some(Mode::Restarting(_)), Some(until)) = (s.mode, s.restart_until) {
+        if std::time::Instant::now() >= until {
+            s.mode = Some(Mode::LoggedOut);
+        } else if !s.stale_prompt_shown {
+            s.stale_prompt_shown = true;
+            return "\r\nS108FPTV21002683 login: ".to_string();
+        } else {
+            return String::new(); // input typed while the login program restarts is lost
+        }
+    }
     match s.mode.unwrap_or(Mode::Silent) {
+        Mode::Restarting(_) => String::new(),
         Mode::Silent => String::new(),
         Mode::LoggedIn => {
             if line.trim().is_empty() {
@@ -115,6 +143,7 @@ fn respond(shared: &Arc<Mutex<Shared>>, line: String) -> String {
         mode @ (Mode::LoggedOut | Mode::Terminated) => {
             if s.awaiting_password {
                 s.awaiting_password = false;
+                s.passwords.push(line.clone());
                 s.logins += 1;
                 s.mode = Some(Mode::LoggedIn);
                 format!("\r\n{PROMPT}")
@@ -248,5 +277,19 @@ mod tests {
         let text = logs.text();
         assert!(text.contains("show system snmp community"), "the command itself stays visible:\n{text}");
         assert!(!text.contains("s3cret-readback"), "read-back leaked into trace logs:\n{text}");
+    }
+
+    #[tokio::test]
+    async fn login_waits_for_a_login_program_that_is_still_restarting() {
+        // Seen on a real 124E: a new session started right after the previous
+        // one logged out. The old `login:` text was on screen, the credentials
+        // typed into the restarting login program were lost, and the retry
+        // with the factory-default password hit the same gap.
+        let (mut client, console) = FakeConsole::spawn(Mode::Restarting(std::time::Duration::from_millis(9000)));
+
+        client.login_with_factory_default_fallback("admin", "pw").await.expect("login must outlast the restart");
+
+        assert_eq!(console.logins(), 1);
+        assert_eq!(console.passwords_tried(), vec!["pw".to_string()], "the factory-default password must not be tried for a prompt that was merely not ready");
     }
 }

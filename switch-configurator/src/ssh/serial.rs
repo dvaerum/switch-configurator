@@ -338,6 +338,35 @@ impl SerialClient {
         Ok(())
     }
 
+    /// Make sure the `login:` prompt we are about to type into is live.
+    ///
+    /// A session opened right after the previous one closed finds the old
+    /// `login:` text still on screen while the switch's login program restarts
+    /// (closing the port drops the line) and discards what is typed. Seen on a
+    /// FortiSwitch 124E: the credentials were lost, the password was read as a
+    /// username, and the retry with the factory-default password hit the same
+    /// gap. So ask for a fresh prompt and only type once the switch has answered
+    /// it, for up to ~20 s.
+    async fn wait_for_live_login_prompt(&mut self) -> Result<()> {
+        const ATTEMPTS: u32 = 12;
+        for attempt in 1..=ATTEMPTS {
+            self.clear_buffer().await?;
+            self.send_raw("\r").await?;
+            let state = self.check_current_state(Duration::from_millis(1500)).await?;
+            if state.contains("login:") || state.contains("Username:") {
+                if attempt > 1 {
+                    debug!("Login prompt answered on attempt {}/{}", attempt, ATTEMPTS);
+                }
+                return Ok(());
+            }
+            debug!("Login prompt not live yet (attempt {}/{}), waiting", attempt, ATTEMPTS);
+        }
+        // Typing anyway keeps the old behaviour for a console that never
+        // re-prints its prompt; the login check afterwards reports the result.
+        warn!("The login prompt never answered a fresh Enter; typing the credentials anyway");
+        Ok(())
+    }
+
     /// Send login credentials
     pub async fn login(&mut self, username: &str, password: &str) -> Result<()> {
         self.login_inner(username, password, password).await
@@ -389,6 +418,7 @@ impl SerialClient {
         if state_check.contains("login:") || state_check.contains("Username:") {
             // Need to login
             debug!("Login prompt detected, logging in...");
+            self.wait_for_live_login_prompt().await?;
 
             // Send username
             self.send_raw(&format!("{}\r", username)).await?;
@@ -466,6 +496,7 @@ impl SerialClient {
 
                 if state_check.contains("login:") || state_check.contains("Username:") {
                     debug!("Login prompt appeared on attempt {}, logging in...", attempt);
+                    self.wait_for_live_login_prompt().await?;
                     self.send_raw(&format!("{}\r", username)).await?;
                     tokio::time::sleep(Duration::from_millis(500)).await;
                     self.send_raw(&format!("{}\r", current_password)).await?;

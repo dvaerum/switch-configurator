@@ -222,7 +222,7 @@ impl SwitchModel {
 
             // FortiSwitch 124E (no PoE; the -POE/-FPOE variants are separate models)
             // - Ports 1-24: 1G copper
-            // - Ports 25-28: 1G SFP uplinks (per Fortinet's datasheet; not yet confirmed on real hardware)
+            // - Ports 25-28: 1G SFP uplinks (confirmed on a real 124E, FortiSwitch 7.2.5)
             Self::Fortiswitch124E => {
                 if port_num >= 1 && port_num <= 24 {
                     Some(PortCapabilities::standard_1g_copper(port_num))
