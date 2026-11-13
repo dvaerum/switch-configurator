@@ -2309,6 +2309,43 @@ mod integration_tests {
     }
 
     #[tokio::test]
+    async fn saved_overlay_does_not_write_the_deprecated_port_mode() {
+        let store = create_test_config_store();
+        let config_dir = tempfile::tempdir().unwrap();
+        store.status.set_config_metadata(crate::status::ConfigMetadata {
+            config_file: std::path::PathBuf::from("/tmp/main.yaml"),
+            config_folders: vec![config_dir.path().to_path_buf()],
+            last_loaded: chrono::Utc::now(),
+            switches_count: 1,
+        }).await;
+        let app = crate::api::create_router(store);
+
+        let body = serde_json::json!({
+            "filename": "ports.yaml",
+            "merge_priority": 100,
+            "config": {"switches": [{
+                "id": "test-sw-01",
+                "vlans": [{"id": 99, "name": "v99"}],
+                "ports": [{"port_id": "3", "vlan": 99, "tagged_vlans": [], "description": "x", "enabled": true}]
+            }]}
+        });
+        let request = Request::builder()
+            .method("POST")
+            .uri("/switches/test-sw-01/save-overlay")
+            .header("Content-Type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        assert_eq!(app.oneshot(request).await.unwrap().status(), StatusCode::CREATED);
+
+        let content = std::fs::read_to_string(config_dir.path().join("ports.yaml")).unwrap();
+        assert!(content.contains("port_id"), "the port itself must still be written: {content}");
+        assert!(
+            !content.lines().any(|l| l.trim_start().starts_with("mode:")),
+            "a file the tool writes must not contain the field it warns is deprecated:\n{content}"
+        );
+    }
+
+    #[tokio::test]
     async fn test_save_overlay_rejects_path_traversal() {
         let store = create_test_config_store();
 

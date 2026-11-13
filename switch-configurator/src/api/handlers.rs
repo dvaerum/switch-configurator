@@ -669,6 +669,20 @@ fn validate_overlay_filename(filename: &str) -> Result<(), (StatusCode, Json<ser
 fn prefer_vlan_names_in_yaml(config: &AppConfig) -> Result<serde_yaml::Value, serde_yaml::Error> {
     let mut value = serde_yaml::to_value(config)?;
 
+    // `mode` is deprecated (inferred from tagged_vlans) and the loader warns
+    // about it, so a file this tool writes must not contain it.
+    if let Some(switches) = value.get_mut("switches").and_then(|s| s.as_sequence_mut()) {
+        for switch in switches {
+            if let Some(ports) = switch.get_mut("ports").and_then(|p| p.as_sequence_mut()) {
+                for port in ports {
+                    if let Some(map) = port.as_mapping_mut() {
+                        map.remove("mode");
+                    }
+                }
+            }
+        }
+    }
+
     if let Some(switches) = value.get_mut("switches").and_then(|s| s.as_sequence_mut()) {
         for switch in switches {
             let names: std::collections::HashMap<u64, String> = switch
