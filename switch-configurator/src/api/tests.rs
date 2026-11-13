@@ -4457,3 +4457,35 @@ mod integration_tests {
         assert_eq!(opener.mac_calls.load(Ordering::SeqCst), 1);
     }
 }
+
+#[tokio::test]
+async fn status_endpoint_list_gains_the_forwarded_prefix() {
+    let app = crate::api::create_router(create_test_config_store_async().await);
+    let req = Request::builder()
+        .uri("/api/status")
+        .header("x-forwarded-prefix", "/switch-configurator-api")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    let endpoints = json["api"]["endpoints"].as_array().unwrap();
+    assert!(!endpoints.is_empty());
+    for e in endpoints {
+        assert!(
+            e.as_str().unwrap().contains(" /switch-configurator-api/"),
+            "endpoint not prefixed: {e}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn status_is_untouched_without_a_forwarded_prefix() {
+    let app = crate::api::create_router(create_test_config_store_async().await);
+    let req = Request::builder().uri("/api/status").body(Body::empty()).unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    assert!(json["api"]["endpoints"][0].as_str().unwrap().starts_with("GET /"));
+    assert!(!json["api"]["endpoints"][0].as_str().unwrap().contains("switch-configurator-api"));
+}

@@ -400,7 +400,7 @@ cargo run -- --one-off --switch hostname-here --dry-run
 ## NixOS Module
 
 The flake includes a NixOS module for deploying as a systemd service. Options under `services.switch-configurator`:
-- `enable`, `package`, `configFile`, `port`
+- `enable`, `package`, `configFile`, `port`, `listenAddress`
 - `enableFileWatching`, `applyOnStartup`, `logLevel`
 - `user`, `group`, `extraGroups`, `environmentVariables`
 

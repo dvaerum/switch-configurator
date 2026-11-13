@@ -3,7 +3,7 @@ use axum::{
     routing::{get, post},
     Router,
 };
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use tower_http::trace::TraceLayer;
 use tracing::info;
 
@@ -34,7 +34,16 @@ pub const API_ENDPOINTS: &[&str] = &[
     "GET /switches/:id/port-status",
 ];
 
-pub async fn start(store: ConfigStore, socket_path: Option<std::path::PathBuf>) -> anyhow::Result<()> {
+/// TCP address of the API: `listen` (default every interface) on the configured port.
+pub fn bind_addr(listen: IpAddr, port: u16) -> SocketAddr {
+    SocketAddr::new(listen, port)
+}
+
+pub async fn start(
+    store: ConfigStore,
+    socket_path: Option<std::path::PathBuf>,
+    listen: IpAddr,
+) -> anyhow::Result<()> {
     let app = create_router(store.clone());
 
     if let Some(ref path) = socket_path {
@@ -49,7 +58,7 @@ pub async fn start(store: ConfigStore, socket_path: Option<std::path::PathBuf>) 
         });
     }
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], store.api_port));
+    let addr = bind_addr(listen, store.api_port);
     info!("Starting API server on {}", addr);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -135,5 +144,23 @@ pub fn create_router(store: ConfigStore) -> Router {
         )
         .route("/config/reload", post(handlers::reload_config))
         .layer(TraceLayer::new_for_http())
+        .layer(axum::middleware::from_fn(super::prefix::apply))
         .with_state(store)
+}
+
+#[cfg(test)]
+mod bind_tests {
+    use super::bind_addr;
+
+    #[test]
+    fn loopback_listen_address_is_not_every_interface() {
+        let a = bind_addr("127.0.0.1".parse().unwrap(), 4000);
+        assert_eq!(a.to_string(), "127.0.0.1:4000");
+        assert!(a.ip().is_loopback());
+    }
+
+    #[test]
+    fn ipv6_listen_address_binds_too() {
+        assert_eq!(bind_addr("::1".parse().unwrap(), 4000).to_string(), "[::1]:4000");
+    }
 }

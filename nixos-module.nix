@@ -69,6 +69,17 @@ in
       description = "Port for the REST API server";
     };
 
+    listenAddress = mkOption {
+      type = types.str;
+      default = "0.0.0.0";
+      example = "127.0.0.1";
+      description = ''
+        Address the REST API's TCP listener binds to. Set `127.0.0.1` to keep
+        it off the network; the web UI does not need TCP, it talks to the API
+        over `socketPath`.
+      '';
+    };
+
     socketPath = mkOption {
       type = types.nullOr types.str;
       default = "/run/switch-configurator/api.sock";
@@ -279,6 +290,7 @@ in
               )
             } \
             --port ${toString cfg.port} \
+            --listen-address ${cfg.listenAddress} \
             ${optionalString (cfg.socketPath != null) "--socket ${cfg.socketPath}"} \
             ${if cfg.enableFileWatching then "--watch" else "--watch=false"} \
             ${if cfg.applyOnStartup then "--apply-on-startup" else ""} \

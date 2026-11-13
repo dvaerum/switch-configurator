@@ -35,6 +35,11 @@ struct Args {
     #[arg(short, long, default_value = "4002")]
     port: u16,
 
+    /// Address the API's TCP listener binds to (ignored in one-off mode).
+    /// Use 127.0.0.1 behind a reverse proxy or when only the unix socket is needed.
+    #[arg(long, default_value = "0.0.0.0")]
+    listen_address: std::net::IpAddr,
+
     /// Enable file watching mode (ignored in one-off mode)
     #[arg(short, long, default_value = "true")]
     watch: bool,
@@ -214,7 +219,7 @@ async fn main() -> Result<()> {
     }
 
     // Start API server
-    let api_handle = tokio::spawn(api::server::start(store.clone(), args.socket.clone()));
+    let api_handle = tokio::spawn(api::server::start(store.clone(), args.socket.clone(), args.listen_address));
 
     // Background mac-table cache refresher: keeps GET /switches/:id/mac-table
     // warm so a real caller almost always hits cache instead of paying the
