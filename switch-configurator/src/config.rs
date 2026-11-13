@@ -982,6 +982,9 @@ fn merge_single_switch(
         if merged.credentials.is_none() && switch.credentials.is_some() {
             merged.credentials = switch.credentials.clone();
         }
+        if merged.management_vlan.is_none() && switch.management_vlan.is_some() {
+            merged.management_vlan = switch.management_vlan;
+        }
     }
 
     // Merge VLANs using BTreeMap for priority tracking
@@ -4138,6 +4141,36 @@ switches:
         let mut ids: Vec<_> = config.switches.iter().map(|s| s.id.as_str()).collect();
         ids.sort();
         assert_eq!(ids, vec!["sw-linked", "sw-reads"], "the symlinked file must be loaded");
+    }
+
+    #[test]
+    fn load_multi_keeps_the_management_vlan_from_whichever_file_sets_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("overlays");
+        std::fs::create_dir(&folder).unwrap();
+        let main = dir.path().join("main.yaml");
+        std::fs::write(&main, forti_switch_yaml(5, "    management_vlan: 10")).unwrap();
+        // A port-only overlay that says nothing about the management VLAN.
+        std::fs::write(folder.join("ports.yaml"), "merge_priority: 50\nswitches:\n  - id: sw-reads\n    ports: []\n").unwrap();
+
+        let (config, failures) = AppConfig::load_multi(&main, &[folder]).unwrap();
+
+        assert!(failures.is_empty(), "{:?}", failures.iter().map(|f| &f.error).collect::<Vec<_>>());
+        assert_eq!(config.switches[0].management_vlan, Some(10), "management_vlan was dropped by the merge");
+    }
+
+    #[test]
+    fn load_multi_takes_the_management_vlan_of_the_highest_priority_file_that_sets_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("overlays");
+        std::fs::create_dir(&folder).unwrap();
+        let main = dir.path().join("main.yaml");
+        std::fs::write(&main, forti_switch_yaml(5, "    management_vlan: 10")).unwrap();
+        std::fs::write(folder.join("low.yaml"), "merge_priority: 50\nswitches:\n  - id: sw-reads\n    management_vlan: 20\n").unwrap();
+
+        let (config, _failures) = AppConfig::load_multi(&main, &[folder]).unwrap();
+
+        assert_eq!(config.switches[0].management_vlan, Some(10), "lower priority number must win");
     }
 
     #[test]
