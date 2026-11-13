@@ -391,6 +391,7 @@ pub async fn preview_diff(
     if let Err(e) = crate::allowed_hosts::resolve_auto_hosts(&mut switch_config) {
         warn!("{:#}", e);
     }
+    crate::allowed_hosts::make_unrestricted_communities_explicit(&mut switch_config);
 
     let current_state = match body.current_state {
         Some(state) => state,

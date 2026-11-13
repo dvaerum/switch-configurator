@@ -21,9 +21,10 @@ seconds' settling time between a change and the query):
    in it (below). **On the 124E (FortiSwitch 7.2.5) a community with no hosts
    table is answered by nobody** (toggled on a bench 124E: no hosts entry = every
    query times out; adding `10.10.132.0/24` made the next query answer within
-   a few seconds; removing it silenced it again). So `allowed_hosts` is needed
-   there even for an `unrestricted` community; the tool's "empty = no
-   restriction" does not write a hosts entry.
+   a few seconds; removing it silenced it again). So an
+   `unrestricted` community needs a hosts entry there; since 0.26.4 the tool
+   writes `0.0.0.0 0.0.0.0` for a community with no `allowed_hosts` (`show`
+   prints that entry as a bare `edit 1`, because it is the default).
 
 **The management address may be a DHCP lease.** On the IT-02876 switch (124F-FPOE) the management IP is leased by the `vlan42` interface (`set mode dhcp`, `set allowaccess ping`); `show system interface` prints no `set ip` for it, but `get system interface` lists it (`name: vlan42  mode: dhcp  ip: <addr> <mask>`). `snmp` has to be added to that interface's `allowaccess`.
 

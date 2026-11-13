@@ -22,6 +22,30 @@ pub fn local_address_towards(target: &str) -> Result<IpAddr> {
     Ok(socket.local_addr()?.ip())
 }
 
+/// FortiSwitch only: make "no `allowed_hosts`" (unrestricted) an explicit
+/// any-host entry (`0.0.0.0/0`). A 124E (7.2.5) answers nobody for a community
+/// without a `config hosts` entry (measured: silent without one, answers with
+/// one, silent again when removed), so the entry has to be written; making it
+/// explicit also lets the diff compare the same thing on both sides and repair
+/// a community left in the silent state. The community that carries the trap
+/// receivers is left alone: its hosts table is the receiver list.
+pub fn make_unrestricted_communities_explicit(switch: &mut SwitchConfig) {
+    let is_fortiswitch = switch.model.as_ref().is_some_and(|m| m.vendor() == crate::models::Vendor::Fortiswitch);
+    if !is_fortiswitch {
+        return;
+    }
+    let Some(snmp) = switch.snmp.as_mut() else { return };
+    let skip_first = !snmp.trap_receivers.is_empty();
+    for (index, community) in snmp.communities.iter_mut().enumerate() {
+        if skip_first && index == 0 {
+            continue;
+        }
+        if community.allowed_hosts.is_empty() {
+            community.allowed_hosts.push(AllowedHost::Network("0.0.0.0/0".to_string()));
+        }
+    }
+}
+
 /// Replace every `auto` in the switch's SNMP communities with the local
 /// address towards its management IP, as a plain network entry. The service's
 /// own read community (`snmp.reads`, when on) with no `allowed_hosts` at all
@@ -338,5 +362,55 @@ mod tests {
         let err = check_vendor_support(&sw).unwrap_err().to_string();
         assert!(err.contains("sw1") && err.contains("snmp.reads") && err.contains("FortiSwitch"), "unhelpful error: {err}");
         assert!(check_vendor_support(&reads_switch(SwitchModel::Fortiswitch124F_FPOE, vec![])).is_ok());
+    }
+
+    // ---- FortiSwitch: "unrestricted" must be an explicit any-host entry ----
+
+    fn community_named(name: &str, hosts: Vec<AllowedHost>) -> SnmpCommunity {
+        let mut c = SnmpCommunity::new(name, SnmpAccess::default());
+        c.allowed_hosts = hosts;
+        c
+    }
+
+    fn any_host() -> AllowedHost {
+        AllowedHost::Network("0.0.0.0/0".to_string())
+    }
+
+    #[test]
+    fn a_fortiswitch_community_without_hosts_becomes_explicitly_any_host() {
+        let mut sw = switch("192.0.2.9", vec![community_named("public", vec![])]);
+        make_unrestricted_communities_explicit(&mut sw);
+        assert_eq!(sw.snmp.unwrap().communities[0].allowed_hosts, vec![any_host()]);
+    }
+
+    #[test]
+    fn a_community_that_already_lists_hosts_is_left_alone() {
+        let hosts = vec![AllowedHost::Network("192.0.2.0/24".to_string())];
+        let mut sw = switch("192.0.2.9", vec![community_named("public", hosts.clone())]);
+        make_unrestricted_communities_explicit(&mut sw);
+        assert_eq!(sw.snmp.unwrap().communities[0].allowed_hosts, hosts);
+    }
+
+    #[test]
+    fn other_vendors_keep_an_empty_list_empty() {
+        let mut sw = switch("192.0.2.9", vec![community_named("public", vec![])]);
+        sw.model = Some(SwitchModel::Aruba2930F);
+        make_unrestricted_communities_explicit(&mut sw);
+        assert!(sw.snmp.unwrap().communities[0].allowed_hosts.is_empty());
+    }
+
+    #[test]
+    fn the_community_that_carries_the_trap_receivers_is_left_alone() {
+        // Its hosts table is the receiver list, not an allow-list.
+        let mut sw = switch("192.0.2.9", vec![community_named("traps", vec![]), community_named("public", vec![])]);
+        sw.snmp.as_mut().unwrap().trap_receivers.push(crate::models::SnmpTrapReceiver {
+            host: "192.0.2.50".to_string(),
+            community: "traps".to_string(),
+            version: None,
+        });
+        make_unrestricted_communities_explicit(&mut sw);
+        let communities = sw.snmp.unwrap().communities;
+        assert!(communities[0].allowed_hosts.is_empty(), "the receiver carrier must stay as it is");
+        assert_eq!(communities[1].allowed_hosts, vec![any_host()]);
     }
 }

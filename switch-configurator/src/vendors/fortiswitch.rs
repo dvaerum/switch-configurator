@@ -117,6 +117,7 @@ impl FortiswitchSwitch {
         if let Err(e) = crate::allowed_hosts::resolve_auto_hosts(&mut config) {
             warn!("{:#}", e);
         }
+        crate::allowed_hosts::make_unrestricted_communities_explicit(&mut config);
         Self {
             config,
             runtime_config,
@@ -2522,7 +2523,11 @@ impl FortiswitchSwitch {
             }
 
             if in_hosts {
-                if let Some(rest) = trimmed.strip_prefix("set ip ") {
+                if trimmed.starts_with("edit ") {
+                    // `show` leaves out defaults, and 0.0.0.0 0.0.0.0 is the
+                    // default address: an entry with no `set ip` is any-host.
+                    current_host = Some("0.0.0.0 0.0.0.0".to_string());
+                } else if let Some(rest) = trimmed.strip_prefix("set ip ") {
                     current_host = Some(rest.trim().to_string());
                 } else if trimmed == "next" {
                     if let Some(host) = current_host.take() {
@@ -5915,5 +5920,46 @@ name: vlan42    mode: dhcp    ip: 192.0.2.2 255.255.255.0   status: up    netmas
         assert_eq!(vlan_description_from_device(Some(marker), None), None);
         assert_eq!(vlan_description_from_device(Some("Uplink"), None), Some("Uplink".to_string()));
         assert_eq!(vlan_description_from_device(None, Some("wanted")), Some("wanted".to_string()));
+    }
+
+    // Real 124E output (7.2.5): an any-host entry is printed as a bare `edit 1`
+    // because 0.0.0.0 0.0.0.0 is the default and `show` omits defaults.
+    #[test]
+    fn a_bare_hosts_entry_with_traps_disabled_reads_back_as_any_host() {
+        let switch = create_test_switch();
+        let lines = vec![
+            "config system snmp community",
+            "    edit 100",
+            "        config hosts",
+            "            edit 1",
+            "            next",
+            "        end",
+            "        set name \"public\"",
+            "        set trap-v1-status disable",
+            "        set trap-v2c-status disable",
+            "    next",
+            "end",
+        ];
+        let snmp = switch.parse_snmp_community(&lines).unwrap();
+        assert_eq!(
+            snmp.communities[0].allowed_hosts,
+            vec![crate::models::AllowedHost::Network("0.0.0.0/0".to_string())]
+        );
+        assert!(snmp.trap_receivers.is_empty());
+    }
+
+    #[test]
+    fn an_unrestricted_community_is_written_with_an_any_host_entry_and_no_traps() {
+        let mut config = create_test_config();
+        let mut community = SnmpCommunity::new("public", SnmpAccess::default());
+        community.allowed_hosts = vec![];
+        config.snmp = Some(SnmpConfig { communities: vec![community], trap_receivers: vec![], enabled_traps: vec![], reads: None });
+        let switch = FortiswitchSwitch::new(config, RuntimeConfig::default(), false);
+
+        let community = &switch.config.snmp.as_ref().unwrap().communities[0];
+        let block = FortiswitchSwitch::snmp_community_block(100, community).unwrap();
+
+        assert!(block.iter().any(|c| c == "set ip 0.0.0.0 0.0.0.0"), "{block:?}");
+        assert!(block.iter().any(|c| c == "set trap-v1-status disable"), "{block:?}");
     }
 }
