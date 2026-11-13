@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Web UI works behind a reverse proxy under a sub-path** (`switch-configurator-ui` 0.8.0): when the proxy sends `X-Forwarded-Prefix: /switch-configurator` (after stripping the prefix, the contract CoNexus uses), every link, form, htmx request, redirect and script URL carries the prefix. A malformed header value is ignored rather than written into the page. Without the header nothing changes.
+- **`services.switch-configurator.ui.listenAddress`** (NixOS module, `switch-configurator` 0.25.0): address the web UI binds to, default `0.0.0.0` as before. Use `127.0.0.1` behind a reverse proxy.
 - **FortiSwitch 124E support** (`switch-configurator` 0.24.0): new model `Fortiswitch124E` (`model: Fortiswitch124E`). 28 ports: 1-24 gigabit copper, 25-28 gigabit SFP uplinks, **no PoE** (the 124E-POE/-FPOE are different models and are not supported yet). It is configured like the other FortiSwitch (FortiOS commands, VLAN descriptions, 63-character VLAN names, VLAN 1 implicit). The hardware check compares `Version: FortiSwitch-124E` exactly, so a 124E-POE or a 124F configured as `Fortiswitch124E` (and the reverse) raises a model-mismatch warning. The port layout comes from Fortinet's datasheet; it has not yet been confirmed on a real 124E.
 
 ### Changed

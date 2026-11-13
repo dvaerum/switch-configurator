@@ -80,6 +80,7 @@ pub fn create_router(state: AppState) -> Router {
         .route("/static/htmx.min.js", get(static_htmx))
         .route("/static/htmx-sse.js", get(static_htmx_sse))
         .with_state(state)
+        .layer(axum::middleware::from_fn(crate::prefix::apply))
 }
 
 async fn health() -> &'static str {
@@ -120,5 +121,49 @@ mod tests {
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK, "htmx.min.js should be served from static/");
+    }
+
+    async fn get_with_prefix(uri: &str, prefix: Option<&str>) -> axum::response::Response {
+        let mut req = Request::builder().uri(uri);
+        if let Some(p) = prefix {
+            req = req.header("x-forwarded-prefix", p);
+        }
+        create_router(test_state()).oneshot(req.body(Body::empty()).unwrap()).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn redirects_gain_the_forwarded_prefix() {
+        // No draft exists, so /save/:id redirects back to the switch page.
+        let resp = get_with_prefix("/save/sw1", Some("/switch-configurator")).await;
+        assert_eq!(resp.headers()["location"], "/switch-configurator/switch/sw1");
+    }
+
+    #[tokio::test]
+    async fn redirects_are_untouched_without_a_prefix() {
+        let resp = get_with_prefix("/save/sw1", None).await;
+        assert_eq!(resp.headers()["location"], "/switch/sw1");
+    }
+
+    #[tokio::test]
+    async fn pages_link_assets_under_the_forwarded_prefix() {
+        let resp = get_with_prefix("/", Some("/switch-configurator")).await;
+        let body = String::from_utf8(
+            axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap().to_vec(),
+        )
+        .unwrap();
+        assert!(body.contains("href=\"/switch-configurator/static/style.css?v=2\""), "{body}");
+        assert!(body.contains("<meta name=\"base-path\" content=\"/switch-configurator\">"), "{body}");
+        assert!(!body.contains("href=\"/static/"), "an unprefixed asset link is left: {body}");
+    }
+
+    #[tokio::test]
+    async fn a_malicious_prefix_header_is_ignored() {
+        let resp = get_with_prefix("/", Some("/x\"><script>alert(1)</script>")).await;
+        let body = String::from_utf8(
+            axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap().to_vec(),
+        )
+        .unwrap();
+        assert!(!body.contains("<script>alert(1)"), "{body}");
+        assert!(body.contains("href=\"/static/style.css?v=2\""), "{body}");
     }
 }

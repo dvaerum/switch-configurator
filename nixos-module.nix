@@ -193,6 +193,18 @@ in
         description = "Port for the web UI server";
       };
 
+      listenAddress = mkOption {
+        type = types.str;
+        default = "0.0.0.0";
+        example = "127.0.0.1";
+        description = ''
+          Address the web UI binds to. Set `127.0.0.1` when a reverse proxy
+          fronts it, so the UI is only reachable through the proxy (which can
+          serve it under a sub-path: the UI honours `X-Forwarded-Prefix`).
+          IPv6 addresses are bracketed automatically.
+        '';
+      };
+
       backendSocket = mkOption {
         type = types.str;
         default = "/run/switch-configurator/api.sock";
@@ -309,7 +321,9 @@ in
         ExecStart = ''
           ${cfg.package}/bin/switch-configurator-ui \
             --backend-socket ${cfg.ui.backendSocket} \
-            --listen 0.0.0.0:${toString cfg.ui.port} \
+            --listen ${
+              if lib.hasInfix ":" cfg.ui.listenAddress then "[${cfg.ui.listenAddress}]" else cfg.ui.listenAddress
+            }:${toString cfg.ui.port} \
             --log-level ${cfg.ui.logLevel}
         '';
 

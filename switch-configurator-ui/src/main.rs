@@ -1,5 +1,6 @@
 mod config;
 mod logging;
+mod prefix;
 mod proxy;
 mod routes;
 mod state;

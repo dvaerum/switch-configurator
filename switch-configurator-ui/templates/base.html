@@ -18,6 +18,8 @@
         {% block content %}{% endblock %}
     </main>
     <script>
+    // Set by the server when the UI is served under a reverse-proxy sub-path.
+    var basePath = (document.querySelector('meta[name="base-path"]') || {}).content || '';
     // PoE reset with live, backend-driven progress.
     // Opens the SSE stream first so no early stage is missed, then starts the
     // reset. Every status line below comes from a backend `poe-reset` event —
@@ -36,7 +38,7 @@
         btn.disabled = true;
         setStatus('⏳ Starting…', 'var(--text-muted)');
 
-        var es = new EventSource('/events');
+        var es = new EventSource(basePath + '/events');
         var finished = false;
         var done = function () {
             if (finished) return;
@@ -61,7 +63,7 @@
 
         // Start the reset only once the event stream is live.
         es.onopen = function () {
-            fetch('/switch/' + switchId + '/poe-reset/' + encodeURIComponent(portId), { method: 'POST' })
+            fetch(basePath + '/switch/' + switchId + '/poe-reset/' + encodeURIComponent(portId), { method: 'POST' })
                 .then(function (r) {
                     if (r.status !== 202) {
                         return r.json().then(function (j) {
