@@ -8,6 +8,58 @@ use switch_configurator::models::{Port, Vlan};
 use super::edit::{is_main_config_source, main_config_path};
 use super::AppState;
 
+/// One entry of the backend's `GET /switches/{id}/config-sources`.
+#[derive(Debug, Clone, PartialEq)]
+struct ConfigSource {
+    file: String,
+    priority: u16,
+    source_type: String,
+}
+
+fn parse_config_sources(json: &serde_json::Value) -> Vec<ConfigSource> {
+    json.get("sources")
+        .and_then(|s| s.as_array())
+        .map(|sources| {
+            sources
+                .iter()
+                .filter_map(|s| {
+                    Some(ConfigSource {
+                        file: s.get("file")?.as_str()?.to_string(),
+                        priority: u16::try_from(s.get("priority")?.as_u64()?).ok()?,
+                        source_type: s.get("source_type")?.as_str()?.to_string(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Filename and priority the save dialog should offer when the draft carries
+/// no attribution. If exactly one writable overlay file already exists for the
+/// switch, that is the file a UI edit belongs in: a *new* file at the default
+/// priority would silently lose to it (lower number wins, and a file saved
+/// earlier keeps its definitions). Anything else keeps the old default.
+fn default_overlay_target(
+    sources: &[ConfigSource],
+    is_writable: impl Fn(&str) -> bool,
+    switch_id: &str,
+) -> (String, u16) {
+    let writable: Vec<&ConfigSource> = sources
+        .iter()
+        .filter(|s| s.source_type == "folder" && is_writable(&s.file))
+        .collect();
+    match writable.as_slice() {
+        [only] => {
+            let name = std::path::Path::new(&only.file)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| format!("{}.yaml", switch_id));
+            (name, only.priority)
+        }
+        _ => (format!("{}.yaml", switch_id), 200),
+    }
+}
+
 /// Which overlay filename "Save" should default to. For a draft seeded from
 /// a broken switch (`vlan_sources`/`port_sources` non-empty), that's the
 /// disputed overlay's own file — saving under a *different* name wouldn't
@@ -111,12 +163,31 @@ pub async fn save_dialog(
     };
 
     let main_config = main_config_path(&state).await;
-    let default_filename = default_overlay_filename(&draft.vlan_sources, &draft.port_sources, &main_config, &id);
+    let (default_filename, default_priority) =
+        if draft.vlan_sources.is_empty() && draft.port_sources.is_empty() {
+            // A healthy-switch draft records no attribution: offer the one
+            // writable overlay that already exists for this switch, if any.
+            let sources = match state.backend.get(&format!("/switches/{}/config-sources", id)).await {
+                Ok(json) => parse_config_sources(&json),
+                Err(e) => {
+                    tracing::warn!("Could not read the config sources of '{}' for the save dialog: {}", id, e);
+                    Vec::new()
+                }
+            };
+            default_overlay_target(
+                &sources,
+                // A file in the nix store (or any read-only mount) cannot be an edit target.
+                |file| std::fs::metadata(file).map(|m| !m.permissions().readonly()).unwrap_or(false),
+                &id,
+            )
+        } else {
+            (default_overlay_filename(&draft.vlan_sources, &draft.port_sources, &main_config, &id), 200)
+        };
 
     SaveDialogTemplate {
         switch_id: id.clone(),
         default_filename,
-        default_priority: 200,
+        default_priority,
         error: None,
     }.into_response()
 }
@@ -272,5 +343,53 @@ mod tests {
             &vlans, &std::collections::HashMap::new(), &[], &std::collections::HashMap::new(), "/etc/main.yaml",
         );
         assert_eq!(kept.len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod default_target_tests {
+    use super::*;
+
+    fn src(file: &str, priority: u16, kind: &str) -> ConfigSource {
+        ConfigSource { file: file.to_string(), priority, source_type: kind.to_string() }
+    }
+
+    #[test]
+    fn the_only_writable_overlay_is_the_default_target() {
+        let sources = vec![
+            src("/nix/store/x-extra/base.yaml", 50, "folder"),
+            src("/etc/switch-configurator/sw-ports.yaml", 100, "folder"),
+        ];
+        let target = default_overlay_target(&sources, |f| f.starts_with("/etc/"), "sw1");
+        assert_eq!(target, ("sw-ports.yaml".to_string(), 100));
+    }
+
+    #[test]
+    fn without_a_writable_overlay_the_old_default_stays() {
+        let sources = vec![src("/nix/store/x/base.yaml", 50, "folder"), src("/nix/store/main.yaml", 10, "main")];
+        assert_eq!(default_overlay_target(&sources, |_| false, "sw1"), ("sw1.yaml".to_string(), 200));
+    }
+
+    #[test]
+    fn several_writable_overlays_are_ambiguous_so_the_old_default_stays() {
+        let sources = vec![src("/etc/c/a.yaml", 100, "folder"), src("/etc/c/b.yaml", 110, "folder")];
+        assert_eq!(default_overlay_target(&sources, |_| true, "sw1"), ("sw1.yaml".to_string(), 200));
+    }
+
+    #[test]
+    fn the_main_config_is_never_the_target() {
+        let sources = vec![src("/etc/main.yaml", 10, "main")];
+        assert_eq!(default_overlay_target(&sources, |_| true, "sw1"), ("sw1.yaml".to_string(), 200));
+    }
+
+    #[test]
+    fn config_sources_json_is_read_as_the_backend_sends_it() {
+        let json = serde_json::json!({"switch_id": "sw1", "sources": [
+            {"file": "/a/b.yaml", "priority": 100, "source_type": "folder"},
+            {"file": "/c.yaml", "priority": 10, "source_type": "main"}]});
+        assert_eq!(
+            parse_config_sources(&json),
+            vec![src("/a/b.yaml", 100, "folder"), src("/c.yaml", 10, "main")]
+        );
     }
 }
