@@ -654,32 +654,47 @@ fn merge_configs(configs: Vec<ConfigWithMetadata>) -> Result<(AppConfig, Vec<Swi
         }
     }
 
-    // Report all conflicts if any exist
-    if !all_conflicts.is_empty() {
-        let mut error_msg = format!("Found {} merge conflicts:\n", all_conflicts.len());
-        for conflict in &all_conflicts {
+    // A switch whose sources disagree on its identity is skipped and reported
+    // like any other validation failure; the other switches keep running.
+    // (Failing the whole load here once took every healthy switch down because
+    // one stale overlay carried an old management_ip.)
+    let mut failures: Vec<SwitchValidationFailure> = Vec::new();
+    let mut conflicted_ids: Vec<String> = all_conflicts.iter().map(|c| c.switch_id.clone()).collect();
+    conflicted_ids.sort();
+    conflicted_ids.dedup();
+    for switch_id in conflicted_ids {
+        let mut error_msg = String::new();
+        let mut sources: Vec<String> = Vec::new();
+        for conflict in all_conflicts.iter().filter(|c| c.switch_id == switch_id) {
             error_msg.push_str(&format!(
-                "\n  Switch '{}' - {}.{}: {}\n",
-                conflict.switch_id,
-                conflict.component_type,
-                conflict.component_id,
-                conflict.description
+                "merge conflict in {}.{}: {}\n  Conflicting sources:\n",
+                conflict.component_type, conflict.component_id, conflict.description
             ));
-            error_msg.push_str("    Conflicting sources:\n");
             for (source, priority) in &conflict.conflicting_sources {
                 error_msg.push_str(&format!(
-                    "      - {:?} (priority: {})\n",
+                    "    - {:?} (priority: {})\n",
                     source.file_name().unwrap_or_default(),
                     priority
                 ));
+                sources.push(source.to_string_lossy().to_string());
             }
         }
-        return Err(anyhow!(error_msg));
+        sources.sort();
+        sources.dedup();
+        tracing::warn!("Switch '{}' skipped: {}", switch_id, error_msg.trim_end());
+        failures.push(SwitchValidationFailure {
+            switch_id: switch_id.clone(),
+            hostname: None,
+            error: error_msg.trim_end().to_string(),
+            config_sources: sources,
+            preview: None,
+            vlan_sources: Default::default(),
+            port_sources: Default::default(),
+        });
     }
 
     // Post-merge validation: validate each switch individually, skip invalid ones
     let mut valid_switches = Vec::new();
-    let mut failures = Vec::new();
 
     for mut switch in merged_switches {
         // Check required fields first
@@ -4171,6 +4186,32 @@ switches:
         let (config, _failures) = AppConfig::load_multi(&main, &[folder]).unwrap();
 
         assert_eq!(config.switches[0].management_vlan, Some(10), "lower priority number must win");
+    }
+
+    #[test]
+    fn an_identity_conflict_skips_only_that_switch_and_says_why() {
+        // A stale overlay with another management_ip must not take the whole
+        // service (and every healthy switch) down with it.
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("overlays");
+        std::fs::create_dir(&folder).unwrap();
+        let main = dir.path().join("main.yaml");
+        std::fs::write(&main, forti_switch_yaml(5, "")).unwrap();
+        std::fs::write(folder.join("ok.yaml"), forti_switch_yaml(50, "").replace("sw-reads", "sw-ok")).unwrap();
+        std::fs::write(
+            folder.join("stale.yaml"),
+            "merge_priority: 60\nswitches:\n  - id: sw-reads\n    management_ip: 192.0.2.99\n",
+        )
+        .unwrap();
+
+        let (config, failures) = AppConfig::load_multi(&main, &[folder]).expect("a conflict must not be fatal");
+
+        let ids: Vec<&str> = config.switches.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, vec!["sw-ok"], "the healthy switch must still load");
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].switch_id, "sw-reads");
+        assert!(failures[0].error.contains("Management IP mismatch"), "{}", failures[0].error);
+        assert!(failures[0].error.contains("stale.yaml"), "the conflicting file must be named: {}", failures[0].error);
     }
 
     #[test]

@@ -2346,6 +2346,81 @@ mod integration_tests {
     }
 
     #[tokio::test]
+    async fn saved_overlay_does_not_repeat_the_identity_the_switch_already_has() {
+        // The UI posts a full copy of the switch. Identity copied into a file
+        // goes stale and conflicts as soon as the base file changes it.
+        let store = create_test_config_store();
+        let config_dir = tempfile::tempdir().unwrap();
+        store.status.set_config_metadata(crate::status::ConfigMetadata {
+            config_file: std::path::PathBuf::from("/tmp/main.yaml"),
+            config_folders: vec![config_dir.path().to_path_buf()],
+            last_loaded: chrono::Utc::now(),
+            switches_count: 1,
+        }).await;
+        let existing = store.config.read().await.switches[0].clone();
+        let app = crate::api::create_router(store);
+
+        let body = serde_json::json!({
+            "filename": "copy.yaml",
+            "merge_priority": 100,
+            "config": {"switches": [{
+                "id": existing.id,
+                "hostname": existing.hostname,
+                "model": existing.model,
+                "management_ip": existing.management_ip,
+                "credentials": existing.credentials,
+                "vlans": [{"id": 99, "name": "v99"}]
+            }]}
+        });
+        let request = Request::builder()
+            .method("POST")
+            .uri(format!("/switches/{}/save-overlay", existing.id))
+            .header("Content-Type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        assert_eq!(app.oneshot(request).await.unwrap().status(), StatusCode::CREATED);
+
+        let content = std::fs::read_to_string(config_dir.path().join("copy.yaml")).unwrap();
+        let yaml: serde_yaml::Value = serde_yaml::from_str(&content).unwrap();
+        let sw = &yaml["switches"][0];
+        for field in ["hostname", "model", "management_ip", "credentials"] {
+            assert!(sw[field].is_null(), "{field} was copied into the overlay:\n{content}");
+        }
+        assert_eq!(sw["vlans"][0]["id"], 99, "the overlay's own content must stay");
+    }
+
+    #[tokio::test]
+    async fn saved_overlay_keeps_identity_for_a_switch_that_exists_nowhere_else() {
+        let store = create_test_config_store();
+        let config_dir = tempfile::tempdir().unwrap();
+        store.status.set_config_metadata(crate::status::ConfigMetadata {
+            config_file: std::path::PathBuf::from("/tmp/main.yaml"),
+            config_folders: vec![config_dir.path().to_path_buf()],
+            last_loaded: chrono::Utc::now(),
+            switches_count: 1,
+        }).await;
+        let app = crate::api::create_router(store);
+
+        let body = serde_json::json!({
+            "filename": "new.yaml",
+            "merge_priority": 100,
+            "config": {"switches": [{"id": "brand-new", "hostname": "brand-new", "management_ip": "192.0.2.77",
+                                      "vlans": [{"id": 5, "name": "v5"}]}]}
+        });
+        let request = Request::builder()
+            .method("POST")
+            .uri("/switches/brand-new/save-overlay")
+            .header("Content-Type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let status = app.oneshot(request).await.unwrap().status();
+        assert_eq!(status, StatusCode::CREATED);
+
+        let content = std::fs::read_to_string(config_dir.path().join("new.yaml")).unwrap();
+        assert!(content.contains("192.0.2.77"), "a switch defined only by this overlay needs its identity:\n{content}");
+    }
+
+    #[tokio::test]
     async fn test_save_overlay_rejects_path_traversal() {
         let store = create_test_config_store();
 

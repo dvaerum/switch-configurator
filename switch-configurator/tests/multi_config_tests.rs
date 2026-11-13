@@ -70,12 +70,14 @@ mod multi_config_tests {
         let main_config = fixtures_path("conflicts/main.yaml");
         let conflict_folder = fixtures_path("conflicts/hostname-conflict");
 
-        let result = AppConfig::load_multi(&main_config, &[conflict_folder]);
+        let (config, failures) = AppConfig::load_multi(&main_config, &[conflict_folder])
+            .expect("a conflict skips the switch, it does not fail the load");
 
-        assert!(result.is_err(), "Should fail on hostname conflict");
-        let error_msg = result.unwrap_err().to_string();
+        assert!(config.switches.is_empty(), "the conflicting switch must be skipped");
+        assert_eq!(failures.len(), 1, "the conflict must be reported for that switch");
+        let error_msg = failures[0].error.clone();
 
-        assert!(error_msg.contains("merge conflicts"), "Error should mention merge conflicts");
+        assert!(error_msg.contains("merge conflict"), "Error should mention merge conflicts");
         assert!(error_msg.contains("hostname"), "Error should mention hostname");
         assert!(error_msg.contains("Hostname mismatch"), "Error should describe the mismatch");
     }
@@ -86,10 +88,12 @@ mod multi_config_tests {
         let main_config = fixtures_path("conflicts/main.yaml");
         let conflict_folder = fixtures_path("conflicts/ip-conflict");
 
-        let result = AppConfig::load_multi(&main_config, &[conflict_folder]);
+        let (config, failures) = AppConfig::load_multi(&main_config, &[conflict_folder])
+            .expect("a conflict skips the switch, it does not fail the load");
 
-        assert!(result.is_err(), "Should fail on management_ip conflict");
-        let error_msg = result.unwrap_err().to_string();
+        assert!(config.switches.is_empty(), "the conflicting switch must be skipped");
+        assert_eq!(failures.len(), 1);
+        let error_msg = failures[0].error.clone();
 
         assert!(error_msg.contains("management_ip"), "Error should mention management_ip");
         assert!(error_msg.contains("Management IP mismatch"), "Error should describe the mismatch");
@@ -101,10 +105,12 @@ mod multi_config_tests {
         let main_config = fixtures_path("conflicts/main.yaml");
         let conflict_folder = fixtures_path("conflicts/model-conflict");
 
-        let result = AppConfig::load_multi(&main_config, &[conflict_folder]);
+        let (config, failures) = AppConfig::load_multi(&main_config, &[conflict_folder])
+            .expect("a conflict skips the switch, it does not fail the load");
 
-        assert!(result.is_err(), "Should fail on model conflict");
-        let error_msg = result.unwrap_err().to_string();
+        assert!(config.switches.is_empty(), "the conflicting switch must be skipped");
+        assert_eq!(failures.len(), 1);
+        let error_msg = failures[0].error.clone();
 
         assert!(error_msg.contains("model"), "Error should mention model");
         assert!(error_msg.contains("Model mismatch"), "Error should describe the mismatch");
@@ -418,10 +424,11 @@ mod multi_config_tests {
         let main_config = fixtures_path("multi-conflict/main.yaml");
         let conflict_folder = fixtures_path("multi-conflict/conflicts");
 
-        let result = AppConfig::load_multi(&main_config, &[conflict_folder]);
+        let (_config, failures) = AppConfig::load_multi(&main_config, &[conflict_folder])
+            .expect("conflicts skip their switches, they do not fail the load");
 
-        assert!(result.is_err(), "Should fail on multiple conflicts");
-        let error_msg = result.unwrap_err().to_string();
+        assert!(!failures.is_empty(), "the conflicts must be reported");
+        let error_msg = failures.iter().map(|f| f.error.as_str()).collect::<Vec<_>>().join("\n");
 
         // Error should mention multiple issues
         // At minimum, we should see indication of conflicts

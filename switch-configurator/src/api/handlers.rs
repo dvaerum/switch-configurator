@@ -517,6 +517,20 @@ pub async fn save_overlay(
         }
     }
 
+    // The UI posts a full copy of the switch. Identity the switch already has
+    // from its other sources is not repeated in the overlay: a copy goes stale
+    // and then conflicts when the base file changes it (a stale management_ip
+    // once stopped the whole service), and the copied credentials have their
+    // password scrubbed anyway.
+    {
+        let current = store.config.read().await;
+        for switch in &mut body.config.switches {
+            if let Some(existing) = current.switches.iter().find(|s| s.id == switch.id) {
+                drop_inherited_identity(switch, existing);
+            }
+        }
+    }
+
     // Build the YAML content with merge_priority at the top
     let yaml_value = prefer_vlan_names_in_yaml(&body.config).map_err(|e| {
         (
@@ -667,6 +681,24 @@ fn validate_overlay_filename(filename: &str) -> Result<(), (StatusCode, Json<ser
 /// parallel set of serializable structs) so it doesn't need to track every
 /// other field on `SwitchConfig`/`Port` — only `vlans` and `ports` are
 /// touched, everything else round-trips through `serde_yaml` unchanged.
+/// Clear the identity fields of an overlay's copy of a switch that the switch
+/// already has from its other sources (see `save_overlay`). A field the
+/// switch lacks stays, so an overlay that defines a switch still carries it.
+fn drop_inherited_identity(overlay: &mut crate::models::SwitchConfig, existing: &crate::models::SwitchConfig) {
+    if existing.hostname.is_some() {
+        overlay.hostname = None;
+    }
+    if existing.model.is_some() {
+        overlay.model = None;
+    }
+    if existing.management_ip.is_some() {
+        overlay.management_ip = None;
+    }
+    if existing.credentials.is_some() {
+        overlay.credentials = None;
+    }
+}
+
 fn prefer_vlan_names_in_yaml(config: &AppConfig) -> Result<serde_yaml::Value, serde_yaml::Error> {
     let mut value = serde_yaml::to_value(config)?;
 
