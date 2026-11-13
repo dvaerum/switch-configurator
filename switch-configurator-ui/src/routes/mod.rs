@@ -1,3 +1,4 @@
+pub mod apply_status;
 pub mod dashboard;
 pub mod diff;
 pub mod edit;

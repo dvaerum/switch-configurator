@@ -2,6 +2,7 @@ use askama::Template;
 use axum::extract::{Path, State};
 use axum::response::{IntoResponse, Redirect};
 
+use askama::Template as _;
 use super::AppState;
 
 #[derive(Debug, Clone)]
@@ -13,6 +14,8 @@ pub struct SwitchCard {
     pub vlan_count: usize,
     pub port_count: usize,
     pub status: Option<String>,
+    /// One-line reason shown on the card when the last apply failed.
+    pub failure_summary: Option<String>,
     pub warnings: Vec<String>,
 }
 
@@ -184,13 +187,6 @@ async fn fetch_switch_cards(state: &AppState) -> Vec<SwitchCard> {
     // Fetch status for warnings and last_result
     let status_json = state.backend.get("/api/status").await.ok();
 
-    // Switch IDs currently being applied (rendered as "Configuring")
-    let configuring: std::collections::HashSet<String> = status_json
-        .as_ref()
-        .and_then(|s| s["currently_configuring"].as_array())
-        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-        .unwrap_or_default();
-
     let switches = switches_json["switches"]
         .as_array()
         .cloned()
@@ -201,36 +197,15 @@ async fn fetch_switch_cards(state: &AppState) -> Vec<SwitchCard> {
         .map(|sw| {
             let id = sw["id"].as_str().unwrap_or("").to_string();
 
-            // Look up status info for this switch
-            let (status, warnings) = status_json
+            // The badge state, and for a failure its reason (see `apply_status`).
+            let apply = super::apply_status::from_status(status_json.as_ref(), &id);
+            let warnings: Vec<String> = status_json
                 .as_ref()
                 .and_then(|s| s["switches"].as_array())
                 .and_then(|arr| arr.iter().find(|s| s["id"].as_str() == Some(&id)))
-                .map(|s| {
-                    // Normalize the raw last_result into the badge states the template
-                    // matches. `record_apply_failure` stores "failed: <error>", so match
-                    // on a prefix rather than the exact string, and let an in-progress
-                    // apply win over a stale last_result.
-                    let status = if configuring.contains(&id) {
-                        Some("configuring".to_string())
-                    } else {
-                        match s["last_result"].as_str() {
-                            Some(r) if r.starts_with("success") => Some("success".to_string()),
-                            Some(r) if r.starts_with("failed") => Some("failed".to_string()),
-                            _ => None,
-                        }
-                    };
-                    let warnings = s["warnings"]
-                        .as_array()
-                        .map(|a| {
-                            a.iter()
-                                .filter_map(|w| w.as_str().map(|s| s.to_string()))
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    (status, warnings)
-                })
-                .unwrap_or((None, vec![]));
+                .and_then(|s| s["warnings"].as_array())
+                .map(|a| a.iter().filter_map(|w| w.as_str().map(|s| s.to_string())).collect())
+                .unwrap_or_default();
 
             SwitchCard {
                 id,
@@ -239,7 +214,8 @@ async fn fetch_switch_cards(state: &AppState) -> Vec<SwitchCard> {
                 management_ip: sw["management_ip"].as_str().unwrap_or("").to_string(),
                 vlan_count: sw["vlans"].as_u64().unwrap_or(0) as usize,
                 port_count: sw["ports"].as_u64().unwrap_or(0) as usize,
-                status,
+                status: apply.state,
+                failure_summary: apply.summary,
                 warnings,
             }
         })
@@ -332,4 +308,43 @@ pub async fn delete_overlay(
     }
 
     Redirect::to("/")
+}
+
+#[cfg(test)]
+mod card_tests {
+    use super::*;
+
+    fn card(status: Option<&str>, summary: Option<&str>) -> SwitchCard {
+        SwitchCard {
+            id: "sw1".into(),
+            hostname: "sw1".into(),
+            model: "Aruba2530_8G_POE".into(),
+            management_ip: "192.0.2.1".into(),
+            vlan_count: 1,
+            port_count: 2,
+            status: status.map(String::from),
+            failure_summary: summary.map(String::from),
+            warnings: vec![],
+        }
+    }
+
+    #[test]
+    fn a_failed_card_says_why_it_failed() {
+        let html = DashboardTemplate {
+            switches: vec![card(Some("failed"), Some("Serial device does not exist: /dev/serial_x"))],
+            validation_failures: vec![],
+        }
+        .render()
+        .unwrap();
+        assert!(html.contains("Failed"), "{html}");
+        assert!(html.contains("Serial device does not exist: /dev/serial_x"), "the reason is missing from the card");
+    }
+
+    #[test]
+    fn a_healthy_card_has_no_failure_line() {
+        let html = DashboardTemplate { switches: vec![card(Some("success"), None)], validation_failures: vec![] }
+            .render()
+            .unwrap();
+        assert!(!html.contains("failure-reason"));
+    }
 }

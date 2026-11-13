@@ -8,3 +8,11 @@
         <tr><th>Port Mirrors</th><td>{{ switch.mirrors.len() }}</td></tr>
     </table>
 </div>
+
+{% if let Some(detail) = apply.detail %}
+<div class="card mt-1" style="border-left:4px solid var(--danger);">
+    <strong style="color:var(--danger);">Last apply failed</strong>
+    {% if let Some(when) = apply.last_applied %}<span class="text-muted text-sm"> &middot; {{ when }}</span>{% endif %}
+    <pre style="white-space:pre-wrap;margin:0.5rem 0 0;">{{ detail }}</pre>
+</div>
+{% endif %}

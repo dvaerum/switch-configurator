@@ -7,7 +7,7 @@
                 <th>Tagged VLANs</th>
                 <th>Description</th>
                 <th>Enabled</th>
-                <th>PoE</th>
+                {% if switch.has_poe %}<th>PoE</th>{% endif %}
                 <th>Speed</th>
             </tr>
         </thead>
@@ -19,7 +19,7 @@
                 <td class="text-muted">{{ port.tagged_display }}</td>
                 <td>{{ port.description.as_deref().unwrap_or("-") }}</td>
                 <td>{% if port.enabled %}Yes{% else %}No{% endif %}</td>
-                <td>{% if port.poe_enabled %}Yes{% else %}-{% endif %}</td>
+                {% if switch.has_poe %}<td>{% if port.poe_enabled %}Yes{% else %}-{% endif %}</td>{% endif %}
                 <td class="text-muted">{{ port.speed_display }}</td>
             </tr>
             {% endfor %}

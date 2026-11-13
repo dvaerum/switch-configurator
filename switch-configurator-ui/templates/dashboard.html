@@ -79,6 +79,9 @@
         <div class="text-sm mt-1">
             {{ sw.vlan_count }} VLANs, {{ sw.port_count }} ports
         </div>
+        {% if let Some(reason) = sw.failure_summary %}
+        <div class="text-sm mt-1 failure-reason" style="color:var(--danger);">{{ reason }}</div>
+        {% endif %}
         {% if !sw.warnings.is_empty() %}
         <div class="text-sm mt-1" style="color:var(--warning);">
             {{ sw.warnings.len() }} warning(s)

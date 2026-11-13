@@ -322,7 +322,29 @@ pub struct EditablePort {
     pub description: String,
     pub enabled: bool,
     pub poe_enabled: bool,
+    /// Whether this port can do PoE on this model; the checkbox is only shown if so.
+    pub poe_supported: bool,
     pub speed_duplex: String,
+}
+
+/// Does the model have PoE at all? Unknown (no model recorded): keep the controls.
+fn model_has_poe(model: Option<&switch_configurator::models::SwitchModel>) -> bool {
+    model.map_or(true, |m| m.supports_poe())
+}
+
+/// Can this port do PoE on this model? Unknown model: keep the control.
+fn poe_applies(model: Option<&switch_configurator::models::SwitchModel>, port_id: &str) -> bool {
+    model.map_or(true, |m| m.port_supports_poe(port_id))
+}
+
+/// A PoE flag on a port that cannot do PoE is meaningless (and would otherwise
+/// be saved into an overlay): clear it.
+fn drop_unsupported_poe(ports: &mut [Port], model: Option<&switch_configurator::models::SwitchModel>) {
+    for port in ports {
+        if !poe_applies(model, &port.port_id) {
+            port.poe_enabled = false;
+        }
+    }
 }
 
 /// A VLAN as offered to the untagged VLAN picker — named by id, so the UI
@@ -363,6 +385,8 @@ struct EditPortsTemplate {
     hostname: String,
     ports: Vec<EditablePort>,
     vlans: Vec<VlanOption>,
+    /// False for a model without PoE: the PoE column and checkbox are left out.
+    show_poe: bool,
 }
 
 pub async fn edit_ports(
@@ -375,7 +399,8 @@ pub async fn edit_ports(
     };
 
     let vlans = vlan_options(&draft.edited.vlans);
-    let mut ports: Vec<EditablePort> = draft.edited.ports.iter().map(|p| port_to_editable(p, &vlans)).collect();
+    let model = draft.edited.model.as_ref();
+    let mut ports: Vec<EditablePort> = draft.edited.ports.iter().map(|p| port_to_editable(p, &vlans, model)).collect();
     ports.sort_by(|a, b| natural_sort(&a.port_id, &b.port_id));
 
     EditPortsTemplate {
@@ -383,6 +408,7 @@ pub async fn edit_ports(
         hostname: draft.edited.hostname.clone().unwrap_or_default(),
         ports,
         vlans,
+        show_poe: model_has_poe(model),
     }.into_response()
 }
 
@@ -413,7 +439,9 @@ pub async fn add_port(
     };
 
     if !draft.edited.ports.iter().any(|p| p.port_id == form.port_id) {
-        draft.edited.ports.push(form_to_port(&form));
+        let mut port = form_to_port(&form);
+        drop_unsupported_poe(std::slice::from_mut(&mut port), draft.edited.model.as_ref());
+        draft.edited.ports.push(port);
         draft.edited.ports.sort_by(|a, b| natural_sort(&a.port_id, &b.port_id));
     }
 
@@ -435,6 +463,7 @@ pub async fn update_ports(
     };
 
     draft.edited.ports = parse_ports_bulk(pairs, &draft.edited.ports);
+    drop_unsupported_poe(&mut draft.edited.ports, draft.edited.model.as_ref());
 
     state.drafts.update(&id, draft.edited).await;
     Redirect::to(&format!("/switch/{}/edit/ports", id)).into_response()
@@ -878,8 +907,9 @@ fn form_to_mirror(form: &MirrorForm) -> PortMirror {
     }
 }
 
-fn port_to_editable(p: &Port, vlans: &[VlanOption]) -> EditablePort {
+fn port_to_editable(p: &Port, vlans: &[VlanOption], model: Option<&switch_configurator::models::SwitchModel>) -> EditablePort {
     EditablePort {
+        poe_supported: poe_applies(model, &p.port_id),
         port_id: p.port_id.clone(),
         vlan: p.vlan,
         tagged_vlan_choices: tagged_vlan_choices(vlans, &p.tagged_vlans),
@@ -1170,5 +1200,74 @@ mod tests {
         assert_eq!(options.len(), 2);
         assert_eq!(options[0].id, 10);
         assert_eq!(options[0].name, "users");
+    }
+
+    // ---- PoE controls only where the model has PoE ----
+
+    use switch_configurator::models::SwitchModel;
+
+    fn port_with_poe(id: &str) -> Port {
+        serde_yaml::from_str(&format!("port_id: \"{id}\"\nvlan: 1\nenabled: true\npoe_enabled: true")).unwrap()
+    }
+
+    #[test]
+    fn a_model_without_poe_offers_no_poe_anywhere() {
+        let model = Some(SwitchModel::Fortiswitch124E);
+        assert!(!model_has_poe(model.as_ref()));
+        assert!(!poe_applies(model.as_ref(), "1"));
+    }
+
+    #[test]
+    fn a_poe_model_offers_poe_on_its_poe_ports_only() {
+        let model = Some(SwitchModel::Fortiswitch124F_FPOE);
+        assert!(model_has_poe(model.as_ref()));
+        assert!(poe_applies(model.as_ref(), "1"));
+        assert!(!poe_applies(model.as_ref(), "25"), "an SFP port has no PoE");
+    }
+
+    #[test]
+    fn an_unknown_model_keeps_the_controls() {
+        assert!(model_has_poe(None));
+        assert!(poe_applies(None, "1"));
+    }
+
+    #[test]
+    fn a_poe_flag_on_a_port_that_cannot_do_poe_is_dropped() {
+        let mut ports = vec![port_with_poe("1"), port_with_poe("2")];
+        drop_unsupported_poe(&mut ports, Some(&SwitchModel::Fortiswitch124E));
+        assert!(ports.iter().all(|p| !p.poe_enabled));
+
+        let mut ports = vec![port_with_poe("1"), port_with_poe("25")];
+        drop_unsupported_poe(&mut ports, Some(&SwitchModel::Fortiswitch124F_FPOE));
+        assert!(ports[0].poe_enabled, "a PoE port keeps its flag");
+        assert!(!ports[1].poe_enabled, "an SFP port on a PoE model does not");
+    }
+
+    fn ports_page(model: Option<SwitchModel>, ports: Vec<Port>) -> String {
+        let vlans = vlan_options(&[Vlan { id: 1, name: "default".into(), description: None, ip_config: switch_configurator::models::VlanIpConfig::None }]);
+        let editable: Vec<EditablePort> = ports.iter().map(|p| port_to_editable(p, &vlans, model.as_ref())).collect();
+        EditPortsTemplate {
+            switch_id: "sw1".into(),
+            hostname: "sw1".into(),
+            ports: editable,
+            vlans,
+            show_poe: model_has_poe(model.as_ref()),
+        }
+        .render()
+        .unwrap()
+    }
+
+    #[test]
+    fn the_edit_page_of_a_non_poe_switch_has_no_poe_column_or_checkbox() {
+        let html = ports_page(Some(SwitchModel::Fortiswitch124E), vec![port_with_poe("1")]);
+        assert!(!html.contains("<th>PoE</th>"), "PoE column header shown");
+        assert!(!html.contains("poe_enabled"), "a PoE checkbox is offered");
+    }
+
+    #[test]
+    fn the_edit_page_of_a_poe_switch_offers_poe_only_on_poe_ports() {
+        let html = ports_page(Some(SwitchModel::Fortiswitch124F_FPOE), vec![port_with_poe("1"), port_with_poe("25")]);
+        assert!(html.contains("<th>PoE</th>"));
+        assert_eq!(html.matches("name=\"poe_enabled.").count(), 1, "only the PoE port gets a checkbox");
     }
 }

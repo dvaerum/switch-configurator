@@ -28,7 +28,7 @@
         <thead>
             <tr>
                 <th>Port</th><th>Untagged VLAN</th><th>Tagged VLANs</th>
-                <th>Description</th><th>Enabled</th><th>PoE</th><th>Speed</th><th style="width:80px;">Actions</th>
+                <th>Description</th><th>Enabled</th>{% if show_poe %}<th>PoE</th>{% endif %}<th>Speed</th><th style="width:80px;">Actions</th>
             </tr>
         </thead>
         <tbody>
@@ -54,7 +54,7 @@
                 </td>
                 <td><input type="text" name="description.{{ loop.index0 }}" value="{{ port.description }}" style="width:140px;padding:0.2rem;border:1px solid var(--border);border-radius:4px;"></td>
                 <td><input type="checkbox" name="enabled.{{ loop.index0 }}" value="on"{% if port.enabled %} checked{% endif %}></td>
-                <td><input type="checkbox" name="poe_enabled.{{ loop.index0 }}" value="on"{% if port.poe_enabled %} checked{% endif %}></td>
+                {% if show_poe %}<td>{% if port.poe_supported %}<input type="checkbox" name="poe_enabled.{{ loop.index0 }}" value="on"{% if port.poe_enabled %} checked{% endif %}>{% else %}<span class="text-muted" title="This port has no PoE">-</span>{% endif %}</td>{% endif %}
                 <td>
                     <select name="speed_duplex.{{ loop.index0 }}" style="padding:0.2rem;border:1px solid var(--border);border-radius:4px;">
                         <option value="auto"{% if port.speed_duplex == "auto" %} selected{% endif %}>auto</option>
@@ -71,7 +71,7 @@
             </tr>
             {% endfor %}
             {% if ports.is_empty() %}
-            <tr><td colspan="8" class="text-muted" style="text-align:center;">No ports configured</td></tr>
+            <tr><td colspan="{% if show_poe %}8{% else %}7{% endif %}" class="text-muted" style="text-align:center;">No ports configured</td></tr>
             {% endif %}
         </tbody>
     </table>
@@ -99,7 +99,7 @@
         </select>
         <input type="text" name="description" placeholder="Description" style="width:160px;padding:0.3rem;border:1px solid var(--border);border-radius:4px;">
         <label class="text-sm"><input type="checkbox" name="enabled" value="on" checked> Enabled</label>
-        <label class="text-sm"><input type="checkbox" name="poe_enabled" value="on"> PoE</label>
+        {% if show_poe %}<label class="text-sm"><input type="checkbox" name="poe_enabled" value="on"> PoE</label>{% endif %}
         <select name="speed_duplex" style="padding:0.3rem;border:1px solid var(--border);border-radius:4px;">
             <option value="auto">auto</option>
             <option value="100-full">100-full</option>

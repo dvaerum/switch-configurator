@@ -60,6 +60,8 @@ pub struct SwitchView {
     pub vlans: Vec<VlanView>,
     pub ports: Vec<PortView>,
     pub mirrors: Vec<MirrorView>,
+    /// Whether the model has PoE at all; the PoE column is left out if not.
+    pub has_poe: bool,
     pub snmp: Option<SnmpView>,
 }
 
@@ -80,6 +82,7 @@ struct SwitchDetailTemplate {
     switch: SwitchView,
     active_tab: String,
     sources: Vec<ConfigSourceView>,
+    apply: super::apply_status::ApplyStatus,
 }
 
 pub async fn detail(
@@ -100,10 +103,12 @@ pub async fn detail_with_tab(
         vec![]
     };
 
+    let apply = fetch_apply_status(&state, &id).await;
     SwitchDetailTemplate {
         switch,
         active_tab: tab,
         sources,
+        apply,
     }
 }
 
@@ -119,14 +124,16 @@ pub async fn tab_content(
         vec![]
     };
 
+    let apply = fetch_apply_status(&state, &id).await;
+
     // Return just the tab content partial
     match tab.as_str() {
-        "vlans" => TabPartialTemplate { switch, tab, sources }.into_response(),
-        "ports" => TabPartialTemplate { switch, tab, sources }.into_response(),
-        "mirrors" => TabPartialTemplate { switch, tab, sources }.into_response(),
-        "snmp" => TabPartialTemplate { switch, tab, sources }.into_response(),
-        "sources" => TabPartialTemplate { switch, tab, sources }.into_response(),
-        _ => TabPartialTemplate { switch, tab: "overview".to_string(), sources }.into_response(),
+        "vlans" => TabPartialTemplate { switch, tab, sources, apply }.into_response(),
+        "ports" => TabPartialTemplate { switch, tab, sources, apply }.into_response(),
+        "mirrors" => TabPartialTemplate { switch, tab, sources, apply }.into_response(),
+        "snmp" => TabPartialTemplate { switch, tab, sources, apply }.into_response(),
+        "sources" => TabPartialTemplate { switch, tab, sources, apply }.into_response(),
+        _ => TabPartialTemplate { switch, tab: "overview".to_string(), sources, apply }.into_response(),
     }
 }
 
@@ -143,6 +150,13 @@ struct TabPartialTemplate {
     switch: SwitchView,
     tab: String,
     sources: Vec<ConfigSourceView>,
+    apply: super::apply_status::ApplyStatus,
+}
+
+/// The last-apply outcome of a switch (state, reason, full message) from `/api/status`.
+async fn fetch_apply_status(state: &AppState, id: &str) -> super::apply_status::ApplyStatus {
+    let status = state.backend.get("/api/status").await.ok();
+    super::apply_status::from_status(status.as_ref(), id)
 }
 
 async fn fetch_switch_view(state: &AppState, id: &str) -> SwitchView {
@@ -282,6 +296,7 @@ fn parse_switch_view(id: &str, json: &serde_json::Value) -> SwitchView {
         vlans,
         ports,
         mirrors,
+        has_poe: model.as_ref().is_some_and(|m| m.supports_poe()),
         snmp,
     }
 }
@@ -360,6 +375,36 @@ pub fn parse_switch_view_from_yaml(switch_id: &str, yaml_content: &str) -> Optio
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_overview_of_a_failed_switch_shows_the_full_failure() {
+        let switch = parse_switch_view("sw", &serde_json::json!({"model": "Aruba2530_8G_POE", "vlans": [], "ports": [], "port_mirrors": []}));
+        let apply = crate::routes::apply_status::ApplyStatus {
+            state: Some("failed".into()),
+            summary: Some("Serial device does not exist: /dev/serial_x".into()),
+            detail: Some("Serial device does not exist: /dev/serial_x\n\nPossible causes:\n- Device not connected".into()),
+            last_applied: Some("2026-11-13T16:16:28Z".into()),
+        };
+        let html = TabPartialTemplate { switch, tab: "overview".into(), sources: vec![], apply }.render().unwrap();
+        assert!(html.contains("Last apply failed"), "{html}");
+        assert!(html.contains("Possible causes:"), "the full message is missing");
+    }
+
+    #[test]
+    fn the_overview_of_a_healthy_switch_has_no_failure_block() {
+        let switch = parse_switch_view("sw", &serde_json::json!({"model": "Fortiswitch124E", "vlans": [], "ports": [], "port_mirrors": []}));
+        let apply = crate::routes::apply_status::ApplyStatus { state: Some("success".into()), ..Default::default() };
+        let html = TabPartialTemplate { switch, tab: "overview".into(), sources: vec![], apply }.render().unwrap();
+        assert!(!html.contains("Last apply failed"));
+    }
+
+    #[test]
+    fn the_detail_view_knows_whether_the_model_has_poe() {
+        let json = |model: &str| serde_json::json!({"model": model, "vlans": [], "ports": [], "port_mirrors": []});
+        assert!(!parse_switch_view("sw", &json("Fortiswitch124E")).has_poe);
+        assert!(parse_switch_view("sw", &json("Fortiswitch124F_FPOE")).has_poe);
+        assert!(!parse_switch_view("sw", &json("NotAModel")).has_poe, "an unknown model shows no PoE column");
+    }
 
     const OVERLAY_YAML: &str = r#"
 merge_priority: 200
@@ -463,6 +508,7 @@ fn empty_switch(id: &str) -> SwitchView {
         vlans: vec![],
         ports: vec![],
         mirrors: vec![],
+        has_poe: false,
         snmp: None,
     }
 }
