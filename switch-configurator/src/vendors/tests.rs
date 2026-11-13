@@ -128,6 +128,7 @@ mod tests {
             port_mirrors: vec![],
             snmp: None,
             management_vlan: None,
+            hostname: None,
             warnings: vec![],
         };
 
@@ -174,6 +175,7 @@ mod tests {
             snmp_diff: None,
             management_vlan_changed: false,
             management_vlan: None,
+            hostname: None,
         };
 
         mock_vendor
@@ -457,6 +459,7 @@ interface 1
                 port_mirrors: vec![],
                 snmp: None,
             management_vlan: None,
+            hostname: None,
             warnings: vec![],
             }));
 
@@ -621,6 +624,7 @@ interface 1
             port_mirrors: vec![],
             snmp: None,
             management_vlan: None,
+            hostname: None,
             warnings: vec![],
         };
 
@@ -673,6 +677,7 @@ interface 1
             snmp_diff: None,
             management_vlan_changed: false,
             management_vlan: None,
+            hostname: None,
         };
 
         mock_vendor
@@ -841,6 +846,7 @@ interface 1
             port_mirrors: vec![],
             snmp: None,
             management_vlan: None,
+            hostname: None,
             warnings: vec![],
         };
 
@@ -853,6 +859,7 @@ interface 1
             port_mirrors: vec![],
             snmp: None,
             management_vlan: None,
+            hostname: None,
             warnings: vec!["Model mismatch: J9779A".to_string()],
         };
 

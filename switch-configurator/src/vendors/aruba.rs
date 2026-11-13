@@ -4175,6 +4175,7 @@ vlan 1
             port_mirrors: vec![],
             snmp: None,
             management_vlan: None,
+            hostname: None,
             warnings: vec![],
         };
         switch.current_state = Some(current_state);
@@ -4244,6 +4245,7 @@ vlan 1
             port_mirrors: vec![],
             snmp: None,
             management_vlan: None,
+            hostname: None,
             warnings: vec![],
         };
         switch.current_state = Some(current_state);
@@ -4314,6 +4316,7 @@ vlan 1
             port_mirrors: vec![],
             snmp: None,
             management_vlan: None,
+            hostname: None,
             warnings: vec![],
         };
         switch.current_state = Some(current_state);
@@ -4380,6 +4383,7 @@ vlan 1
             port_mirrors: vec![],
             snmp: None,
             management_vlan: None,
+            hostname: None,
             warnings: vec![],
         };
         switch.current_state = Some(current_state);
@@ -4542,6 +4546,7 @@ vlan 1
             port_mirrors: vec![],
             snmp: None,
             management_vlan: Some(10),
+            hostname: None,
             warnings: vec![],
         };
 
@@ -4568,6 +4573,7 @@ vlan 1
             port_mirrors: vec![],
             snmp: None,
             management_vlan: None,
+            hostname: None,
             warnings: vec![],
         };
 
@@ -4594,6 +4600,7 @@ vlan 1
             port_mirrors: vec![],
             snmp: None,
             management_vlan: Some(20),
+            hostname: None,
             warnings: vec![],
         };
 
@@ -4620,6 +4627,7 @@ vlan 1
             port_mirrors: vec![],
             snmp: None,
             management_vlan: Some(30),
+            hostname: None,
             warnings: vec![],
         };
 
@@ -5914,6 +5922,7 @@ interface 48
             port_mirrors: vec![],
             snmp: None,
             management_vlan: None,
+            hostname: None,
             warnings: vec![],
         });
 
@@ -6020,6 +6029,7 @@ interface 48
             port_mirrors: vec![],
             snmp: None,
             management_vlan: None,
+            hostname: None,
             warnings: vec![],
         });
 

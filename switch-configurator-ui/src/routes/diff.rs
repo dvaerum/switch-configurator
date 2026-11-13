@@ -61,6 +61,7 @@ pub async fn preview(
         port_mirrors: draft.original.port_mirrors.clone(),
         snmp: draft.original.snmp.clone(),
         management_vlan: draft.original.management_vlan,
+        hostname: draft.original.hostname.clone(),
         warnings: vec![],
     };
 

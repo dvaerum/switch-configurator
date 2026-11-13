@@ -1411,6 +1411,10 @@ pub struct SwitchState {
     pub port_mirrors: Vec<PortMirror>,
     pub snmp: Option<SnmpConfig>,
     pub management_vlan: Option<u16>,
+    /// The hostname the device itself reports. `None` for a vendor that does
+    /// not report it (the configured hostname is then never written to it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hostname: Option<String>,
     /// Warnings detected during state parsing (e.g., model mismatch)
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
@@ -1514,6 +1518,10 @@ pub struct StateDiff {
 
     pub management_vlan_changed: bool,
     pub management_vlan: Option<u16>,
+
+    /// The hostname to write to the device, when it differs from the one the
+    /// device reports.
+    pub hostname: Option<String>,
 }
 
 impl StateDiff {
@@ -1531,6 +1539,7 @@ impl StateDiff {
             || self.snmp_config_changed
             || self.snmp_diff.as_ref().map_or(false, |d| d.has_changes())
             || self.management_vlan_changed
+            || self.hostname.is_some()
     }
 
     /// Produce a human-readable summary of remaining changes.
@@ -1570,6 +1579,9 @@ impl StateDiff {
         }
         if self.management_vlan_changed {
             parts.push("management VLAN".to_string());
+        }
+        if self.hostname.is_some() {
+            parts.push("hostname".to_string());
         }
         parts.join("; ")
     }

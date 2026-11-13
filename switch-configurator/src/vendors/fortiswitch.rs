@@ -10,6 +10,8 @@ use async_trait::async_trait;
 use tracing::{debug, info, trace, warn};
 
 pub struct FortiswitchSwitch {
+    /// Hostname the device reported on the last `get system status`.
+    device_hostname: Option<String>,
     config: SwitchConfig,
     runtime_config: RuntimeConfig,
     client: Option<ConnectionClient>,
@@ -119,6 +121,7 @@ impl FortiswitchSwitch {
         }
         crate::allowed_hosts::make_unrestricted_communities_explicit(&mut config);
         Self {
+            device_hostname: None,
             config,
             runtime_config,
             client: None,
@@ -411,6 +414,47 @@ impl FortiswitchSwitch {
                 community.access = wanted.access;
             }
         }
+    }
+
+    /// The `Hostname: <name>` line of `get system status`.
+    fn parse_status_hostname(output: &str) -> Option<String> {
+        regex::Regex::new(r"(?m)^Hostname:\s*(\S+)")
+            .ok()?
+            .captures(output)
+            .map(|c| c[1].to_string())
+    }
+
+    /// The hostname to report in the switch state: the device's own, except
+    /// that a configured name FortiOS would refuse counts as already in place,
+    /// so every apply does not see a difference it can never fix.
+    fn state_hostname(on_device: Option<String>, wanted: Option<&str>) -> Option<String> {
+        match (on_device, wanted) {
+            (Some(_), Some(wanted)) if Self::generate_hostname_commands(wanted).is_none() => {
+                warn!(
+                    "Hostname {:?} is not a valid FortiOS hostname (letters, digits, '-', '_', '.', at most 35); \
+                     it is not written to the switch",
+                    wanted
+                );
+                Some(wanted.to_string())
+            }
+            (on_device, _) => on_device,
+        }
+    }
+
+    /// `config system global` / `set hostname` for a name FortiOS accepts
+    /// (letters, digits, `-`, `_`, `.`; at most 35 characters); `None` for
+    /// anything else, which is never sent.
+    fn generate_hostname_commands(name: &str) -> Option<Vec<String>> {
+        let valid = !name.is_empty()
+            && name.len() <= 35
+            && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
+        valid.then(|| {
+            vec![
+                "config system global".to_string(),
+                format!("set hostname \"{}\"", name),
+                "end".to_string(),
+            ]
+        })
     }
 
     /// Management VLAN interfaces keep their management services; every other
@@ -1441,12 +1485,17 @@ impl SwitchVendor for FortiswitchSwitch {
             management_vlan
         );
 
+        // A configured hostname FortiOS would refuse is reported as already in
+        // place: otherwise every apply would see a difference it can never fix.
+        let hostname = Self::state_hostname(self.device_hostname.clone(), self.config.hostname.as_deref());
+
         Ok(SwitchState {
             vlans,
             ports,
             port_mirrors,
             snmp,
             management_vlan,
+            hostname,
             warnings,
         })
     }
@@ -1534,6 +1583,11 @@ impl SwitchVendor for FortiswitchSwitch {
                 info!("Removing management VLAN configuration");
                 results.push(self.remove_management_vlan().await?);
             }
+        }
+
+        // The console prompt carries the hostname, so write it last.
+        if let Some(name) = &diff.hostname {
+            results.push(self.configure_hostname(name).await?);
         }
 
         Ok(results)
@@ -1633,6 +1687,9 @@ impl SwitchVendor for FortiswitchSwitch {
             if diff.snmp_config_changed {
                 preview.snmp_commands.extend(self.generate_snmp_commands(snmp_config));
             }
+        }
+        if let Some(commands) = diff.hostname.as_deref().and_then(Self::generate_hostname_commands) {
+            preview.other_commands.extend(commands);
         }
 
         preview
@@ -1963,12 +2020,17 @@ impl FortiswitchSwitch {
     /// Detect hardware model by running "get system status" and comparing
     /// the version string against known product identifiers.
     async fn detect_hardware_model(&mut self) -> Vec<String> {
+        self.device_hostname = None;
         let client = match self.client.as_mut() {
             Some(c) => c,
             None => return Vec::new(),
         };
 
-        match client.execute_command("get system status").await {
+        let status = client.execute_command("get system status").await;
+        if let Ok(output) = &status {
+            self.device_hostname = Self::parse_status_hostname(output);
+        }
+        match status {
             Ok(output) => {
                 // The output contains a line like:
                 // "Version: FortiSwitch-108F-POE v7.2.8,build0660,241119 (GA.MR8)"
@@ -2817,6 +2879,27 @@ impl FortiswitchSwitch {
             switch: self.config.hostname().to_string(),
             success: true,
             message: format!("Configured {} mirror destination ports with baseline settings", port_ids.len()),
+            commands_executed: commands,
+            timestamp: chrono::Utc::now(),
+        })
+    }
+
+    /// Write the device hostname (`config system global`).
+    async fn configure_hostname(&mut self, name: &str) -> Result<ConfigResult, VendorError> {
+        let commands = Self::generate_hostname_commands(name).ok_or_else(|| {
+            VendorError::ValidationError(format!("{:?} is not a hostname FortiOS accepts", name))
+        })?;
+        info!("Setting the switch hostname to {}", name);
+
+        let client = self.client.as_mut()
+            .ok_or_else(|| VendorError::SshError("Not connected".to_string()))?;
+        client.execute_commands(&commands).await
+            .map_err(|e| VendorError::CommandError(e.to_string()))?;
+
+        Ok(ConfigResult {
+            switch: self.config.hostname().to_string(),
+            success: true,
+            message: format!("Set hostname to {}", name),
             commands_executed: commands,
             timestamp: chrono::Utc::now(),
         })
@@ -4131,6 +4214,7 @@ mod tests {
             port_mirrors: vec![],
             snmp: None,
             management_vlan: None,
+            hostname: None,
             warnings: vec![],
         };
 
@@ -4165,6 +4249,7 @@ mod tests {
             port_mirrors: vec![],
             snmp: None,
             management_vlan: Some(10),
+            hostname: None,
             warnings: vec![],
         };
 
@@ -4196,6 +4281,7 @@ mod tests {
             port_mirrors: vec![],
             snmp: None,
             management_vlan: Some(60),
+            hostname: None,
             warnings: vec![],
         };
 
@@ -4219,6 +4305,7 @@ mod tests {
             port_mirrors: vec![],
             snmp: None,
             management_vlan: Some(25),
+            hostname: None,
             warnings: vec![],
         };
 
@@ -5961,5 +6048,49 @@ name: vlan42    mode: dhcp    ip: 192.0.2.2 255.255.255.0   status: up    netmas
 
         assert!(block.iter().any(|c| c == "set ip 0.0.0.0 0.0.0.0"), "{block:?}");
         assert!(block.iter().any(|c| c == "set trap-v1-status disable"), "{block:?}");
+    }
+
+    // ---- device hostname ----
+
+    #[test]
+    fn the_device_hostname_is_read_from_get_system_status() {
+        let output = "Version: FortiSwitch-124E v7.2.5,build0453,230707 (GA)\r\nSerial-Number: S124EN5920012652\r\nHostname: S124EN5920012652\r\nMax VLANs: 4095\r\n";
+        assert_eq!(FortiswitchSwitch::parse_status_hostname(output), Some("S124EN5920012652".to_string()));
+        assert_eq!(FortiswitchSwitch::parse_status_hostname("no hostname here"), None);
+    }
+
+    #[test]
+    fn hostname_commands_set_it_in_the_global_settings() {
+        assert_eq!(
+            FortiswitchSwitch::generate_hostname_commands("IT-03364"),
+            Some(vec![
+                "config system global".to_string(),
+                "set hostname \"IT-03364\"".to_string(),
+                "end".to_string(),
+            ])
+        );
+    }
+
+    #[test]
+    fn a_hostname_fortios_would_refuse_is_never_sent() {
+        for bad in ["", "has space", "quote\"d", "semi;colon", &"x".repeat(36)] {
+            assert_eq!(FortiswitchSwitch::generate_hostname_commands(bad), None, "{bad:?}");
+        }
+        assert!(FortiswitchSwitch::generate_hostname_commands(&"x".repeat(35)).is_some());
+    }
+
+    #[test]
+    fn the_command_preview_shows_a_hostname_change() {
+        let switch = create_test_switch();
+        let diff = StateDiff { hostname: Some("IT-03364".to_string()), ..Default::default() };
+        let preview = switch.generate_commands_for_diff(&diff);
+        assert!(preview.other_commands.iter().any(|c| c == "set hostname \"IT-03364\""), "{:?}", preview.other_commands);
+    }
+
+    #[test]
+    fn a_hostname_fortios_would_refuse_counts_as_already_in_place() {
+        assert_eq!(FortiswitchSwitch::state_hostname(Some("S124EN1".into()), Some("has space")), Some("has space".to_string()));
+        assert_eq!(FortiswitchSwitch::state_hostname(Some("S124EN1".into()), Some("IT-03364")), Some("S124EN1".to_string()));
+        assert_eq!(FortiswitchSwitch::state_hostname(None, Some("IT-03364")), None, "a device that reports none is never written to");
     }
 }

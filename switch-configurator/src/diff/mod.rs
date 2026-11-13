@@ -41,6 +41,7 @@ pub fn compute_diff(current: &SwitchState, desired: &SwitchConfig, enforce_port_
 
     // Compute management VLAN differences
     diff_management_vlan(current, desired, &mut diff);
+    diff_hostname(current, desired, &mut diff);
 
     if diff.has_changes() {
         debug!("State differences detected:");
@@ -569,6 +570,17 @@ fn compute_snmp_diff(
     snmp_diff
 }
 
+/// Write the configured hostname only to a device that reports its own and
+/// reports a different one; a vendor that does not report it is left alone.
+fn diff_hostname(current: &SwitchState, desired: &SwitchConfig, diff: &mut StateDiff) {
+    if let (Some(on_device), Some(wanted)) = (current.hostname.as_deref(), desired.hostname.as_deref()) {
+        if on_device != wanted {
+            debug!("  Hostname changed: current={:?}, desired={:?}", on_device, wanted);
+            diff.hostname = Some(wanted.to_string());
+        }
+    }
+}
+
 fn diff_management_vlan(current: &SwitchState, desired: &SwitchConfig, diff: &mut StateDiff) {
     // Check if management VLAN configuration has changed
     let current_mgmt_vlan = current.management_vlan;
@@ -707,6 +719,7 @@ mod tests {
             port_mirrors: vec![],
             snmp: None,
             management_vlan: None,
+            hostname: None,
             warnings: vec![],
         };
 
@@ -739,6 +752,7 @@ mod tests {
             port_mirrors: vec![],
             snmp: None,
             management_vlan: None,
+            hostname: None,
             warnings: vec![],
         };
 
@@ -787,6 +801,7 @@ mod tests {
             port_mirrors: vec![],
             snmp: None,
             management_vlan: None,
+            hostname: None,
             warnings: vec![],
         };
 
@@ -823,6 +838,7 @@ mod tests {
             port_mirrors: vec![],
             snmp: None,
             management_vlan: None,
+            hostname: None,
             warnings: vec![],
         };
 
@@ -866,6 +882,7 @@ mod tests {
             port_mirrors: vec![],
             snmp: None,
             management_vlan: None,
+            hostname: None,
             warnings: vec![],
         };
 
@@ -928,6 +945,7 @@ mod tests {
             port_mirrors: vec![],
             snmp: None,
             management_vlan: None,
+            hostname: None,
             warnings: vec![],
         };
 
@@ -981,6 +999,7 @@ mod tests {
             port_mirrors: vec![],
             snmp: None,
             management_vlan: None,
+            hostname: None,
             warnings: vec![],
         };
 
@@ -1014,6 +1033,7 @@ mod tests {
             port_mirrors: vec![],
             snmp: None,
             management_vlan: None,
+            hostname: None,
             warnings: vec![],
         };
 
@@ -1041,6 +1061,7 @@ mod tests {
             port_mirrors: vec![],
             snmp: None,
             management_vlan: None,
+            hostname: None,
             warnings: vec![],
         };
 
@@ -1190,6 +1211,7 @@ mod tests {
                 enabled_traps: vec![TrapType::MacNotify], reads: None,
             }),
             management_vlan: None,
+            hostname: None,
             warnings: vec![],
         };
 
@@ -1244,6 +1266,7 @@ mod tests {
             port_mirrors: vec![],
             snmp: None,
             management_vlan: None,
+            hostname: None,
             warnings: vec![],
         };
 
@@ -1294,6 +1317,7 @@ mod tests {
             port_mirrors: vec![],
             snmp: None,
             management_vlan: None,
+            hostname: None,
             warnings: vec![],
         };
 
@@ -1356,6 +1380,7 @@ mod tests {
             port_mirrors: vec![],
             snmp: None,
             management_vlan: None,
+            hostname: None,
             warnings: vec![],
         };
 
@@ -1420,6 +1445,7 @@ mod tests {
             port_mirrors: vec![],
             snmp: None,
             management_vlan: None,
+            hostname: None,
             warnings: vec![],
         };
 
@@ -1545,6 +1571,7 @@ mod tests {
             port_mirrors: vec![],
             snmp: None,
             management_vlan: None,
+            hostname: None,
             warnings: vec![],
         };
 
@@ -1589,6 +1616,7 @@ mod tests {
             port_mirrors: vec![],
             snmp: None,
             management_vlan: None,
+            hostname: None,
             warnings: vec![],
         };
 
@@ -1649,6 +1677,7 @@ mod tests {
             port_mirrors: vec![],
             snmp: None,
             management_vlan: None,
+            hostname: None,
             warnings: vec![],
         };
 
@@ -1683,6 +1712,7 @@ mod tests {
             port_mirrors: vec![],
             snmp: None,
             management_vlan: None,
+            hostname: None,
             warnings: vec![],
         };
 
@@ -1726,6 +1756,7 @@ mod tests {
             port_mirrors: vec![],
             snmp: None,
             management_vlan: None,
+            hostname: None,
             warnings: vec![],
         };
 
@@ -1782,6 +1813,7 @@ mod tests {
             port_mirrors: vec![],
             snmp: None,
             management_vlan: None,
+            hostname: None,
             warnings: vec![],
         };
 
@@ -1840,6 +1872,7 @@ mod tests {
             port_mirrors: vec![],
             snmp: None,
             management_vlan: None,
+            hostname: None,
             warnings: vec![],
         };
 
@@ -1897,6 +1930,7 @@ mod tests {
             port_mirrors: vec![],
             snmp: None,
             management_vlan: None,
+            hostname: None,
             warnings: vec![],
         };
 
@@ -1930,6 +1964,7 @@ mod tests {
             port_mirrors: vec![],
             snmp: None,
             management_vlan: None,
+            hostname: None,
             warnings: vec![],
         };
 
@@ -1977,6 +2012,7 @@ mod tests {
             port_mirrors: vec![],
             snmp: None,
             management_vlan: None,
+            hostname: None,
             warnings: vec![],
         };
 
@@ -2029,6 +2065,7 @@ mod tests {
             port_mirrors: vec![],
             snmp: None,
             management_vlan: None,
+            hostname: None,
             warnings: vec![],
         };
 
@@ -2120,6 +2157,7 @@ mod tests {
             port_mirrors: vec![],
             snmp: None,
             management_vlan: None,
+            hostname: None,
             warnings: vec![],
         };
 
@@ -2170,6 +2208,7 @@ mod tests {
             port_mirrors: vec![],
             snmp: None,
             management_vlan: None,
+            hostname: None,
             warnings: vec![],
         };
 
@@ -2208,6 +2247,7 @@ mod tests {
             port_mirrors: vec![],
             snmp: None,
             management_vlan: None,
+            hostname: None,
             warnings: vec![],
         };
 
@@ -2270,6 +2310,7 @@ mod tests {
             port_mirrors: vec![],
             snmp: None,
             management_vlan: None,
+            hostname: None,
             warnings: vec![],
         };
 
@@ -2307,6 +2348,7 @@ mod tests {
                 enabled_traps: vec![], reads: None,
             }),
             management_vlan: None,
+            hostname: None,
             warnings: vec![],
         };
 
@@ -2358,6 +2400,7 @@ mod tests {
                 enabled_traps: vec![TrapType::MacNotify, TrapType::LinkChange], reads: None,
             }),
             management_vlan: None,
+            hostname: None,
             warnings: vec![],
         };
 
@@ -2410,6 +2453,7 @@ mod tests {
                 enabled_traps: vec![TrapType::MacNotify], reads: None,
             }),
             management_vlan: None,
+            hostname: None,
             warnings: vec![],
         };
 
@@ -2468,6 +2512,7 @@ mod tests {
             port_mirrors: vec![],
             snmp: None,
             management_vlan: None,
+            hostname: None,
             warnings: vec![],
         };
 
@@ -2517,6 +2562,7 @@ mod tests {
             ],
             snmp: None,
             management_vlan: None,
+            hostname: None,
             warnings: vec![],
         };
 
@@ -2544,6 +2590,7 @@ mod tests {
             port_mirrors: vec![],
             snmp: None,
             management_vlan: None,
+            hostname: None,
             warnings: vec![],
         };
 
@@ -2586,6 +2633,7 @@ mod tests {
             port_mirrors: vec![],
             snmp: None,
             management_vlan: None,
+            hostname: None,
             warnings: vec![],
         };
 
@@ -2615,6 +2663,7 @@ mod tests {
             port_mirrors: vec![],
             snmp: None,
             management_vlan: None,
+            hostname: None,
             warnings: vec![],
         };
 
@@ -2668,6 +2717,7 @@ mod tests {
             port_mirrors: vec![],
             snmp: None,
             management_vlan: None,
+            hostname: None,
             warnings: vec![],
         };
 
@@ -2835,5 +2885,44 @@ mod tests {
 
         assert_eq!(snmp_diff.communities_to_remove, vec!["old-read-secret".to_string()]);
         assert_eq!(snmp_diff.communities_to_add[0].name, "service-read-secret");
+    }
+
+    // ---- device hostname ----
+
+    #[test]
+    fn a_different_device_hostname_is_a_change() {
+        let current = SwitchState { hostname: Some("S124EN0001".to_string()), ..Default::default() };
+        let mut desired = create_test_switch_config();
+        desired.hostname = Some("IT-03364".to_string());
+
+        let diff = compute_diff(&current, &desired, false);
+
+        assert_eq!(diff.hostname.as_deref(), Some("IT-03364"));
+        assert!(diff.has_changes());
+        assert!(diff.remaining_changes_summary().contains("hostname"));
+    }
+
+    #[test]
+    fn the_same_device_hostname_is_no_change() {
+        let current = SwitchState { hostname: Some("IT-03364".to_string()), ..Default::default() };
+        let mut desired = create_test_switch_config();
+        desired.hostname = Some("IT-03364".to_string());
+
+        let diff = compute_diff(&current, &desired, false);
+
+        assert_eq!(diff.hostname, None);
+        assert!(!diff.has_changes());
+    }
+
+    #[test]
+    fn a_vendor_that_does_not_report_its_hostname_never_gets_one_written() {
+        let current = SwitchState { hostname: None, ..Default::default() };
+        let mut desired = create_test_switch_config();
+        desired.hostname = Some("IT-03364".to_string());
+
+        let diff = compute_diff(&current, &desired, false);
+
+        assert_eq!(diff.hostname, None);
+        assert!(!diff.has_changes());
     }
 }

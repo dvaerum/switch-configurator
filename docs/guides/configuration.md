@@ -26,7 +26,7 @@ Each switch in the `switches` list requires these fields:
 
 ```yaml
 - id: my-switch-01              # Unique ID (required for multi-config merging)
-  hostname: my-switch-01        # Display name / DNS hostname
+  hostname: my-switch-01        # Display name; also written to a FortiSwitch as its hostname (letters, digits, - _ . ; max 35)
   model: Aruba2930F             # Switch model (see supported models)
   management_ip: "192.168.1.10" # IP address for SSH (or placeholder for serial)
   credentials:                  # Authentication details

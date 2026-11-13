@@ -726,6 +726,7 @@ impl SwitchVendor for CiscoSwitch {
             port_mirrors: vec![],
             snmp: None,
             management_vlan,
+            hostname: None,
             warnings,
         })
     }
@@ -2210,6 +2211,7 @@ mod tests {
             port_mirrors: vec![],
             snmp: None,
             management_vlan: None,
+            hostname: None,
             warnings: vec![],
         };
 
@@ -2245,6 +2247,7 @@ mod tests {
             port_mirrors: vec![],
             snmp: None,
             management_vlan: Some(10),
+            hostname: None,
             warnings: vec![],
         };
 
@@ -2277,6 +2280,7 @@ mod tests {
             port_mirrors: vec![],
             snmp: None,
             management_vlan: Some(50),
+            hostname: None,
             warnings: vec![],
         };
 
@@ -2303,6 +2307,7 @@ mod tests {
             port_mirrors: vec![],
             snmp: None,
             management_vlan: Some(20),
+            hostname: None,
             warnings: vec![],
         };
 
