@@ -91,6 +91,23 @@ struct PhysicalPortInfo {
     speed_duplex: Option<SpeedDuplex>,
 }
 
+/// Description the tool itself writes on the management VLAN's interface. It
+/// marks the interface as managed by us, not something a user configured, so
+/// it must never show up as a difference against a config with no description.
+const MANAGEMENT_VLAN_DESCRIPTION: &str = "Management VLAN with allowaccess";
+
+/// Services allowed on the management VLAN's interface.
+const MANAGEMENT_ALLOWACCESS: &str = "ping https ssh snmp";
+
+/// The description to compare against the desired config: what the device
+/// reports, except for the tool's own management marker.
+fn vlan_description_from_device(device: Option<&str>, desired: Option<&str>) -> Option<String> {
+    device
+        .filter(|d| *d != MANAGEMENT_VLAN_DESCRIPTION)
+        .or(desired)
+        .map(str::to_string)
+}
+
 impl FortiswitchSwitch {
     pub fn new(mut config: SwitchConfig, runtime_config: RuntimeConfig, enforce_port_config: bool) -> Self {
         // `auto` in an SNMP allowed_hosts list means "the address this host
@@ -395,6 +412,17 @@ impl FortiswitchSwitch {
         }
     }
 
+    /// Management VLAN interfaces keep their management services; every other
+    /// VLAN interface is ping-only. Applying a VLAN update must not downgrade
+    /// the management interface.
+    fn allowaccess_command(is_management: bool) -> String {
+        if is_management {
+            format!("set allowaccess {}", MANAGEMENT_ALLOWACCESS)
+        } else {
+            "set allowaccess ping".to_string()
+        }
+    }
+
     fn generate_vlan_commands(&self, vlans: &[Vlan]) -> Vec<String> {
         let mut commands = Vec::new();
 
@@ -422,8 +450,11 @@ impl FortiswitchSwitch {
                 commands.push(format!("edit vlan{}", vlan.id));
                 commands.push(format!("set vlanid {}", vlan.id));
 
+                let is_management = self.config.management_vlan == Some(vlan.id);
                 if let Some(desc) = &vlan.description {
                     commands.push(format!("set description \"{}\"", desc));
+                } else if is_management {
+                    commands.push(format!("set description \"{}\"", MANAGEMENT_VLAN_DESCRIPTION));
                 }
 
                 commands.push("set type vlan".to_string());
@@ -433,11 +464,11 @@ impl FortiswitchSwitch {
                 match &vlan.ip_config {
                     crate::models::VlanIpConfig::Dhcp => {
                         commands.push("set mode dhcp".to_string());
-                        commands.push("set allowaccess ping".to_string());
+                        commands.push(Self::allowaccess_command(is_management));
                     }
                     crate::models::VlanIpConfig::Static { address, netmask } => {
                         commands.push(format!("set ip {} {}", address, netmask));
-                        commands.push("set allowaccess ping".to_string());
+                        commands.push(Self::allowaccess_command(is_management));
                     }
                     crate::models::VlanIpConfig::None => {
                         // No IP configuration
@@ -1363,9 +1394,10 @@ impl SwitchVendor for FortiswitchSwitch {
                 .map(|v| v.name.clone())
                 .or_else(|| svi.and_then(|s| s.description.clone()))
                 .unwrap_or_else(|| format!("vlan{}", id));
-            let description = svi
-                .and_then(|s| s.description.clone())
-                .or_else(|| desired.and_then(|v| v.description.clone()));
+            let description = vlan_description_from_device(
+                svi.and_then(|s| s.description.as_deref()),
+                desired.and_then(|v| v.description.as_deref()),
+            );
             let ip_config = svi
                 .map(|s| s.ip_config.clone())
                 .unwrap_or(VlanIpConfig::None);
@@ -2382,11 +2414,11 @@ impl FortiswitchSwitch {
             }
 
             if let Some(rest) = trimmed.strip_prefix("set dst ") {
-                dst = Some(rest.trim().to_string());
+                dst = Some(rest.trim().trim_matches('"').to_string());
             } else if let Some(rest) = trimmed.strip_prefix("set src-ingress ") {
-                ingress = rest.split_whitespace().map(|s| s.to_string()).collect();
+                ingress = rest.split_whitespace().map(|s| s.trim_matches('"').to_string()).collect();
             } else if let Some(rest) = trimmed.strip_prefix("set src-egress ") {
-                egress = rest.split_whitespace().map(|s| s.to_string()).collect();
+                egress = rest.split_whitespace().map(|s| s.trim_matches('"').to_string()).collect();
             } else if trimmed == "next" {
                 Self::flush_mirror(&mut session_id, &mut dst, &mut ingress, &mut egress, &mut mirrors);
             }
@@ -2801,7 +2833,7 @@ impl FortiswitchSwitch {
             "config system interface".to_string(),
             format!("edit vlan{}", vlan_id),
             format!("set vlanid {}", vlan_id),
-            format!("set description \"Management VLAN with allowaccess\""),
+            format!("set description \"{}\"", MANAGEMENT_VLAN_DESCRIPTION),
             "set type vlan".to_string(),
             "set interface internal".to_string(),
         ];
@@ -2822,7 +2854,7 @@ impl FortiswitchSwitch {
         }
 
         // Set allowaccess for management services (ping, https, ssh, snmp)
-        commands.push("set allowaccess ping https ssh snmp".to_string());
+        commands.push(format!("set allowaccess {}", MANAGEMENT_ALLOWACCESS));
 
         commands.push("next".to_string());
         commands.push("end".to_string());
@@ -5833,5 +5865,55 @@ name: vlan42    mode: dhcp    ip: 192.0.2.2 255.255.255.0   status: up    netmas
         let port25 = physical.iter().position(|c| c == "edit port25").unwrap();
         assert!(physical[port1..port25].iter().any(|c| c == "set poe-status enable"));
         assert!(!physical[port25..].iter().any(|c| c.starts_with("set poe-status")), "{physical:?}");
+    }
+
+    // Real 124E (FortiSwitch 7.2.5) output: values are quoted and padded.
+    #[test]
+    fn mirror_values_printed_in_quotes_are_read_without_them() {
+        let switch = create_test_switch();
+        let lines = vec![
+            "config switch mirror",
+            "    edit \"1\"",
+            "        set status active",
+            "        set dst \"port23\"",
+            "        set src-ingress \"port5\" \"port6\"         ",
+            "        set src-egress \"port5\" \"port6\"         ",
+            "    next",
+            "end",
+        ];
+        let mirrors = switch.parse_switch_mirrors(&lines);
+        assert_eq!(mirrors.len(), 1);
+        assert_eq!(mirrors[0].destination_port, "23");
+        assert_eq!(mirrors[0].source_ports, vec!["5".to_string(), "6".to_string()]);
+        assert_eq!(mirrors[0].direction, MirrorDirection::Both);
+    }
+
+    fn dhcp_vlan(id: u16) -> Vlan {
+        Vlan { id, name: format!("v{id}"), description: None, ip_config: VlanIpConfig::Dhcp }
+    }
+
+    #[test]
+    fn the_management_vlan_interface_keeps_its_management_access_when_the_vlan_is_updated() {
+        let mut config = create_test_config();
+        config.management_vlan = Some(804);
+        let switch = FortiswitchSwitch::new(config, RuntimeConfig::default(), false);
+
+        let commands = switch.generate_vlan_commands(&[dhcp_vlan(804), dhcp_vlan(900)]);
+
+        let block = |id: u16| -> Vec<&String> {
+            let start = commands.iter().position(|c| c == &format!("edit vlan{id}")).unwrap();
+            commands[start..].iter().take_while(|c| *c != "end").collect()
+        };
+        assert!(block(804).iter().any(|c| *c == "set allowaccess ping https ssh snmp"), "{:?}", block(804));
+        assert!(!block(804).iter().any(|c| *c == "set allowaccess ping"), "{:?}", block(804));
+        assert!(block(900).iter().any(|c| *c == "set allowaccess ping"), "other VLANs stay ping-only");
+    }
+
+    #[test]
+    fn the_tools_own_management_description_is_not_a_user_description() {
+        let marker = MANAGEMENT_VLAN_DESCRIPTION;
+        assert_eq!(vlan_description_from_device(Some(marker), None), None);
+        assert_eq!(vlan_description_from_device(Some("Uplink"), None), Some("Uplink".to_string()));
+        assert_eq!(vlan_description_from_device(None, Some("wanted")), Some("wanted".to_string()));
     }
 }
