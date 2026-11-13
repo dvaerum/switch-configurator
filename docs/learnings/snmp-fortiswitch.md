@@ -18,7 +18,12 @@ seconds' settling time between a change and the query):
    `snmp` on the primary interface alone gets no answer; it has to be in that
    secondary entry's own `allowaccess`. Changes take a few seconds to apply.
 4. If the community has a `config hosts` table, the querying address must be
-   in it (below).
+   in it (below). **On the 124E (FortiSwitch 7.2.5) a community with no hosts
+   table is answered by nobody** (toggled on a bench 124E: no hosts entry = every
+   query times out; adding `10.10.132.0/24` made the next query answer within
+   a few seconds; removing it silenced it again). So `allowed_hosts` is needed
+   there even for an `unrestricted` community; the tool's "empty = no
+   restriction" does not write a hosts entry.
 
 **The management address may be a DHCP lease.** On the IT-02876 switch (124F-FPOE) the management IP is leased by the `vlan42` interface (`set mode dhcp`, `set allowaccess ping`); `show system interface` prints no `set ip` for it, but `get system interface` lists it (`name: vlan42  mode: dhcp  ip: <addr> <mask>`). `snmp` has to be added to that interface's `allowaccess`.
 
