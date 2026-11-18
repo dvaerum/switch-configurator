@@ -169,3 +169,9 @@ when the walk completes), and walks again (at most 3 times, keeping the
 largest result: a cut-short walk only loses rows) when a table comes back
 below 70% of the previous one. Anything else querying the same agent (a
 monitoring system) can still disturb it; the retry covers that case.
+
+Reproduce it (and check a fix) with `examples/snmp_probe.rs`, which runs the same
+concurrent load through the raw walker (`raw`) or the gated lookup (`gated`).
+On the bench 124E (~582 entries) six readers x four rounds gave: `raw`: 106,
+199-201 (23 of 24 reads short, one timeout), 40 s; `gated`: 581-583 on all 24
+reads, 9 s.
