@@ -1,13 +1,37 @@
 //! Port status and MAC table over SNMP: pick the target from the switch config,
 //! walk the tables, map them.
 
+use std::sync::LazyLock;
 use std::time::Duration;
 
 use anyhow::{bail, Result};
 
 use super::client::{Session, SnmpTarget};
+use super::gate::{Gate, Walked};
 use super::mapping::*;
 use crate::models::{MacTableEntry, PortStatusEntry, SwitchConfig};
+
+/// The agent cuts a walk short when walks overlap (see `gate`), so every
+/// lookup goes through a gate: one at a time per switch, shared by callers.
+static MAC_GATE: LazyLock<Gate<Vec<MacTableEntry>>> = LazyLock::new(Gate::new);
+static PORT_GATE: LazyLock<Gate<PortStatusRows>> = LazyLock::new(Gate::new);
+
+fn switch_key(target: &SnmpTarget) -> String {
+    format!("{}:{}", target.host, target.port)
+}
+
+/// What the response note says about how the walk went: rows, time, and
+/// whether it was shared or repeated.
+fn walk_summary<T>(walked: &Walked<T>) -> String {
+    let mut text = format!("{} entries in {:.1} s", walked.entries, walked.elapsed.as_secs_f64());
+    if walked.attempts > 1 {
+        text.push_str(&format!(", walked {} times because the first result was short", walked.attempts));
+    }
+    if walked.shared {
+        text.push_str(", shared with a concurrent request");
+    }
+    text
+}
 
 /// How long one SNMP request may take before it counts as lost.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
@@ -36,25 +60,34 @@ pub async fn fetch_port_status(
     target: &SnmpTarget,
     supports_poe: impl Fn(&str) -> bool,
 ) -> Result<(Vec<PortStatusEntry>, String)> {
-    let session = Session::connect(target).await?;
-    let (if_name, if_oper_status, if_high_speed, duplex, peth_admin, peth_detection) = tokio::try_join!(
-        session.walk(IF_NAME),
-        session.walk(IF_OPER_STATUS),
-        session.walk(IF_HIGH_SPEED),
-        session.walk(DOT3_DUPLEX_STATUS),
-        session.walk(PETH_PORT_ADMIN_ENABLE),
-        session.walk(PETH_PORT_DETECTION_STATUS),
-    )?;
-    if if_name.is_empty() {
-        bail!(
-            "{}:{} answered over SNMP but lists no interfaces (IF-MIB not populated)",
-            target.host,
-            target.port
-        );
-    }
-    let rows = PortStatusRows { if_name, if_oper_status, if_high_speed, duplex, peth_admin, peth_detection };
-    let entries = port_status_from(&rows, supports_poe);
-    let note = format!("(read over SNMP from {}:{}; no console output)", target.host, target.port);
+    let walking = target.clone();
+    let walked = PORT_GATE
+        .run(&switch_key(target), move || {
+            let target = walking.clone();
+            async move {
+                let session = Session::connect(&target).await?;
+                let (if_name, if_oper_status, if_high_speed, duplex, peth_admin, peth_detection) = tokio::try_join!(
+                    session.walk(IF_NAME),
+                    session.walk(IF_OPER_STATUS),
+                    session.walk(IF_HIGH_SPEED),
+                    session.walk(DOT3_DUPLEX_STATUS),
+                    session.walk(PETH_PORT_ADMIN_ENABLE),
+                    session.walk(PETH_PORT_DETECTION_STATUS),
+                )?;
+                if if_name.is_empty() {
+                    bail!(
+                        "{}:{} answered over SNMP but lists no interfaces (IF-MIB not populated)",
+                        target.host,
+                        target.port
+                    );
+                }
+                let entries = if_name.len();
+                Ok((PortStatusRows { if_name, if_oper_status, if_high_speed, duplex, peth_admin, peth_detection }, entries))
+            }
+        })
+        .await?;
+    let entries = port_status_from(&walked.value, supports_poe);
+    let note = format!("(read over SNMP from {}:{}; {}; no console output)", target.host, target.port, walk_summary(&walked));
     Ok((entries, note))
 }
 
@@ -64,16 +97,31 @@ pub async fn fetch_port_status(
 /// answers nothing (the request times out) when walks of the FDB table overlap,
 /// so the columns can't be fetched side by side the way the interface tables are.
 pub async fn fetch_mac_table(target: &SnmpTarget) -> Result<(Vec<MacTableEntry>, String)> {
-    let session = Session::connect(target).await?;
-    let rows = session.walk(FDB_TABLE).await?;
-    let column = |wanted: &[u32]| -> Vec<_> { rows.iter().filter(|(oid, _)| oid.starts_with(wanted)).cloned().collect() };
-    let entries = mac_table_from(&MacTableRows {
-        address: column(FDB_ADDRESS),
-        port: column(FDB_PORT),
-        status: column(FDB_STATUS),
-    });
-    let note = format!("(read over SNMP from {}:{}; no console output; BRIDGE-MIB has no VLAN)", target.host, target.port);
-    Ok((entries, note))
+    let walking = target.clone();
+    let walked = MAC_GATE
+        .run(&switch_key(target), move || {
+            let target = walking.clone();
+            async move {
+                let session = Session::connect(&target).await?;
+                let rows = session.walk(FDB_TABLE).await?;
+                let column = |wanted: &[u32]| -> Vec<_> { rows.iter().filter(|(oid, _)| oid.starts_with(wanted)).cloned().collect() };
+                let entries = mac_table_from(&MacTableRows {
+                    address: column(FDB_ADDRESS),
+                    port: column(FDB_PORT),
+                    status: column(FDB_STATUS),
+                });
+                let count = entries.len();
+                Ok((entries, count))
+            }
+        })
+        .await?;
+    let note = format!(
+        "(read over SNMP from {}:{}; {}; no console output; BRIDGE-MIB has no VLAN)",
+        target.host,
+        target.port,
+        walk_summary(&walked)
+    );
+    Ok(((*walked.value).clone(), note))
 }
 
 #[cfg(test)]

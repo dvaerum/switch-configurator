@@ -7,6 +7,7 @@
 //! `lookup` ties them together per vendor.
 
 pub mod client;
+pub mod gate;
 pub mod lookup;
 pub mod mapping;
 

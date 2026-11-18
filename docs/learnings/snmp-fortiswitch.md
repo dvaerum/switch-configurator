@@ -142,3 +142,30 @@ default) and `crypto-fips` (`aws-lc-rs`); the project builds it with
 extra hashes). Not enabled: it only compiles the crypto, and using it still
 needs config fields for user/auth/priv (secrets via credentials) and a lab test
 against a real agent.
+
+## Concurrent walks make the agent return a short table, silently
+
+Measured on a bench FortiSwitch 124E (7.2.5) with ~600 learned MAC addresses,
+walking `dot1dTpFdbPort` (`snmpbulkwalk -v2c -Cr25`, no retries, nothing else
+querying the switch):
+
+| readers at once | entries returned |
+|---|---|
+| 1 (3 runs) | 600, 600, 600 |
+| 6 (18 walks) | 147 to 229, never 600 |
+
+No error, no timeout, no error PDU: the agent ends the walk with an ordinary
+end of table, so a client cannot tell a short table from a complete one. The
+same showed through the service (`GET .../mac-table?source=snmp`: 592-595
+entries for one reader, 45-140 for six, all HTTP 200) and on the IT-02876
+124F-FPOE (70, 125 and 15 entries against ~200, worse with more readers).
+`async-snmp` treats an exception value or an out-of-subtree OID as the normal
+end of a walk, which is correct for the library but means no walk-level check
+can catch this.
+
+So since 0.27.2 `snmp::gate` allows one lookup at a time per switch, lets a
+caller that arrives mid-walk share that walk (no cache: the result is dropped
+when the walk completes), and walks again (at most 3 times, keeping the
+largest result: a cut-short walk only loses rows) when a table comes back
+below 70% of the previous one. Anything else querying the same agent (a
+monitoring system) can still disturb it; the retry covers that case.
