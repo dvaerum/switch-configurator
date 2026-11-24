@@ -263,6 +263,25 @@ impl CiscoSwitch {
         None
     }
 
+    /// Commands to turn PoE off on one port (the operational PoE endpoints).
+    pub fn poe_disable_commands(&self, port_id: &str) -> Vec<String> {
+        self.poe_commands(port_id, "never")
+    }
+
+    /// Commands to turn PoE on (`auto`, which is also what apply writes) on one port.
+    pub fn poe_enable_commands(&self, port_id: &str) -> Vec<String> {
+        self.poe_commands(port_id, "auto")
+    }
+
+    fn poe_commands(&self, port_id: &str, mode: &str) -> Vec<String> {
+        vec![
+            "configure terminal".to_string(),
+            format!("interface {}", self.normalize_port_id(port_id)),
+            format!("power inline {}", mode),
+            "end".to_string(),
+        ]
+    }
+
     fn normalize_port_id(&self, port_id: &str) -> String {
         // Cisco Catalyst 9300 uses formats like "GigabitEthernet1/0/1" or "Gi1/0/1"
         // Expand short forms to full interface names
@@ -1353,6 +1372,42 @@ impl CiscoSwitch {
     }
 }
 
+/// Per-interface PoE from `show power inline`. Rows are
+/// `<Gi1/0/N> <auto|off|static> <on|off|faulty|...> <watts> <device...> <class|n/a> <max watts>`;
+/// the free-text device column (`Ieee PD`, `n/a`) is skipped by reading class and max from the end.
+pub fn parse_poe_inline_power(output: &str) -> Vec<crate::models::PoePortPower> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let f: Vec<&str> = line.split_whitespace().collect();
+            let interface = *f.first()?;
+            if !interface.starts_with("Gi") && !interface.starts_with("Te") {
+                return None;
+            }
+            let admin = *f.get(1)?;
+            if !matches!(admin, "auto" | "off" | "static") || f.len() < 7 {
+                return None;
+            }
+            Some(crate::models::PoePortPower {
+                port_id: interface.to_string(),
+                enabled: admin != "off",
+                state: f.get(2).map(|s| s.to_string()),
+                draw_watts: f.get(3).and_then(|v| v.parse().ok()),
+                class: f.get(f.len() - 2).and_then(|v| v.parse().ok()),
+                reserved_watts: f.last().and_then(|v| v.parse().ok()),
+            })
+        })
+        .collect()
+}
+
+/// The PoE setting per port number, for the first stack member (`Gi1/0/N`) only.
+pub fn parse_poe_inline_settings(output: &str) -> std::collections::HashMap<String, bool> {
+    parse_poe_inline_power(output)
+        .into_iter()
+        .filter_map(|p| Some((p.port_id.strip_prefix("Gi1/0/")?.to_string(), p.enabled)))
+        .collect()
+}
+
 /// Detect Cisco IOS's documented "% Invalid input detected" marker for a
 /// rejected/unrecognized CLI command, so a command failure surfaces as a
 /// real error instead of parsing to a false empty success (the class of
@@ -1398,6 +1453,38 @@ fn parse_mac_table(raw: &str) -> Vec<MacTableEntry> {
 
 #[cfg(test)]
 mod tests {
+
+    // Recorded from a Catalyst 9300-24U (IOS-XE 16.9), `show power inline`.
+    const SHOW_POWER_INLINE: &str = "Module   Available     Used     Remaining\r\n          (Watts)     (Watts)    (Watts) \r\n------   ---------   --------   ---------\r\n1           865.0        0.0       865.0\r\nInterface Admin  Oper       Power   Device              Class Max\r\n                            (Watts)                            \r\n--------- ------ ---------- ------- ------------------- ----- ----\r\nGi1/0/1   off    off        0.0     n/a                 n/a   60.0 \r\nGi1/0/3   auto   on         7.2     Ieee PD             2     60.0 \r\nGi1/0/24  off    off        0.0     n/a                 n/a   60.0 \r\nIT-04263#";
+
+    #[test]
+    fn poe_inline_power_is_read_per_interface() {
+        let power = parse_poe_inline_power(SHOW_POWER_INLINE);
+        assert_eq!(power.len(), 3, "{power:?}");
+        assert_eq!(power[1].port_id, "Gi1/0/3");
+        assert_eq!((power[1].enabled, power[1].state.as_deref(), power[1].class), (true, Some("on"), Some(2)));
+        assert_eq!((power[1].reserved_watts, power[1].draw_watts), (Some(60.0), Some(7.2)));
+        assert!(!power[0].enabled);
+        assert_eq!(power[0].class, None, "n/a is no class");
+    }
+
+    #[test]
+    fn poe_inline_settings_are_keyed_by_port_number_on_the_first_unit() {
+        let settings = parse_poe_inline_settings(SHOW_POWER_INLINE);
+        assert_eq!(settings.len(), 3);
+        assert!(!settings["1"] && settings["3"] && !settings["24"]);
+        assert!(parse_poe_inline_settings("% Invalid input detected at '^' marker.").is_empty());
+    }
+
+    #[test]
+    fn poe_commands_enter_the_interface_and_set_power_inline() {
+        let switch = create_test_cisco();
+        assert_eq!(
+            switch.poe_disable_commands("3"),
+            vec!["configure terminal", "interface GigabitEthernet1/0/3", "power inline never", "end"]
+        );
+        assert_eq!(switch.poe_enable_commands("Gi1/0/3")[2], "power inline auto");
+    }
     use super::*;
     use crate::models::{ConnectionType, Credentials, SnmpAccess, SnmpCommunity, SnmpConfig, TrapType, SnmpTrapReceiver, SpeedDuplex, SwitchModel, VlanIpConfig};
     use std::collections::HashMap;

@@ -28,6 +28,7 @@ pub async fn get_poe_power(State(store): State<ConfigStore>, Path(id): Path<Stri
     let (command, parse): (&str, fn(&str) -> Vec<PoePortPower>) = match (model.supports_poe(), model.vendor()) {
         (true, Vendor::Fortiswitch) => ("get switch poe inline", crate::vendors::fortiswitch::parse_poe_inline_power),
         (true, Vendor::Aruba) => ("show power-over-ethernet brief", crate::vendors::aruba::parse_poe_brief_power),
+        (true, Vendor::Cisco) => ("show power inline", crate::vendors::cisco::parse_poe_inline_power),
         _ => {
             return (
                 StatusCode::BAD_REQUEST,

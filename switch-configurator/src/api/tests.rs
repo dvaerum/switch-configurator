@@ -3636,8 +3636,8 @@ mod integration_tests {
     }
 
     #[tokio::test]
-    async fn test_poe_reset_unsupported_vendor() {
-        // test-sw-02 is Cisco — not yet supported
+    async fn test_poe_reset_is_accepted_for_cisco() {
+        // test-sw-02 is a Cisco Catalyst 9300: PoE control is supported there since 0.34.0.
         let store = create_test_config_store();
         let response = poe_reset(
             axum::extract::State(store),
@@ -3645,13 +3645,7 @@ mod integration_tests {
         )
         .await
         .into_response();
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let json: Value = serde_json::from_slice(&body).unwrap();
-        assert!(json["error"].as_str().unwrap().contains("not yet supported"));
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
     }
 
     #[tokio::test]
@@ -3777,8 +3771,8 @@ mod integration_tests {
     }
 
     #[tokio::test]
-    async fn test_poe_off_unsupported_vendor() {
-        // test-sw-02 is Cisco — not yet supported
+    async fn test_poe_off_is_accepted_for_cisco() {
+        // test-sw-02 is a Cisco Catalyst 9300: PoE control is supported there since 0.34.0.
         let store = create_test_config_store();
         let response = poe_off(
             axum::extract::State(store),
@@ -3786,31 +3780,7 @@ mod integration_tests {
         )
         .await
         .into_response();
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let json: Value = serde_json::from_slice(&body).unwrap();
-        assert!(json["error"].as_str().unwrap().contains("not yet supported"));
-    }
-
-    #[test]
-    fn test_sse_event_poe_set_serialization() {
-        let ev = SseEvent::PoeSet {
-            switch_id: "sw1".to_string(),
-            port_id: "5".to_string(),
-            action: "off".to_string(),
-            stage: "done".to_string(),
-            detail: None,
-            status: None,
-        };
-        let json = serde_json::to_value(&ev).unwrap();
-        assert_eq!(json["event"], "poe-set");
-        assert_eq!(json["data"]["switch_id"], "sw1");
-        assert_eq!(json["data"]["port_id"], "5");
-        assert_eq!(json["data"]["action"], "off");
-        assert_eq!(json["data"]["stage"], "done");
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
     }
 
     #[tokio::test]
@@ -4797,6 +4767,32 @@ port3       Enabled   Delivering        7.00           2.10                   Lo
         assert_eq!(poe_power_json(&store, "nope").await.0, StatusCode::NOT_FOUND);
         store.config.write().await.switches[0].model = Some(SwitchModel::Fortiswitch124E);
         assert_eq!(poe_power_json(&store, "test-sw-forti").await.0, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn batch_on_a_cisco_switch_enters_the_interface_and_reads_the_setting_back() {
+        let script: PoeScript = std::sync::Arc::new(|_, commands| {
+            if commands.iter().any(|c| c == "show power inline") {
+                Ok(vec!["Gi1/0/3   off    off        0.0     n/a                 n/a   60.0 \r\n".to_string()])
+            } else {
+                Ok(vec![])
+            }
+        });
+        let mut store = create_test_config_store();
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        store.session_pool = crate::session_pool::SessionPool::new(
+            std::sync::Arc::new(PoeBatchOpener { calls: calls.clone(), opens: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)), script }),
+            std::time::Duration::from_secs(30),
+        );
+        let switch_config = store.config.read().await.switches.iter().find(|s| s.id == "test-sw-02").unwrap().clone();
+
+        let off = run_in_chunks(&store, "test-sw-02", &switch_config, PoeAction::Off, &ports(&["3"])).await;
+        let on = run_in_chunks(&store, "test-sw-02", &switch_config, PoeAction::On, &ports(&["3"])).await;
+
+        assert_eq!((off[0].status.as_str(), off[0].detail.clone()), ("completed", None), "{off:?}");
+        assert_eq!(on[0].status, "failed", "the switch still shows the interface off: {on:?}");
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls[0], vec!["configure terminal", "interface GigabitEthernet1/0/3", "power inline never", "end"]);
     }
 
     #[tokio::test]

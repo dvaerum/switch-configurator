@@ -1678,7 +1678,7 @@ async fn poe_op_guard(
             .into_response());
     }
 
-    if !matches!(model.vendor(), Vendor::Aruba | Vendor::Fortiswitch) {
+    if !matches!(model.vendor(), Vendor::Aruba | Vendor::Fortiswitch | Vendor::Cisco) {
         return Err((
             StatusCode::BAD_REQUEST,
             Json(json!({"error": format!("PoE control not yet supported for {:?} switches", model.vendor())})),
@@ -1703,7 +1703,15 @@ pub(crate) fn poe_commands_for(switch_config: &SwitchConfig, port_id: &str) -> (
                 fortiswitch.poe_enable_commands(port_id),
             )
         }
-        _ => {
+        Vendor::Cisco => {
+            let cisco = vendors::cisco::CiscoSwitch::new(
+                switch_config.clone(),
+                crate::config::RuntimeConfig::default(),
+                false,
+            );
+            (cisco.poe_disable_commands(port_id), cisco.poe_enable_commands(port_id))
+        }
+        Vendor::Aruba => {
             let aruba = vendors::aruba::ArubaSwitch::new(
                 switch_config.clone(),
                 crate::config::RuntimeConfig::default(),

@@ -145,7 +145,7 @@ pub async fn poe_batch(
     if !model.supports_poe() {
         return bad_request(format!("Switch model {:?} does not support PoE", model));
     }
-    if !matches!(model.vendor(), Vendor::Aruba | Vendor::Fortiswitch) {
+    if !matches!(model.vendor(), Vendor::Aruba | Vendor::Fortiswitch | Vendor::Cisco) {
         return bad_request(format!("PoE control not yet supported for {:?} switches", model.vendor()));
     }
     let without_poe: Vec<&str> = ports.iter().filter(|p| !model.port_supports_poe(p)).map(String::as_str).collect();
@@ -454,7 +454,7 @@ pub(crate) async fn read_back(
     let (command, parse): (&str, SettingsParser) = match switch_config.model().vendor() {
         Vendor::Fortiswitch => ("get switch poe inline", crate::vendors::fortiswitch::parse_poe_inline_settings),
         Vendor::Aruba => ("show power-over-ethernet brief", crate::vendors::aruba::parse_poe_brief_settings),
-        _ => return unconfirmed("this switch type has no read-back yet".to_string()),
+        Vendor::Cisco => ("show power inline", crate::vendors::cisco::parse_poe_inline_settings),
     };
     let mut settings = HashMap::new();
     for attempt in 0..READ_BACK_ATTEMPTS {
