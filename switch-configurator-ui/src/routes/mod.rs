@@ -72,6 +72,10 @@ pub fn create_router(state: AppState) -> Router {
         .route("/save/:id/confirm", post(save::save_overlay))
         // PoE reset
         .route("/switch/:id/poe-reset/:port_id", post(switch::poe_reset))
+        // PoE tab: data, watts and batch control (proxied to the backend)
+        .route("/switch/:id/poe-data", get(switch::poe_data))
+        .route("/switch/:id/poe-power-data", get(switch::poe_power_data))
+        .route("/switch/:id/poe-batch", post(switch::poe_batch))
         // Overlay management (broken config)
         .route("/overlay/:switch_id/:filename/view", get(dashboard::view_overlay))
         .route("/overlay/:switch_id/:filename/delete", post(dashboard::delete_overlay))
@@ -110,6 +114,41 @@ mod tests {
             .body(Body::empty())
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn the_poe_data_routes_report_an_unreachable_backend_instead_of_hanging() {
+        for uri in ["/switch/sw1/poe-data", "/switch/sw1/poe-power-data"] {
+            let resp = create_router(test_state())
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_GATEWAY, "{uri}");
+        }
+        let resp = create_router(test_state())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/switch/sw1/poe-batch")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"action":"on","ports":["1"]}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+    }
+
+    #[tokio::test]
+    async fn the_poe_tab_page_is_a_get_on_the_tab_path() {
+        // Giving the batch POST the same path made this GET a 405 once; the backend is down here,
+        // so the page renders its empty-switch fallback, but it must be a page.
+        let resp = create_router(test_state())
+            .oneshot(Request::builder().uri("/switch/sw1/poe").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_ne!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
         assert_eq!(resp.status(), StatusCode::OK);
     }
 

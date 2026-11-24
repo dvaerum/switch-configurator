@@ -23,6 +23,11 @@ impl BackendClient {
         Ok(serde_json::from_slice(&body)?)
     }
 
+    /// GET that keeps the backend's status code (for passing errors through to the browser).
+    pub async fn get_with_status(&self, path: &str) -> Result<(u16, serde_json::Value)> {
+        self.request_with_status("GET", path, None).await
+    }
+
     pub async fn post(&self, path: &str, body: &serde_json::Value) -> Result<(u16, serde_json::Value)> {
         let req_body = serde_json::to_vec(body)?;
         let resp_body = self.request_with_status("POST", path, Some(req_body)).await?;

@@ -50,9 +50,10 @@ test.describe('Switch Detail View', () => {
     await expect(page.locator('body')).toContainText('192.168.1.1');
   });
 
-  test('has all 6 tabs', async ({ page }) => {
+  test('has all 7 tabs (the PoE tab only on models with PoE)', async ({ page }) => {
     await page.goto(`${UI_URL}/switch/demo-sw-01`);
-    await expect(page.locator('.tab')).toHaveCount(6);
+    await expect(page.locator('.tab')).toHaveCount(7);
+    await expect(page.locator('.tabs')).toContainText('PoE');
     await expect(page.locator('.tabs')).toContainText('Overview');
     await expect(page.locator('.tabs')).toContainText('VLANs');
     await expect(page.locator('.tabs')).toContainText('Ports');
@@ -147,6 +148,25 @@ test.describe('SNMP Tab', () => {
     await expect(page.locator('body')).toContainText('192.168.1.100');
     await expect(page.locator('body')).toContainText('mac-notify');
     await expect(page.locator('body')).toContainText('link-change');
+  });
+});
+
+test.describe('PoE Tab', () => {
+  test('shows the PoE controls and says why the state cannot be read', async ({ page }) => {
+    await page.goto(`${UI_URL}/switch/demo-sw-01/poe`);
+    await expect(page.locator('.tab.active')).toContainText('PoE');
+    await expect(page.getByRole('button', { name: 'Turn on' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Turn off' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Reset' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Show watts' })).toBeVisible();
+    // The demo Aruba cannot be read for PoE state: the panel must say so, not stay on "Loading".
+    await expect(page.locator('#poe-message')).toContainText('Could not read PoE state');
+  });
+
+  test('refuses a batch with no port selected', async ({ page }) => {
+    await page.goto(`${UI_URL}/switch/demo-sw-01/poe`);
+    await page.getByRole('button', { name: 'Turn off' }).click();
+    await expect(page.locator('#poe-message')).toContainText('Select at least one port');
   });
 });
 

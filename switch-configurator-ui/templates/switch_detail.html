@@ -23,6 +23,7 @@
     <a class="tab{% if active_tab == "ports" %} active{% endif %}" href="/switch/{{ switch.id }}/ports">Ports</a>
     <a class="tab{% if active_tab == "mirrors" %} active{% endif %}" href="/switch/{{ switch.id }}/mirrors">Mirrors</a>
     <a class="tab{% if active_tab == "snmp" %} active{% endif %}" href="/switch/{{ switch.id }}/snmp">SNMP</a>
+    {% if switch.has_poe %}<a class="tab{% if active_tab == "poe" %} active{% endif %}" href="/switch/{{ switch.id }}/poe">PoE</a>{% endif %}
     <a class="tab{% if active_tab == "sources" %} active{% endif %}" href="/switch/{{ switch.id }}/sources">Config Sources</a>
 </div>
 
@@ -36,6 +37,8 @@
             {% include "partials/mirror_table.html" %}
         {% when "snmp" %}
             {% include "partials/snmp_panel.html" %}
+        {% when "poe" %}
+            {% include "partials/poe_panel.html" %}
         {% when "sources" %}
             {% include "partials/config_sources.html" %}
         {% when _ %}

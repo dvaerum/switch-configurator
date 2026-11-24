@@ -132,6 +132,7 @@ pub async fn tab_content(
         "ports" => TabPartialTemplate { switch, tab, sources, apply }.into_response(),
         "mirrors" => TabPartialTemplate { switch, tab, sources, apply }.into_response(),
         "snmp" => TabPartialTemplate { switch, tab, sources, apply }.into_response(),
+        "poe" => TabPartialTemplate { switch, tab, sources, apply }.into_response(),
         "sources" => TabPartialTemplate { switch, tab, sources, apply }.into_response(),
         _ => TabPartialTemplate { switch, tab: "overview".to_string(), sources, apply }.into_response(),
     }
@@ -143,6 +144,7 @@ pub async fn tab_content(
     {% when "ports" %}{% include "partials/port_table.html" %}
     {% when "mirrors" %}{% include "partials/mirror_table.html" %}
     {% when "snmp" %}{% include "partials/snmp_panel.html" %}
+    {% when "poe" %}{% include "partials/poe_panel.html" %}
     {% when "sources" %}{% include "partials/config_sources.html" %}
     {% when _ %}{% include "partials/overview.html" %}
 {% endmatch %}"#, ext = "html")]
@@ -398,6 +400,40 @@ mod tests {
         assert!(!html.contains("Last apply failed"));
     }
 
+    fn detail_html(model: &str, tab: &str) -> String {
+        let switch = parse_switch_view("sw", &serde_json::json!({"model": model, "vlans": [], "ports": [], "port_mirrors": []}));
+        SwitchDetailTemplate {
+            switch,
+            active_tab: tab.into(),
+            sources: vec![],
+            apply: crate::routes::apply_status::ApplyStatus::default(),
+        }
+        .render()
+        .unwrap()
+    }
+
+    #[test]
+    fn the_poe_tab_exists_only_for_models_with_poe() {
+        assert!(detail_html("Fortiswitch124F_FPOE", "overview").contains(r#"href="/switch/sw/poe""#));
+        assert!(!detail_html("Fortiswitch124E", "overview").contains(r#"href="/switch/sw/poe""#));
+    }
+
+    #[test]
+    fn the_poe_tab_shows_the_panel_the_script_fills_in() {
+        let html = detail_html("Fortiswitch124F_FPOE", "poe");
+        assert!(html.contains(r#"id="poe-panel""#) && html.contains(r#"data-switch="sw""#), "{html}");
+        for control in ["poe-batch-on", "poe-batch-off", "poe-batch-reset", "poe-watts"] {
+            assert!(html.contains(control), "missing {control}");
+        }
+        // Switch-supplied text is only ever put in with textContent, never as HTML.
+        assert!(!html.contains("innerHTML"), "the panel script must not build HTML from switch data");
+        // base.html defines basePath only after the page content, so the panel's own script must not use it
+        // (checked on the panel alone: base.html's script legitimately does).
+        let switch = parse_switch_view("sw", &serde_json::json!({"model": "Fortiswitch124F_FPOE", "vlans": [], "ports": [], "port_mirrors": []}));
+        let panel = TabPartialTemplate { switch, tab: "poe".into(), sources: vec![], apply: Default::default() }.render().unwrap();
+        assert!(!panel.contains("basePath"), "the panel script runs before basePath exists");
+    }
+
     #[test]
     fn the_detail_view_knows_whether_the_model_has_poe() {
         let json = |model: &str| serde_json::json!({"model": model, "vlans": [], "ports": [], "port_mirrors": []});
@@ -550,4 +586,35 @@ pub async fn poe_reset(
         )
             .into_response(),
     }
+}
+
+/// Passes a backend answer (status and JSON body) through to the browser, or a
+/// 502 with the reason when the backend cannot be reached.
+fn passthrough(result: anyhow::Result<(u16, serde_json::Value)>) -> axum::response::Response {
+    match result {
+        Ok((status, body)) => {
+            let code = axum::http::StatusCode::from_u16(status).unwrap_or(axum::http::StatusCode::BAD_GATEWAY);
+            (code, axum::Json(body)).into_response()
+        }
+        Err(e) => (axum::http::StatusCode::BAD_GATEWAY, axum::Json(serde_json::json!({"error": e.to_string()}))).into_response(),
+    }
+}
+
+/// The PoE tab's data: per-port PoE state, link traps and unit totals from the backend.
+pub async fn poe_data(State(state): State<AppState>, Path(id): Path<String>) -> axum::response::Response {
+    passthrough(state.backend.get_with_status(&format!("/switches/{}/poe", id)).await)
+}
+
+/// Watts per port (a console read on the backend, so only when asked for).
+pub async fn poe_power_data(State(state): State<AppState>, Path(id): Path<String>) -> axum::response::Response {
+    passthrough(state.backend.get_with_status(&format!("/switches/{}/poe-power", id)).await)
+}
+
+/// Starts a PoE on / off / reset for several ports; progress arrives on the event stream.
+pub async fn poe_batch(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    axum::Json(body): axum::Json<serde_json::Value>,
+) -> axum::response::Response {
+    passthrough(state.backend.post(&format!("/switches/{}/poe", id), &body).await)
 }

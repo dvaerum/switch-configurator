@@ -1,0 +1,212 @@
+<div id="poe-panel" data-switch="{{ switch.id }}">
+    <div class="card">
+        <div class="flex justify-between items-center" style="gap:1rem;flex-wrap:wrap;">
+            <div>
+                <strong>PoE</strong>
+                <span id="poe-unit" class="text-sm text-muted">loading…</span>
+            </div>
+            <div class="flex items-center" style="gap:0.5rem;flex-wrap:wrap;">
+                <span id="poe-message" class="text-sm text-muted"></span>
+                <button id="poe-batch-on" class="btn text-sm" type="button">Turn on</button>
+                <button id="poe-batch-off" class="btn text-sm" type="button">Turn off</button>
+                <button id="poe-batch-reset" class="btn text-sm" type="button" style="background:var(--warning);color:white;">Reset</button>
+                <button id="poe-watts" class="btn text-sm" type="button" title="Reads the switch's console, so it can take a few seconds">Show watts</button>
+            </div>
+        </div>
+    </div>
+    <div class="card">
+        <table>
+            <thead>
+                <tr>
+                    <th><input type="checkbox" id="poe-select-all" title="Select all"></th>
+                    <th>Port</th><th>Link</th><th>PoE</th><th>State</th><th>Class</th>
+                    <th title="Draw now, from the console">Watts</th>
+                    <th title="Switch counters since it started: missing signal / invalid signature / denied / overload / short">Fault counters</th>
+                    <th title="Link down / up traps received since the service started">Link traps</th>
+                    <th>Last operation</th>
+                </tr>
+            </thead>
+            <tbody id="poe-rows"><tr><td colspan="10" class="text-muted" style="text-align:center;">Loading…</td></tr></tbody>
+        </table>
+    </div>
+</div>
+<script>
+(function () {
+    // Set by the server when the UI is served under a reverse-proxy sub-path (base.html defines
+    // its global only after the page content, so that is not available yet here).
+    var base = (document.querySelector('meta[name="base-path"]') || {}).content || '';
+    var root = document.getElementById('poe-panel');
+    var sw = root.dataset.switch;
+    var rows = document.getElementById('poe-rows');
+    var unitEl = document.getElementById('poe-unit');
+    var msgEl = document.getElementById('poe-message');
+    var watts = {};            // port number -> draw watts, once asked for
+    var running = null;        // the batch being followed, if any
+
+    // Switch-supplied text only ever goes in through textContent.
+    function key(portId) { return String(portId).replace(/^port/, ''); }
+    function setMsg(text, color) { msgEl.textContent = text; msgEl.style.color = color || 'var(--text-muted)'; }
+    function td(tr, text, title) {
+        var c = document.createElement('td');
+        c.textContent = text;
+        if (title) c.title = title;
+        tr.appendChild(c);
+        return c;
+    }
+    function describe(op) {
+        if (!op) return '';
+        var text = op.action + ': ' + op.status;
+        return op.detail ? text + ' (' + op.detail + ')' : text;
+    }
+
+    // Rows are created once per port and then updated in place, so a click or a ticked box is
+    // never lost to a refresh.
+    var COLUMNS = ['link', 'admin', 'state', 'class', 'watts', 'counters', 'traps', 'last'];
+    function rowFor(n, portId) {
+        var tr = rows.querySelector('tr[data-port="' + n + '"]');
+        if (tr) return tr;
+        tr = document.createElement('tr');
+        tr.dataset.port = n;
+        var box = document.createElement('input');
+        box.type = 'checkbox';
+        box.dataset.port = n;
+        td(tr, '').appendChild(box);
+        td(tr, portId);
+        COLUMNS.forEach(function (name) { td(tr, '-').dataset.col = name; });
+        rows.appendChild(tr);
+        return tr;
+    }
+    function put(tr, name, text, title, color) {
+        var c = tr.querySelector('td[data-col="' + name + '"]');
+        c.textContent = text;
+        c.title = title || '';
+        c.style.color = color || '';
+    }
+
+    function render(data) {
+        var unit = data.unit;
+        unitEl.textContent = unit
+            ? (unit.consumption_watts + ' W of ' + unit.budget_watts + ' W, alarm at ' + unit.threshold_percent + ' %')
+            : '';
+        var ports = data.ports || [];
+        var seen = {};
+        var placeholder = rows.querySelector('tr:not([data-port])');
+        if (placeholder && ports.length) placeholder.remove();
+        ports.forEach(function (p) {
+            var n = key(p.port_id);
+            seen[n] = true;
+            var tr = rowFor(n, p.port_id);
+            put(tr, 'link', p.link_status || '-');
+            put(tr, 'admin', p.poe_admin || '-', p.poe_admin_from ? 'confirmed by the last operation; the SNMP agent lags' : '');
+            put(tr, 'state', p.poe_status || '-');
+            put(tr, 'class', p.poe_class === null || p.poe_class === undefined ? '-' : String(p.poe_class));
+            put(tr, 'watts', watts[n] === undefined ? '-' : watts[n].toFixed(1));
+            var c = p.poe_counters;
+            put(tr, 'counters', c ? [c.mps_absent, c.invalid_signature, c.power_denied, c.overload, c.short].join(' / ') : '-');
+            var t = p.link_traps;
+            put(tr, 'traps', t ? (t.down + ' / ' + t.up) : '-', t ? ('last: ' + t.last_state + ' at ' + t.last_at) : '');
+            // A batch that is running owns this cell until it ends.
+            if (!running) put(tr, 'last', describe(p.last_operation));
+        });
+        Array.prototype.forEach.call(rows.querySelectorAll('tr[data-port]'), function (tr) {
+            if (!seen[tr.dataset.port]) tr.remove();
+        });
+        if (!ports.length && !rows.querySelector('tr')) {
+            var empty = document.createElement('tr');
+            td(empty, 'No PoE ports').colSpan = 10;
+            rows.appendChild(empty);
+        }
+    }
+
+    function load() {
+        if (document.hidden || running) return;
+        fetch(base + '/switch/' + encodeURIComponent(sw) + '/poe-data')
+            .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, body: j }; }); })
+            .then(function (res) {
+                if (res.ok) { render(res.body); if (msgEl.textContent.indexOf('Could not read PoE state') === 0) setMsg(''); }
+                else { setMsg('Could not read PoE state: ' + (res.body.error || 'unknown error'), 'var(--danger)'); }
+            })
+            .catch(function (e) { setMsg('Could not read PoE state: ' + e, 'var(--danger)'); });
+    }
+
+    function setRowStatus(port, text, color) {
+        var cell = rows.querySelector('tr[data-port="' + port + '"] td[data-col="last"]');
+        if (cell) { cell.textContent = text; cell.style.color = color || 'var(--text-muted)'; }
+    }
+
+    function batch(action) {
+        var ports = Array.prototype.map.call(rows.querySelectorAll('input[data-port]:checked'), function (b) { return b.dataset.port; });
+        if (!ports.length) { setMsg('Select at least one port.'); return; }
+        var verb = { on: 'Turn PoE on for', off: 'Turn PoE off for', reset: 'Power-cycle PoE on' }[action];
+        if (!confirm(verb + ' ' + ports.length + ' port(s): ' + ports.join(', ') + '?')) return;
+        if (running) return;
+        setMsg('Starting…');
+        var es = new EventSource(base + '/events');
+        running = es;
+        var finish = function () { if (running === es) { running = null; } es.close(); load(); };
+        es.addEventListener('poe-set', onPoe);
+        es.addEventListener('poe-reset', onPoe);
+        es.addEventListener('poe-batch', function (ev) {
+            var d; try { d = JSON.parse(ev.data).data; } catch (e) { return; }
+            if (d.switch_id !== sw) return;
+            setMsg(d.failed.length ? (d.failed.length + ' failed, ' + d.completed.length + ' completed') : ('All ' + d.completed.length + ' completed'),
+                   d.failed.length ? 'var(--danger)' : 'var(--success)');
+            finish();
+        });
+        function onPoe(ev) {
+            var d; try { d = JSON.parse(ev.data).data; } catch (e) { return; }
+            if (d.switch_id !== sw) return;
+            var n = key(d.port_id);
+            if (d.stage === 'completed') setRowStatus(n, 'completed', 'var(--success)');
+            else if (d.stage === 'failed') setRowStatus(n, 'failed: ' + (d.detail || ''), 'var(--danger)');
+            else if (d.stage === 'waiting') setRowStatus(n, 'back on in ' + d.detail + ' s…', 'var(--warning)');
+            else setRowStatus(n, d.stage + '…');
+        }
+        // Start the batch only once the event stream is live, so no early stage is missed.
+        es.onopen = function () {
+            fetch(base + '/switch/' + encodeURIComponent(sw) + '/poe-batch', {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({ action: action, ports: ports })
+            }).then(function (r) {
+                if (r.status !== 202) return r.json().then(function (j) { setMsg('Not started: ' + (j.error || r.status), 'var(--danger)'); finish(); });
+                setMsg('Running… (' + ports.length + ' ports, about 6 s each)');
+            }).catch(function (e) { setMsg('Not started: ' + e, 'var(--danger)'); finish(); });
+        };
+        // A long batch is many chunks of the console; give up following after 15 minutes.
+        setTimeout(finish, 900000);
+    }
+
+    document.getElementById('poe-batch-on').onclick = function () { batch('on'); };
+    document.getElementById('poe-batch-off').onclick = function () { batch('off'); };
+    document.getElementById('poe-batch-reset').onclick = function () { batch('reset'); };
+    document.getElementById('poe-select-all').onchange = function (e) {
+        Array.prototype.forEach.call(rows.querySelectorAll('input[data-port]'), function (b) { b.checked = e.target.checked; });
+    };
+    document.getElementById('poe-watts').onclick = function () {
+        setMsg('Reading watts from the switch…');
+        fetch(base + '/switch/' + encodeURIComponent(sw) + '/poe-power-data')
+            .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, body: j }; }); })
+            .then(function (res) {
+                if (!res.ok) { setMsg('Could not read watts: ' + (res.body.error || 'unknown error'), 'var(--danger)'); return; }
+                res.body.ports.forEach(function (p) { if (p.draw_watts !== null) watts[key(p.port_id)] = p.draw_watts; });
+                Array.prototype.forEach.call(rows.querySelectorAll('tr[data-port]'), function (tr) {
+                    var w = watts[tr.dataset.port];
+                    if (w !== undefined) tr.querySelector('td[data-col="watts"]').textContent = w.toFixed(1);
+                });
+                setMsg('Total draw ' + res.body.total_draw_watts.toFixed(1) + ' W');
+            })
+            .catch(function (e) { setMsg('Could not read watts: ' + e, 'var(--danger)'); });
+    };
+
+    // Link changes refresh at once (the backend publishes them from traps); otherwise poll.
+    var links = new EventSource(base + '/events');
+    links.addEventListener('link-change', function (ev) {
+        var d; try { d = JSON.parse(ev.data).data; } catch (e) { return; }
+        if (d.switch_id === sw) load();
+    });
+    load();
+    var timer = setInterval(load, 5000);
+    window.addEventListener('pagehide', function () { clearInterval(timer); links.close(); });
+})();
+</script>
