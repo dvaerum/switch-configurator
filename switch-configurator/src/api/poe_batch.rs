@@ -423,6 +423,9 @@ async fn drive_console(
     lost.is_some()
 }
 
+/// Turns a switch's PoE listing into port number -> setting.
+type SettingsParser = fn(&str) -> HashMap<String, bool>;
+
 /// What the read-back said about one port.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Verdict {
@@ -448,7 +451,7 @@ pub(crate) async fn read_back(
         ports.iter().map(|p| (p.to_string(), Verdict::Unconfirmed(format!("not confirmed: {}", why)))).collect()
     };
     // The command that lists every port's PoE setting, and how to read its output.
-    let (command, parse): (&str, fn(&str) -> HashMap<String, bool>) = match switch_config.model().vendor() {
+    let (command, parse): (&str, SettingsParser) = match switch_config.model().vendor() {
         Vendor::Fortiswitch => ("get switch poe inline", crate::vendors::fortiswitch::parse_poe_inline_settings),
         Vendor::Aruba => ("show power-over-ethernet brief", crate::vendors::aruba::parse_poe_brief_settings),
         _ => return unconfirmed("this switch type has no read-back yet".to_string()),
