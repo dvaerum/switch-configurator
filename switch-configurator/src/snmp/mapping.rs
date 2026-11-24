@@ -14,7 +14,7 @@
 use std::collections::BTreeMap;
 
 use super::{Row, SnmpValue};
-use crate::models::{MacTableEntry, PoeCounters, PortStatusEntry};
+use crate::models::{MacTableEntry, PoeCounters, PoeUnit, PortStatusEntry};
 
 // IF-MIB / EtherLike-MIB / POWER-ETHERNET-MIB / BRIDGE-MIB columns.
 pub const IF_NAME: &[u32] = &[1, 3, 6, 1, 2, 1, 31, 1, 1, 1, 1];
@@ -25,6 +25,12 @@ pub const PETH_PORT_ADMIN_ENABLE: &[u32] = &[1, 3, 6, 1, 2, 1, 105, 1, 1, 1, 3];
 pub const PETH_PORT_DETECTION_STATUS: &[u32] = &[1, 3, 6, 1, 2, 1, 105, 1, 1, 1, 6];
 /// The whole pethPsePortEntry row; walked once and split by column, which the 108F answers in full.
 pub const PETH_PORT_TABLE: &[u32] = &[1, 3, 6, 1, 2, 1, 105, 1, 1, 1];
+/// pethMainPseEntry (group 1 is the only row on these switches): power, status, consumption, threshold.
+pub const PETH_MAIN_PSE_TABLE: &[u32] = &[1, 3, 6, 1, 2, 1, 105, 1, 3, 1, 1];
+pub const PETH_MAIN_PSE_POWER: &[u32] = &[1, 3, 6, 1, 2, 1, 105, 1, 3, 1, 1, 2];
+pub const PETH_MAIN_PSE_OPER_STATUS: &[u32] = &[1, 3, 6, 1, 2, 1, 105, 1, 3, 1, 1, 3];
+pub const PETH_MAIN_PSE_CONSUMPTION: &[u32] = &[1, 3, 6, 1, 2, 1, 105, 1, 3, 1, 1, 4];
+pub const PETH_MAIN_PSE_THRESHOLD: &[u32] = &[1, 3, 6, 1, 2, 1, 105, 1, 3, 1, 1, 5];
 pub const PETH_PORT_MPS_ABSENT_COUNTER: &[u32] = &[1, 3, 6, 1, 2, 1, 105, 1, 1, 1, 8];
 pub const PETH_PORT_POWER_CLASS: &[u32] = &[1, 3, 6, 1, 2, 1, 105, 1, 1, 1, 10];
 pub const PETH_PORT_INVALID_SIGNATURE_COUNTER: &[u32] = &[1, 3, 6, 1, 2, 1, 105, 1, 1, 1, 11];
@@ -184,6 +190,33 @@ pub fn port_status_from(rows: &PortStatusRows, supports_poe: impl Fn(&str) -> bo
         }
     }
     entries
+}
+
+/// The unit's PoE totals from a walk of `PETH_MAIN_PSE_TABLE`; `None` when the table is empty.
+pub fn poe_unit_from(rows: &[Row]) -> Option<PoeUnit> {
+    let value = |column: &[u32]| by_index(rows, column).get(&vec![1]).and_then(SnmpValue::as_int);
+    let (budget, status, consumption, threshold) = (
+        value(PETH_MAIN_PSE_POWER),
+        value(PETH_MAIN_PSE_OPER_STATUS),
+        value(PETH_MAIN_PSE_CONSUMPTION),
+        value(PETH_MAIN_PSE_THRESHOLD),
+    );
+    if budget.is_none() && status.is_none() && consumption.is_none() && threshold.is_none() {
+        return None;
+    }
+    let watts = |v: Option<i64>| v.and_then(|n| u32::try_from(n).ok());
+    Some(PoeUnit {
+        budget_watts: watts(budget),
+        consumption_watts: watts(consumption),
+        threshold_percent: watts(threshold),
+        status: status.map(|s| match s {
+            1 => "on",
+            2 => "off",
+            3 => "faulty",
+            _ => "unknown",
+        }
+        .to_string()),
+    })
 }
 
 /// The learned MAC table in the console's shape (port = bridge port number,
@@ -348,6 +381,21 @@ mod tests {
         let port1 = entry(&entries, "port1");
         assert_eq!((port1.poe_class, port1.poe_counters.clone()), (None, None));
         assert_eq!(port1.poe_status.as_deref(), Some("searching"), "the rest still maps");
+    }
+
+    #[test]
+    fn the_poe_unit_totals_come_from_the_main_pse_table() {
+        // Recorded from the 108F: 65 W budget, operational, 0 W drawn, alarm threshold 80 %.
+        let rows: Vec<Row> = vec![
+            (PETH_MAIN_PSE_POWER.iter().chain(&[1]).copied().collect(), SnmpValue::Integer(65)),
+            (PETH_MAIN_PSE_OPER_STATUS.iter().chain(&[1]).copied().collect(), SnmpValue::Integer(1)),
+            (PETH_MAIN_PSE_CONSUMPTION.iter().chain(&[1]).copied().collect(), SnmpValue::Integer(12)),
+            (PETH_MAIN_PSE_THRESHOLD.iter().chain(&[1]).copied().collect(), SnmpValue::Integer(80)),
+        ];
+        let unit = poe_unit_from(&rows).expect("a unit");
+        assert_eq!((unit.budget_watts, unit.consumption_watts, unit.threshold_percent), (Some(65), Some(12), Some(80)));
+        assert_eq!(unit.status.as_deref(), Some("on"));
+        assert_eq!(poe_unit_from(&[]), None, "no rows, no unit");
     }
 
     #[test]

@@ -2994,23 +2994,40 @@ fn is_command_rejected(raw: &str) -> bool {
     raw.contains("command parse error") || raw.contains("Command fail. Return code")
 }
 
-/// The PoE setting of every port from `get switch poe inline` (the live
-/// state: the SNMP agent of the same switch lags 30 s behind it), keyed by
-/// port number. Rows are `portN <Enabled|Disabled> <state> ...`.
-pub fn parse_poe_inline_settings(output: &str) -> std::collections::HashMap<String, bool> {
+/// Per-port PoE power from `get switch poe inline` (the only place a FortiSwitch
+/// reports watts: its SNMP agent has none). Rows are
+/// `portN <Enabled|Disabled> <state> <max W> <consumption W> <priority> <class>`.
+pub fn parse_poe_inline_power(output: &str) -> Vec<crate::models::PoePortPower> {
     output
         .lines()
         .filter_map(|line| {
-            let mut fields = line.split_whitespace();
-            let port = fields.next()?.strip_prefix("port")?;
-            let enabled = match fields.next()? {
+            let f: Vec<&str> = line.split_whitespace().collect();
+            let port = f.first()?;
+            port.strip_prefix("port")?.parse::<u32>().ok()?;
+            let enabled = match *f.get(1)? {
                 "Enabled" => true,
                 "Disabled" => false,
                 _ => return None,
             };
-            port.parse::<u32>().ok()?;
-            Some((port.to_string(), enabled))
+            Some(crate::models::PoePortPower {
+                port_id: port.to_string(),
+                enabled,
+                state: f.get(2).map(|s| s.to_string()),
+                reserved_watts: f.get(3).and_then(|v| v.parse().ok()),
+                draw_watts: f.get(4).and_then(|v| v.parse().ok()),
+                class: f.get(6).and_then(|v| v.parse().ok()),
+            })
         })
+        .collect()
+}
+
+/// The PoE setting of every port from `get switch poe inline` (the live
+/// state: the SNMP agent of the same switch lags 30 s behind it), keyed by
+/// port number. Rows are `portN <Enabled|Disabled> <state> ...`.
+pub fn parse_poe_inline_settings(output: &str) -> std::collections::HashMap<String, bool> {
+    parse_poe_inline_power(output)
+        .into_iter()
+        .filter_map(|p| Some((p.port_id.strip_prefix("port")?.to_string(), p.enabled)))
         .collect()
 }
 
@@ -3404,6 +3421,21 @@ mod tests {
     fn test_is_command_rejected_detects_real_failure_output() {
         let raw = "get switch mac-address list\r\r\n\r\ncommand parse error before 'mac-address'\r\nCommand fail. Return code -61\r\n\r\nS124FFTF24000746 # ";
         assert!(is_command_rejected(raw));
+    }
+
+    #[test]
+    fn poe_inline_power_is_read_per_port() {
+        let raw = "Interface   Status    State             Max-Power(W)   Power-consumption(W)   Priority   Class   Error\r\n\
+------------------------------------------------------------------------------------------------------------\r\n\
+port1       Enabled   Searching         0.00           0.00                   Low        0       \r\n\
+port2       Disabled  Disabled          0.00           0.00                   Low        0       \r\n\
+port3       Enabled   Delivering        15.40          3.90                   Low        2       \r\n\r\nS108FPTV21002683 # ";
+        let power = parse_poe_inline_power(raw);
+        assert_eq!(power.len(), 3, "{power:?}");
+        assert_eq!(power[2].port_id, "port3");
+        assert_eq!((power[2].enabled, power[2].state.as_deref(), power[2].class), (true, Some("Delivering"), Some(2)));
+        assert_eq!((power[2].reserved_watts, power[2].draw_watts), (Some(15.4), Some(3.9)));
+        assert!(!power[1].enabled);
     }
 
     #[test]

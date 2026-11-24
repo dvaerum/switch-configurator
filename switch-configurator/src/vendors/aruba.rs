@@ -2407,23 +2407,35 @@ impl ArubaSwitch {
     }
 }
 
-/// The PoE setting of every port from `show power-over-ethernet brief` (the
-/// `Pwr Enab` column: `Yes` / `No`), keyed by port number.
-pub fn parse_poe_brief_settings(output: &str) -> std::collections::HashMap<String, bool> {
+/// Per-port PoE power from `show power-over-ethernet brief`. Rows are
+/// `<port> <Yes|No> <priority> <detect> <cfg> <actual> <rsrvd> W <draw> W <status> <class> <type>`.
+pub fn parse_poe_brief_power(output: &str) -> Vec<crate::models::PoePortPower> {
     output
         .lines()
         .filter_map(|line| {
-            let mut fields = line.split_whitespace();
-            let port = fields.next()?;
-            let enabled = match fields.next()? {
+            let f: Vec<&str> = line.split_whitespace().collect();
+            f.first()?.parse::<u32>().ok()?;
+            let enabled = match *f.get(1)? {
                 "Yes" => true,
                 "No" => false,
                 _ => return None,
             };
-            port.parse::<u32>().ok()?;
-            Some((port.to_string(), enabled))
+            Some(crate::models::PoePortPower {
+                port_id: f[0].to_string(),
+                enabled,
+                reserved_watts: f.get(6).and_then(|v| v.parse().ok()),
+                draw_watts: f.get(8).and_then(|v| v.parse().ok()),
+                state: f.get(10).map(|s| s.to_string()),
+                class: f.get(11).and_then(|v| v.parse().ok()),
+            })
         })
         .collect()
+}
+
+/// The PoE setting of every port from `show power-over-ethernet brief` (the
+/// `Pwr Enab` column: `Yes` / `No`), keyed by port number.
+pub fn parse_poe_brief_settings(output: &str) -> std::collections::HashMap<String, bool> {
+    parse_poe_brief_power(output).into_iter().map(|p| (p.port_id, p.enabled)).collect()
 }
 
 /// Detect ArubaOS-Switch's documented "Invalid input:" marker for a
@@ -6192,6 +6204,19 @@ interface 48
     fn test_is_command_rejected_detects_invalid_input() {
         let raw = "Invalid input: mac-address\n";
         assert!(is_command_rejected(raw));
+    }
+
+    #[test]
+    fn poe_brief_power_is_read_per_port() {
+        let raw = " 1      Yes  low      off     usage usage  0.0 W   0.0 W   Searching    0   -  \r\n \
+2      No   low      off     usage usage  0.0 W   0.0 W   Disabled     0   -  \r\n \
+3      Yes  low      off     usage usage  4.0 W   3.2 W   Delivering   2   -  \r\n";
+        let power = parse_poe_brief_power(raw);
+        assert_eq!(power.len(), 3, "{power:?}");
+        assert_eq!(power[2].port_id, "3");
+        assert_eq!((power[2].enabled, power[2].state.as_deref(), power[2].class), (true, Some("Delivering"), Some(2)));
+        assert_eq!((power[2].reserved_watts, power[2].draw_watts), (Some(4.0), Some(3.2)));
+        assert!(!power[1].enabled);
     }
 
     #[test]

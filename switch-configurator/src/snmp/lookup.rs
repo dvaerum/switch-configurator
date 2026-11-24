@@ -9,12 +9,30 @@ use anyhow::{bail, Result};
 use super::client::{Session, SnmpTarget};
 use super::gate::{Gate, Walked};
 use super::mapping::*;
-use crate::models::{MacTableEntry, PortStatusEntry, SwitchConfig};
+use crate::models::{MacTableEntry, PoeUnit, PortStatusEntry, SwitchConfig};
 
 /// The agent cuts a walk short when walks overlap (see `gate`), so every
 /// lookup goes through a gate: one at a time per switch, shared by callers.
 static MAC_GATE: LazyLock<Gate<Vec<MacTableEntry>>> = LazyLock::new(Gate::new);
 static PORT_GATE: LazyLock<Gate<PortStatusRows>> = LazyLock::new(Gate::new);
+static UNIT_GATE: LazyLock<Gate<Option<PoeUnit>>> = LazyLock::new(Gate::new);
+
+/// Walks repeated because the first result was short, per switch, since the service started.
+static REWALKS: LazyLock<std::sync::Mutex<std::collections::HashMap<String, u64>>> = LazyLock::new(Default::default);
+
+fn note_rewalks<T>(key: &str, walked: &Walked<T>) {
+    // A caller that shared another caller's walk did not walk itself.
+    if walked.shared || walked.attempts <= 1 {
+        return;
+    }
+    let mut counts = REWALKS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    *counts.entry(key.to_string()).or_insert(0) += u64::from(walked.attempts - 1);
+}
+
+/// How many extra walks the gate has needed for this switch (0 for a healthy agent).
+pub fn rewalks_for(target: &SnmpTarget) -> u64 {
+    REWALKS.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).get(&switch_key(target)).copied().unwrap_or(0)
+}
 
 fn switch_key(target: &SnmpTarget) -> String {
     format!("{}:{}", target.host, target.port)
@@ -100,9 +118,28 @@ pub async fn fetch_port_status(
             }
         })
         .await?;
+    note_rewalks(&switch_key(target), &walked);
     let entries = port_status_from(&walked.value, supports_poe);
     let note = format!("(read over SNMP from {}:{}; {}; no console output)", target.host, target.port, walk_summary(&walked));
     Ok((entries, note))
+}
+
+/// The unit's PoE totals (budget, consumption), or `None` when the switch has no PoE table.
+pub async fn fetch_poe_unit(target: &SnmpTarget) -> Result<Option<PoeUnit>> {
+    let walking = target.clone();
+    let walked = UNIT_GATE
+        .run(&switch_key(target), move || {
+            let target = walking.clone();
+            async move {
+                let session = Session::connect(&target).await?;
+                let rows = session.walk(PETH_MAIN_PSE_TABLE).await?;
+                let entries = rows.len();
+                Ok((poe_unit_from(&rows), entries))
+            }
+        })
+        .await?;
+    note_rewalks(&switch_key(target), &walked);
+    Ok((*walked.value).clone())
 }
 
 /// The learned MAC table (BRIDGE-MIB: no VLAN).
@@ -129,6 +166,7 @@ pub async fn fetch_mac_table(target: &SnmpTarget) -> Result<(Vec<MacTableEntry>,
             }
         })
         .await?;
+    note_rewalks(&switch_key(target), &walked);
     let note = format!(
         "(read over SNMP from {}:{}; {}; no console output; BRIDGE-MIB has no VLAN)",
         target.host,

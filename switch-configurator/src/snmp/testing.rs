@@ -167,9 +167,19 @@ pub fn agent_rows(groups: &[&[Row]]) -> Vec<(Vec<u32>, Value)> {
         .collect()
 }
 
+/// The 108F's main PSE row: 65 W budget, operational, 0 W drawn, alarm at 80 %.
+pub fn lab_unit_rows() -> Vec<Row> {
+    vec![
+        int(PETH_MAIN_PSE_POWER, &[1], 65),
+        int(PETH_MAIN_PSE_OPER_STATUS, &[1], 1),
+        int(PETH_MAIN_PSE_CONSUMPTION, &[1], 0),
+        int(PETH_MAIN_PSE_THRESHOLD, &[1], 80),
+    ]
+}
+
 /// All the lab FortiSwitch tables, ready for `agent_serving`.
 pub fn lab_agent_rows() -> Vec<(Vec<u32>, Value)> {
     let p = lab_port_rows();
     let f = lab_fdb();
-    agent_rows(&[&p.if_name, &p.if_oper_status, &p.if_high_speed, &p.duplex, &p.peth_admin, &p.peth_detection, &p.peth_class, &p.peth_counters, &f.address, &f.port, &f.status])
+    agent_rows(&[&p.if_name, &p.if_oper_status, &p.if_high_speed, &p.duplex, &p.peth_admin, &p.peth_detection, &p.peth_class, &p.peth_counters, &lab_unit_rows(), &f.address, &f.port, &f.status])
 }

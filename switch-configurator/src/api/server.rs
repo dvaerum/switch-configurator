@@ -34,6 +34,7 @@ pub const API_ENDPOINTS: &[&str] = &[
     "GET /switches/:id/port-status",
     "GET /metrics",
     "GET /switches/:id/poe",
+    "GET /switches/:id/poe-power",
     "POST /switches/:id/poe",
     "GET /switches/:id/poe/:port_id",
 ];
@@ -137,6 +138,7 @@ pub fn create_router(store: ConfigStore) -> Router {
         .route("/switches/:id/mac-table", get(handlers::get_mac_table))
         .route("/switches/:id/port-status", get(handlers::get_port_status))
         .route("/metrics", get(super::metrics::get_metrics))
+        .route("/switches/:id/poe-power", get(super::poe_power::get_poe_power))
         .route("/switches/:id/poe", get(handlers::get_poe).post(super::poe_batch::poe_batch))
         .route("/switches/:id/poe/:port_id", get(handlers::get_poe_port))
         // GET retrieves running config from switch hardware via SSH

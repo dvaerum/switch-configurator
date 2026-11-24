@@ -559,17 +559,32 @@ curl -X POST http://localhost:4002/switches/it-02876-sw1/poe-on/5
 | `switch_port_status_age_seconds` | `switch` | seconds since the port status was read |
 | `switch_port_link_up` | `switch`, `port` | 1 if the port has link |
 | `switch_port_poe_admin_enabled` | `switch`, `port` | 1 if PoE is enabled on the port (the setting; SNMP only) |
+| `switch_poe_budget_watts`, `switch_poe_consumption_watts`, `switch_poe_threshold_percent` | `switch` | the unit's PoE budget, what it supplies now, and the alarm threshold (percent of budget; SNMP only) |
+| `switch_snmp_rewalks_total` | `switch` | extra SNMP walks needed because a result was short, since the service started (0 for a healthy agent) |
 | `switch_port_poe_class` | `switch`, `port` | IEEE class (0-4) of the detected device; meaningful only while one is detected (SNMP only) |
 | `switch_port_poe_mps_absent_total`, `..._invalid_signature_total`, `..._power_denied_total`, `..._overload_total`, `..._short_total` | `switch`, `port` | the switch's own PoE event counters since it started (SNMP only) |
 | `switch_port_poe_state` | `switch`, `port`, `state` | state set over `disabled`, `searching`, `delivering`, `fault`, `test`, `unknown`: 1 for the current state (SNMP only) |
 
-Time since the last link change is not exported: the 108F reports 0 for every port. Per-port watts are not exported either: they are not available over SNMP (`docs/learnings/snmp-fortiswitch.md`).
+Time since the last link change is not exported: the 108F reports 0 for every port. Per-port watts are not exported either (not available over SNMP): use `GET /switches/{id}/poe-power`.
 
 ```yaml
 scrape_configs:
   - job_name: switch-configurator
     static_configs: [{targets: ["localhost:4002"]}]
 ```
+
+---
+
+### PoE Power (watts)
+
+`GET /switches/{id}/poe-power`: watts per PoE port, read from the console (FortiSwitch `get switch poe inline`, Aruba `show power-over-ethernet brief`). SNMP has no per-port watts, so this takes the switch's console turn like any console read (a busy switch gives `503` + `Retry-After` after 90 s) and is not part of `/metrics`.
+
+```json
+{"switch_id": "lab-108f", "source": "console", "total_draw_watts": 3.9,
+ "ports": [{"port_id": "port2", "enabled": true, "state": "Delivering", "class": 2, "reserved_watts": 15.4, "draw_watts": 3.9}]}
+```
+
+`reserved_watts` is the power set aside for the port (FortiSwitch max power, Aruba PSE reserved); `draw_watts` is what the device draws now. `400` for a model without PoE or a vendor without a listing, `502` when the switch prints no listing.
 
 ---
 
@@ -760,6 +775,7 @@ Per-port PoE facts for a PoE-capable switch, taken from the same cached port sta
 
 - `poe_admin`: the PoE setting (`enabled` / `disabled`). `poe_status`: what the port does with it (`searching`, `delivering`, `fault`, `disabled`, ...). `poe_class`: IEEE class 0-4 of the detected device (only meaningful while one is detected). `poe_counters`: the switch's own `mps_absent`, `invalid_signature`, `power_denied`, `overload` and `short` counts since it started. All of these come from SNMP and are `null` when the switch is read over the console.
 - **Lag:** on a FortiSwitch the SNMP agent shows a PoE change up to ~30 s after the switch applied it (`docs/learnings/snmp-fortiswitch.md`), which is why `poe_admin_from` exists.
+- `unit` (top level of `GET /switches/{id}/poe`): the switch-wide totals `budget_watts`, `consumption_watts`, `threshold_percent` and `status` (`on` / `off` / `faulty`) from the standard main-PSE table; `null` until the first SNMP read.
 - `poe_admin_from`: `last_operation` when `poe_admin` is the setting a `poe-on` / `poe-off` / `poe-reset` confirmed in the last minute instead of what the (lagging) SNMP agent reports; `null` otherwise.
 - `last_operation`: the latest `poe-on` / `poe-off` / `poe-reset` on that port since the service started, or `null`. `status` is `in-progress`, `completed` or `failed` (`detail` holds the reason). It is kept in memory only.
 - The response has the cache headers of the port-status lookup (`Age`, `Cache-Control`, `x-data-source`) but no `ETag`, because `last_operation` changes without a new snapshot.

@@ -1988,7 +1988,7 @@ fn cache_headers(
 /// Max time a request that returns its result in the response body (mac-table,
 /// port-status) waits for its turn on a busy switch before giving up with 503.
 /// A turn is ~12-14s over serial, so this covers a handful of queued operations.
-const QUEUE_MAX_WAIT_SYNC: std::time::Duration = std::time::Duration::from_secs(90);
+pub(crate) const QUEUE_MAX_WAIT_SYNC: std::time::Duration = std::time::Duration::from_secs(90);
 
 /// Max time a fire-and-forget operation (202 Accepted: apply, PoE) waits for
 /// its turn. Nobody holds an HTTP connection open for these, so it can be long.
@@ -1996,7 +1996,7 @@ pub(crate) const QUEUE_MAX_WAIT_ASYNC: std::time::Duration = std::time::Duration
 
 /// 503 for a request that waited `waited` in the switch's queue and never got
 /// its turn — retrying later is the right response, unlike a plain 409.
-fn queue_timeout_response(id: &str, waited: std::time::Duration) -> axum::response::Response {
+pub(crate) fn queue_timeout_response(id: &str, waited: std::time::Duration) -> axum::response::Response {
     let mut resp = (
         StatusCode::SERVICE_UNAVAILABLE,
         Json(json!({
@@ -2421,6 +2421,18 @@ pub(crate) async fn refresh_snmp_port_status_once(store: &ConfigStore) {
                 }
                 Err(e) => warn!("SNMP port-status refresher: '{}' failed: {:#}", switch_config.id, e),
             }
+            // The unit totals ride along; a switch without the table simply has none.
+            match crate::snmp::lookup::fetch_poe_unit(&target).await {
+                Ok(Some(unit)) => {
+                    store
+                        .poe_unit_cache
+                        .write()
+                        .await
+                        .insert(switch_config.id.clone(), crate::config::CachedPoeUnit { unit });
+                }
+                Ok(None) => {}
+                Err(e) => warn!("SNMP port-status refresher: PoE totals of '{}' failed: {:#}", switch_config.id, e),
+            }
         });
     }
     while let Some(joined) = walks.join_next().await {
@@ -2707,7 +2719,10 @@ pub async fn get_port_status(
 /// GET /switches/{id}/poe
 pub async fn get_poe(State(store): State<ConfigStore>, Path(id): Path<String>) -> axum::response::Response {
     match poe_view(&store, &id).await {
-        Ok((headers, ports)) => (StatusCode::OK, headers, Json(json!({"switch_id": id, "ports": ports}))).into_response(),
+        Ok((headers, ports)) => {
+            let unit = store.poe_unit_cache.read().await.get(&id).map(|cached| cached.unit.clone());
+            (StatusCode::OK, headers, Json(json!({"switch_id": id, "unit": unit, "ports": ports}))).into_response()
+        }
         Err(response) => response,
     }
 }

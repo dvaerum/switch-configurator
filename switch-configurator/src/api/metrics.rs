@@ -33,6 +33,23 @@ pub async fn get_metrics(State(store): State<ConfigStore>) -> Response {
     let poe_state = Family::<Labels, Gauge>::default();
     let poe_class = Family::<Labels, Gauge>::default();
     let counters: [Family<Labels, Counter>; 5] = Default::default();
+    let unit_gauges: [Family<Labels, Gauge>; 3] = Default::default();
+    let rewalks = Family::<Labels, Counter>::default();
+
+    for (switch, cached) in store.poe_unit_cache.read().await.iter() {
+        let at = labels(&[("switch", switch)]);
+        let values = [cached.unit.budget_watts, cached.unit.consumption_watts, cached.unit.threshold_percent];
+        for (family, value) in unit_gauges.iter().zip(values) {
+            if let Some(value) = value {
+                family.get_or_create(&at).set(i64::from(value));
+            }
+        }
+    }
+    for switch in store.config.read().await.switches.iter() {
+        if let Some(target) = crate::snmp::lookup::target_for(switch) {
+            rewalks.get_or_create(&labels(&[("switch", &switch.id)])).inc_by(crate::snmp::lookup::rewalks_for(&target));
+        }
+    }
 
     let now = chrono::Utc::now();
     for (switch, cached) in store.port_status_cache.read().await.iter() {
@@ -92,6 +109,22 @@ pub async fn get_metrics(State(store): State<ConfigStore>) -> Response {
     for ((name, help), family) in counter_help.into_iter().zip(counters) {
         registry.register(name, help, family);
     }
+
+    for ((name, help), family) in [
+        ("switch_poe_budget_watts", "Power the switch's PoE unit can supply"),
+        ("switch_poe_consumption_watts", "Power the switch's PoE unit supplies now"),
+        ("switch_poe_threshold_percent", "Consumption, as percent of the budget, at which the switch alarms"),
+    ]
+    .into_iter()
+    .zip(unit_gauges)
+    {
+        registry.register(name, help, family);
+    }
+    registry.register(
+        "switch_snmp_rewalks",
+        "Extra SNMP walks needed because a result was short, since the service started",
+        rewalks,
+    );
 
     let mut body = String::new();
     match encode(&mut body, &registry) {

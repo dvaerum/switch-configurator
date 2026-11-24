@@ -473,11 +473,19 @@ pub struct ConfigStore {
     pub mac_table_cache: Arc<RwLock<std::collections::HashMap<String, CachedMacTable>>>,
     /// Per-switch port-status cache, same policy as `mac_table_cache`.
     pub port_status_cache: Arc<RwLock<std::collections::HashMap<String, CachedPortStatus>>>,
+    /// Per-switch PoE unit totals (budget, consumption), refreshed over SNMP with the port status.
+    pub poe_unit_cache: Arc<RwLock<std::collections::HashMap<String, CachedPoeUnit>>>,
     /// Open vendor sessions kept between operations (see `session_pool`).
     pub session_pool: crate::session_pool::SessionPool,
     /// The latest PoE operation per (switch id, port number), kept in memory
     /// only: it is what `GET /switches/{id}/poe` reports as `last_operation`.
     pub poe_operations: Arc<std::sync::Mutex<std::collections::HashMap<(String, String), PoeOperation>>>,
+}
+
+/// A switch's PoE unit totals as last read.
+#[derive(Debug, Clone)]
+pub struct CachedPoeUnit {
+    pub unit: crate::models::PoeUnit,
 }
 
 /// `in-progress` until a stage says otherwise. `done` is the legacy
@@ -517,6 +525,7 @@ impl ConfigStore {
             validation_failures: Arc::new(RwLock::new(Vec::new())),
             mac_table_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
             port_status_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            poe_unit_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
             session_pool: crate::session_pool::SessionPool::with_vendor_sessions(),
             poe_operations: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         }

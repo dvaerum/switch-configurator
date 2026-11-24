@@ -1457,6 +1457,34 @@ pub struct PortStatusEntry {
     pub poe_counters: Option<PoeCounters>,
 }
 
+/// The switch-wide PoE totals (RFC 3621 `pethMainPseTable`), in whole watts.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, Default)]
+pub struct PoeUnit {
+    /// Power the unit can supply.
+    pub budget_watts: Option<u32>,
+    /// Power it supplies now.
+    pub consumption_watts: Option<u32>,
+    /// Consumption, as percent of the budget, at which the switch raises an alarm.
+    pub threshold_percent: Option<u32>,
+    /// `on`, `off` or `faulty`.
+    pub status: Option<String>,
+}
+
+/// One port's PoE power as the console reports it (SNMP has no per-port watts).
+#[derive(Debug, Clone, Serialize, PartialEq, Default)]
+pub struct PoePortPower {
+    pub port_id: String,
+    /// The PoE setting.
+    pub enabled: bool,
+    /// What the port does with it (`Searching`, `Delivering`, ...), as the switch prints it.
+    pub state: Option<String>,
+    pub class: Option<u8>,
+    /// Power set aside for the port (FortiSwitch: max power; Aruba: PSE reserved).
+    pub reserved_watts: Option<f64>,
+    /// Power the attached device draws now.
+    pub draw_watts: Option<f64>,
+}
+
 /// RFC 3621 per-port event counters.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct PoeCounters {

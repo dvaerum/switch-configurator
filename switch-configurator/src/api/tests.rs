@@ -4750,6 +4750,55 @@ mod integration_tests {
         assert!(on[0].detail.as_deref().unwrap().contains("still disabled"), "{on:?}");
     }
 
+    async fn poe_power_json(store: &ConfigStore, id: &str) -> (StatusCode, Value) {
+        let response = crate::api::poe_power::get_poe_power(axum::extract::State(store.clone()), axum::extract::Path(id.to_string()))
+            .await
+            .into_response();
+        let (parts, body) = response.into_parts();
+        let bytes = axum::body::to_bytes(body, usize::MAX).await.unwrap();
+        (parts.status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    }
+
+    #[tokio::test]
+    async fn poe_power_lists_watts_per_port_from_the_console() {
+        let script: PoeScript = std::sync::Arc::new(|_, _| {
+            Ok(vec![
+                "port1       Enabled   Searching         0.00           0.00                   Low        0       \r\n\
+port2       Enabled   Delivering        15.40          3.90                   Low        2       \r\n\
+port3       Enabled   Delivering        7.00           2.10                   Low        1       \r\n"
+                    .to_string(),
+            ])
+        });
+        let (store, calls, _opens) = poe_batch_store(script);
+
+        let (status, body) = poe_power_json(&store, "test-sw-forti").await;
+
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(calls.lock().unwrap()[0], vec!["get switch poe inline".to_string()]);
+        let ports = body["ports"].as_array().unwrap();
+        assert_eq!(ports.len(), 3);
+        assert_eq!(ports[1]["port_id"], "port2");
+        assert_eq!(ports[1]["draw_watts"], 3.9);
+        assert_eq!(ports[1]["class"], 2);
+        assert!((body["total_draw_watts"].as_f64().unwrap() - 6.0).abs() < 1e-9, "{body}");
+        assert!(!store.status.is_currently_configuring("test-sw-forti").await, "the turn is released");
+    }
+
+    #[tokio::test]
+    async fn poe_power_says_so_when_the_switch_prints_no_listing() {
+        let (store, _calls, _opens) = poe_batch_store(accept_all());
+        let (status, body) = poe_power_json(&store, "test-sw-forti").await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+    }
+
+    #[tokio::test]
+    async fn poe_power_refuses_unknown_switches_and_models_without_poe() {
+        let (store, _calls, _opens) = poe_batch_store(accept_all());
+        assert_eq!(poe_power_json(&store, "nope").await.0, StatusCode::NOT_FOUND);
+        store.config.write().await.switches[0].model = Some(SwitchModel::Fortiswitch124E);
+        assert_eq!(poe_power_json(&store, "test-sw-forti").await.0, StatusCode::BAD_REQUEST);
+    }
+
     #[tokio::test]
     async fn batch_without_a_readable_setting_completes_with_a_not_confirmed_note() {
         // The read-back prints nothing usable (accept_all returns no output at all).
@@ -4760,6 +4809,107 @@ mod integration_tests {
 
         assert_eq!(outcomes[0].status, "completed");
         assert!(outcomes[0].detail.as_deref().unwrap().starts_with("not confirmed"), "{outcomes:?}");
+    }
+
+    // ---- /metrics ----
+
+    async fn metrics_text(store: &ConfigStore) -> (StatusCode, String, String) {
+        let response = crate::api::metrics::get_metrics(axum::extract::State(store.clone())).await.into_response();
+        let (parts, body) = response.into_parts();
+        let bytes = axum::body::to_bytes(body, usize::MAX).await.unwrap();
+        let content_type = parts.headers.get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+        (parts.status, content_type, String::from_utf8(bytes.to_vec()).unwrap())
+    }
+
+    fn poe_entry(name: &str, link: &str, admin: Option<&str>, state: Option<&str>) -> crate::models::PortStatusEntry {
+        crate::models::PortStatusEntry {
+            port_id: name.into(),
+            link_status: Some(link.into()),
+            poe_admin: admin.map(String::from),
+            poe_status: state.map(String::from),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn metrics_publish_the_cached_port_facts_without_asking_the_switch() {
+        let (store, _calls, opens) = poe_batch_store(accept_all());
+        store.port_status_cache.write().await.insert(
+            "test-sw-forti".to_string(),
+            crate::config::CachedPortStatus {
+                entries: vec![
+                    poe_entry("port1", "up", Some("enabled"), Some("delivering")),
+                    poe_entry("port2", "down", Some("disabled"), Some("disabled")),
+                    poe_entry("internal", "up", None, None),
+                ],
+                raw_output: String::new(),
+                fetched_at: chrono::Utc::now() - chrono::Duration::seconds(12),
+                generation_id: uuid::Uuid::new_v4(),
+            },
+        );
+
+        let (status, content_type, body) = metrics_text(&store).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(content_type.starts_with("text/plain"), "{content_type}");
+        for line in [
+            r#"switch_port_link_up{switch="test-sw-forti",port="port1"} 1"#,
+            r#"switch_port_link_up{switch="test-sw-forti",port="port2"} 0"#,
+            r#"switch_port_poe_admin_enabled{switch="test-sw-forti",port="port1"} 1"#,
+            r#"switch_port_poe_admin_enabled{switch="test-sw-forti",port="port2"} 0"#,
+            r#"switch_port_poe_state{switch="test-sw-forti",port="port1",state="delivering"} 1"#,
+            r#"switch_port_poe_state{switch="test-sw-forti",port="port1",state="searching"} 0"#,
+            r#"switch_port_poe_state{switch="test-sw-forti",port="port2",state="disabled"} 1"#,
+        ] {
+            assert!(body.contains(line), "missing {line}\n{body}");
+        }
+        assert!(!body.contains(r#"port="internal",state"#) && !body.contains(r#"poe_admin_enabled{switch="test-sw-forti",port="internal""#),
+            "a port without PoE facts has no PoE series:\n{body}");
+        let age_line = body.lines().find(|l| l.starts_with("switch_port_status_age_seconds{")).expect("age series");
+        let age: f64 = age_line.rsplit(' ').next().unwrap().parse().unwrap();
+        assert!((12.0..60.0).contains(&age), "{age_line}");
+        assert_eq!(opens.load(std::sync::atomic::Ordering::SeqCst), 0, "a scrape never opens a console session");
+    }
+
+    #[tokio::test]
+    async fn metrics_are_empty_for_a_switch_without_cached_data_rather_than_zero() {
+        let store = create_fortiswitch_test_store();
+
+        let (status, _, body) = metrics_text(&store).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(!body.contains("test-sw-forti"), "no data means no series, not zeros:\n{body}");
+    }
+
+    #[tokio::test]
+    async fn metrics_publish_poe_class_and_the_fault_counters() {
+        let store = create_fortiswitch_test_store();
+        let mut port = poe_entry("port1", "up", Some("enabled"), Some("delivering"));
+        port.poe_class = Some(3);
+        port.poe_counters = Some(crate::models::PoeCounters { mps_absent: 5, invalid_signature: 1, power_denied: 2, overload: 7, short: 4 });
+        store.port_status_cache.write().await.insert(
+            "test-sw-forti".to_string(),
+            crate::config::CachedPortStatus {
+                entries: vec![port, poe_entry("port2", "down", Some("enabled"), Some("searching"))],
+                raw_output: String::new(),
+                fetched_at: chrono::Utc::now(),
+                generation_id: uuid::Uuid::new_v4(),
+            },
+        );
+
+        let (_, _, body) = metrics_text(&store).await;
+
+        for line in [
+            r#"switch_port_poe_class{switch="test-sw-forti",port="port1"} 3"#,
+            r#"switch_port_poe_mps_absent_total{switch="test-sw-forti",port="port1"} 5"#,
+            r#"switch_port_poe_invalid_signature_total{switch="test-sw-forti",port="port1"} 1"#,
+            r#"switch_port_poe_power_denied_total{switch="test-sw-forti",port="port1"} 2"#,
+            r#"switch_port_poe_overload_total{switch="test-sw-forti",port="port1"} 7"#,
+            r#"switch_port_poe_short_total{switch="test-sw-forti",port="port1"} 4"#,
+        ] {
+            assert!(body.contains(line), "missing {line}\n{body}");
+        }
+        assert!(!body.contains(r#"switch_port_poe_class{switch="test-sw-forti",port="port2""#), "no class means no series:\n{body}");
     }
 
     // ---- SNMP community secrets through the API ----
@@ -4925,6 +5075,35 @@ mod integration_tests {
         refresh_snmp_port_status_once(&store).await;
 
         assert!(store.port_status_cache.read().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_snmp_refresher_also_caches_the_poe_unit_totals_and_poe_read_and_metrics_show_them() {
+        let (addr, _agent) = agent_serving(lab_agent_rows()).await;
+        let (store, _opener) = forti_store_with_snmp(addr.port(), SnmpReadsMode::Auto).await;
+
+        refresh_snmp_port_status_once(&store).await;
+
+        let unit = store.poe_unit_cache.read().await["test-sw-forti"].unit.clone();
+        assert_eq!((unit.budget_watts, unit.consumption_watts), (Some(65), Some(0)));
+        let (_, _, body) = poe_json(&store, None).await;
+        assert_eq!(body["unit"]["budget_watts"], 65, "{body}");
+        let (_, _, metrics) = metrics_text(&store).await;
+        assert!(metrics.contains(r#"switch_poe_budget_watts{switch="test-sw-forti"} 65"#), "{metrics}");
+        assert!(metrics.contains(r#"switch_poe_consumption_watts{switch="test-sw-forti"} 0"#), "{metrics}");
+    }
+
+    #[tokio::test]
+    async fn metrics_count_the_rewalks_a_short_snmp_table_caused() {
+        // A serving agent that is hit by overlapping walks answers short; the gate then walks again.
+        // Here only the bookkeeping is checked: the counter starts at zero for a healthy switch.
+        let (addr, _agent) = agent_serving(lab_agent_rows()).await;
+        let (store, _opener) = forti_store_with_snmp(addr.port(), SnmpReadsMode::Auto).await;
+        refresh_snmp_port_status_once(&store).await;
+
+        let (_, _, metrics) = metrics_text(&store).await;
+
+        assert!(metrics.contains(r#"switch_snmp_rewalks_total{switch="test-sw-forti"} 0"#), "{metrics}");
     }
 
     #[tokio::test]
@@ -5145,6 +5324,19 @@ mod integration_tests {
 
         assert_eq!(body["port"]["poe_admin"], "enabled", "an old operation no longer overrides what the switch reports: {body}");
         assert!(body["port"]["poe_admin_from"].is_null());
+    }
+
+    #[tokio::test]
+    async fn poe_read_includes_class_and_counters_when_the_switch_reports_them() {
+        let (addr, _agent) = agent_serving(lab_agent_rows()).await;
+        let (store, _opener) = forti_store_with_snmp(addr.port(), SnmpReadsMode::Auto).await;
+
+        let (status, _, body) = poe_json(&store, Some("2")).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["port"]["poe_class"], 0);
+        assert_eq!(body["port"]["poe_counters"]["overload"], 0);
+        assert_eq!(body["port"]["poe_counters"]["mps_absent"], 0);
     }
 
     #[tokio::test]
