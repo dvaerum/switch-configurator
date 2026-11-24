@@ -175,8 +175,11 @@ needed here.
   poll interval) and is published on our own `/events` SSE stream with its
   origin (`poll` | `trap`). Polling stays as the fallback, so a missed trap only
   costs freshness.
-- FortiSwitch traps used: standard `linkUp`/`linkDown` and the RFC 3621 PoE
-  on/off notification; verify on the lab 108F before relying on them.
+- FortiSwitch traps (measured on the 108F, `docs/learnings/snmp-fortiswitch.md`):
+  standard `linkUp`/`linkDown` arrive within ~1 s; **there is no PoE trap**
+  (only an `entConfigChange`). So a trap refreshes link state at once, and PoE
+  state keeps being polled. A trap-driven link-flap counter is possible and
+  would be raw data (a counter of received traps), not a verdict.
 
 ### Release order and later work
 R0 → R1 → R2 → R3 → (crate step) → R4. Watts and a native `execute poe-reset`

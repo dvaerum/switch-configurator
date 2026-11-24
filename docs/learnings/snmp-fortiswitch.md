@@ -185,3 +185,9 @@ Measured on the lab 108F, no PoE device attached.
 - **`ifLastChange` is 0 for every interface**, including ports that just came up, so "time since the last link change" cannot be read from this agent.
 - Console timing: about 6 s per port for a PoE command list on the serial console; `execute poe-reset <port>` returns silently after about 1 s (what it does to the port was not measured).
 
+## Traps the 108F sends (7.2.8)
+Measured with `snmptrapd` on another host and a community with `trap-v2c-status enable` and `trap-v2c-rport` set to the listener's port (the receiver is the community's `config hosts` entry).
+- **Standard `IF-MIB::linkDown` / `linkUp` traps arrive within about a second** of an admin or physical link change, with `ifIndex`, `ifDescr` (`port9`), `ifAdminStatus`, `ifOperStatus`, plus the serial number (`enterprises.12356.106.1.1.1.0`) and `sysName`.
+- **`ENTITY-MIB::entConfigChange` (`mib-2.47.2.0.1`) is sent on every configuration change**, including a PoE setting change.
+- **There is no PoE trap.** Turning PoE off and on for a port produced only the config-change trap, no `pethPsePortOnOffNotification`. The community's `events` list is `cpu-high mem-low log-full intf-ip ent-conf-change llv sensor-fault sensor-alarm fan-detect psu-status ip-conflict tkmem-hb-oo-sync`. PoE state therefore has to be polled; traps can only speed up link state.
+
