@@ -164,27 +164,20 @@ and changelog entry. Principle: **publish raw facts, draw no conclusions**
   the unit totals from `pethMainPseTable` (65 W budget, consumption).
 - No auth (closed lab network); binds wherever the API binds.
 
-### Prerequisite for R4 — shared library crate (other repo, needs its owner's OK)
-Extract the trap listener and the known-trap decoding from
-`snmp-trap-event-handler` into a small library crate used by both programs
-(git pin), instead of copying it. That repo's bulk (hooks, Kea, store) is not
-needed here.
-
-### R4 — 0.31.0: SNMP traps inside the service
-- Embedded listener (address and port configurable, so it can sit beside the
-  router's handler that owns 162); each switch is told where to send traps.
-- A link or PoE trap refreshes that switch's cache at once (≈ 1 s instead of the
-  poll interval) and is published on our own `/events` SSE stream with its
-  origin (`poll` | `trap`). Polling stays as the fallback, so a missed trap only
-  costs freshness.
-- FortiSwitch traps (measured on the 108F, `docs/learnings/snmp-fortiswitch.md`):
-  standard `linkUp`/`linkDown` arrive within ~1 s; **there is no PoE trap**
-  (only an `entConfigChange`). So a trap refreshes link state at once, and PoE
-  state keeps being polled. A trap-driven link-flap counter is possible and
-  would be raw data (a counter of received traps), not a verdict.
+### R4 — 0.33.0: SNMP traps inside the service (shipped)
+- `--trap-listen <address:port>` / NixOS `trapListen`; the listener uses the
+  `NotificationReceiver` of `async-snmp`, which the service already depends on.
+  **Deviation from the interview:** no shared library crate with
+  `snmp-trap-event-handler` was needed, so that repo is untouched (it keeps its
+  own listener; choose a different port, or none, when both run on one host).
+- Measured on the 108F (`docs/learnings/snmp-fortiswitch.md`): `linkDown` /
+  `linkUp` arrive within ~1 s; **there is no PoE trap** (only a config-change
+  trap). A link trap is counted per port (raw, no verdict), published as a
+  `link-change` event, shown in `GET /poe` and `/metrics`, and refreshes that
+  switch's port status at once. PoE state keeps being polled.
 
 ### Release order and later work
-R0 → R1 → R2 → R3 → (crate step) → R4. Watts and a native `execute poe-reset`
+R0 → R1 → R2 → R3 → R4 (all shipped). Watts and a native `execute poe-reset`
 stay open until hardware evidence exists (H4/H5).
 
 ## Hardware plan (needed before R1/R4; nothing is guessed)

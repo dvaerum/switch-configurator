@@ -8,6 +8,7 @@ mod redact;
 mod secrets;
 mod session_pool;
 mod snmp;
+mod traps;
 mod snmp_reads;
 mod ssh;
 mod status;
@@ -18,7 +19,7 @@ mod watcher;
 use anyhow::Result;
 use clap::Parser;
 use std::path::PathBuf;
-use tracing::{info, warn, Level};
+use tracing::{error, info, warn, Level};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -26,6 +27,11 @@ struct Args {
     /// Configuration file path
     #[arg(long, default_value = "config.yaml")]
     config_file: PathBuf,
+
+    /// Receive SNMP traps on this `address:port` (e.g. `0.0.0.0:1162`; port 162 needs
+    /// privileges). Traps are matched to switches by their `management_ip`.
+    #[arg(long)]
+    trap_listen: Option<String>,
 
     /// Configuration folders to scan for additional YAML files (can be specified multiple times)
     #[arg(long)]
@@ -227,6 +233,14 @@ async fn main() -> Result<()> {
     // for why a panic in one refresh cycle can't take down the service).
     tokio::spawn(api::handlers::spawn_lookup_refresher(store.clone()));
     tokio::spawn(api::handlers::spawn_snmp_port_status_refresher(store.clone()));
+    if let Some(listen) = args.trap_listen.clone() {
+        let trap_store = store.clone();
+        tokio::spawn(async move {
+            if let Err(e) = traps::run(trap_store, listen.clone()).await {
+                error!("SNMP trap listener on {} failed: {:#}", listen, e);
+            }
+        });
+    }
 
     // Start file watcher if enabled
     let watcher_handle = if args.watch {

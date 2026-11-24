@@ -69,6 +69,18 @@ in
       description = "Port for the REST API server";
     };
 
+    trapListen = mkOption {
+      type = types.nullOr types.str;
+      default = null;
+      example = "0.0.0.0:1162";
+      description = ''
+        `address:port` to receive SNMP traps on (UDP), or `null` to receive none.
+        Point the switches' trap receivers at it. Port 162 needs privileges, so
+        use a port above 1024 (the NixOS firewall is not opened by this option).
+        Traps are matched to switches by their `management_ip`.
+      '';
+    };
+
     listenAddress = mkOption {
       type = types.str;
       default = "0.0.0.0";
@@ -291,6 +303,7 @@ in
             } \
             --port ${toString cfg.port} \
             --listen-address ${cfg.listenAddress} \
+            ${optionalString (cfg.trapListen != null) "--trap-listen ${cfg.trapListen}"} \
             ${optionalString (cfg.socketPath != null) "--socket ${cfg.socketPath}"} \
             ${if cfg.enableFileWatching then "--watch" else "--watch=false"} \
             ${if cfg.applyOnStartup then "--apply-on-startup" else ""} \

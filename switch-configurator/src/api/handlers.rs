@@ -37,6 +37,7 @@ pub async fn events(
                         crate::config::SseEvent::PoeReset { .. } => "poe-reset",
                         crate::config::SseEvent::PoeSet { .. } => "poe-set",
                         crate::config::SseEvent::PoeBatch { .. } => "poe-batch",
+                        crate::config::SseEvent::LinkChange { .. } => "link-change",
                     };
                     Some(Ok(axum::response::sse::Event::default()
                         .event(event_name)
@@ -2381,6 +2382,43 @@ pub async fn spawn_snmp_port_status_refresher(store: ConfigStore) {
     }
 }
 
+/// Re-reads one switch's port status and PoE totals over SNMP into the caches.
+/// A switch without SNMP reads is skipped; one that does not answer keeps its
+/// previous entries.
+pub(crate) async fn refresh_snmp_port_status_of(store: &ConfigStore, switch_config: &SwitchConfig) {
+    if switch_config.model().vendor() != Vendor::Fortiswitch {
+        return;
+    }
+    let Some(target) = crate::snmp::lookup::target_for(switch_config) else {
+        return;
+    };
+    let model = switch_config.model();
+    let poe = |name: &str| model.port_supports_poe(name.strip_prefix("port").unwrap_or(name));
+    match crate::snmp::lookup::fetch_port_status(&target, poe).await {
+        Ok((entries, raw)) => {
+            store.port_status_cache.write().await.insert(
+                switch_config.id.clone(),
+                crate::config::CachedPortStatus {
+                    entries,
+                    raw_output: raw,
+                    fetched_at: chrono::Utc::now(),
+                    generation_id: uuid::Uuid::new_v4(),
+                },
+            );
+            debug!("SNMP port-status refresher: refreshed '{}'", switch_config.id);
+        }
+        Err(e) => warn!("SNMP port-status refresher: '{}' failed: {:#}", switch_config.id, e),
+    }
+    // The unit totals ride along; a switch without the table simply has none.
+    match crate::snmp::lookup::fetch_poe_unit(&target).await {
+        Ok(Some(unit)) => {
+            store.poe_unit_cache.write().await.insert(switch_config.id.clone(), crate::config::CachedPoeUnit { unit });
+        }
+        Ok(None) => {}
+        Err(e) => warn!("SNMP port-status refresher: PoE totals of '{}' failed: {:#}", switch_config.id, e),
+    }
+}
+
 /// One round of `spawn_snmp_port_status_refresher`: every FortiSwitch with SNMP
 /// reads is walked concurrently. It takes no console turn (SNMP does not use
 /// the console), so a long apply or PoE operation does not stall it. A switch
@@ -2399,41 +2437,8 @@ pub(crate) async fn refresh_snmp_port_status_once(store: &ConfigStore) {
 
     let mut walks = tokio::task::JoinSet::new();
     for switch_config in switches {
-        let Some(target) = crate::snmp::lookup::target_for(&switch_config) else {
-            continue;
-        };
         let store = store.clone();
-        walks.spawn(async move {
-            let model = switch_config.model();
-            let poe = |name: &str| model.port_supports_poe(name.strip_prefix("port").unwrap_or(name));
-            match crate::snmp::lookup::fetch_port_status(&target, poe).await {
-                Ok((entries, raw)) => {
-                    store.port_status_cache.write().await.insert(
-                        switch_config.id.clone(),
-                        crate::config::CachedPortStatus {
-                            entries,
-                            raw_output: raw,
-                            fetched_at: chrono::Utc::now(),
-                            generation_id: uuid::Uuid::new_v4(),
-                        },
-                    );
-                    debug!("SNMP port-status refresher: refreshed '{}'", switch_config.id);
-                }
-                Err(e) => warn!("SNMP port-status refresher: '{}' failed: {:#}", switch_config.id, e),
-            }
-            // The unit totals ride along; a switch without the table simply has none.
-            match crate::snmp::lookup::fetch_poe_unit(&target).await {
-                Ok(Some(unit)) => {
-                    store
-                        .poe_unit_cache
-                        .write()
-                        .await
-                        .insert(switch_config.id.clone(), crate::config::CachedPoeUnit { unit });
-                }
-                Ok(None) => {}
-                Err(e) => warn!("SNMP port-status refresher: PoE totals of '{}' failed: {:#}", switch_config.id, e),
-            }
-        });
+        walks.spawn(async move { refresh_snmp_port_status_of(&store, &switch_config).await });
     }
     while let Some(joined) = walks.join_next().await {
         if let Err(e) = joined {
@@ -2810,6 +2815,7 @@ async fn poe_view(
     parts.headers.remove(axum::http::header::CONTENT_TYPE);
 
     let operations = store.poe_operations.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
+    let link_traps = store.link_traps.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
     let model = switch_config.model();
     let ports = entries
         .into_iter()
@@ -2832,6 +2838,7 @@ async fn poe_view(
                 "poe_class": e.poe_class,
                 "poe_counters": e.poe_counters,
                 "last_operation": last,
+                "link_traps": link_traps.get(&(id.to_string(), number.clone())),
             })
         })
         .collect();

@@ -413,6 +413,15 @@ pub enum SseEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         status: Option<String>,
     },
+    /// A port's link changed, as reported by a trap from the switch (`source` is `trap`).
+    #[serde(rename = "link-change")]
+    LinkChange {
+        switch_id: String,
+        port_id: String,
+        /// `up` or `down`.
+        state: String,
+        source: String,
+    },
     /// The outcome of a whole batch (`POST /switches/{id}/poe`), sent after
     /// every port's own terminal event. `status` is `failed` when any port failed.
     #[serde(rename = "poe-batch")]
@@ -475,11 +484,25 @@ pub struct ConfigStore {
     pub port_status_cache: Arc<RwLock<std::collections::HashMap<String, CachedPortStatus>>>,
     /// Per-switch PoE unit totals (budget, consumption), refreshed over SNMP with the port status.
     pub poe_unit_cache: Arc<RwLock<std::collections::HashMap<String, CachedPoeUnit>>>,
+    /// Link traps received per (switch id, port number), since the service started.
+    pub link_traps: Arc<std::sync::Mutex<std::collections::HashMap<(String, String), LinkTraps>>>,
     /// Open vendor sessions kept between operations (see `session_pool`).
     pub session_pool: crate::session_pool::SessionPool,
     /// The latest PoE operation per (switch id, port number), kept in memory
     /// only: it is what `GET /switches/{id}/poe` reports as `last_operation`.
     pub poe_operations: Arc<std::sync::Mutex<std::collections::HashMap<(String, String), PoeOperation>>>,
+}
+
+/// How often a port's link went down and up according to traps, and the latest.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct LinkTraps {
+    /// The port as the switch names it in the trap (`port9`).
+    pub port_id: String,
+    pub down: u64,
+    pub up: u64,
+    /// `up` or `down`.
+    pub last_state: String,
+    pub last_at: chrono::DateTime<chrono::Utc>,
 }
 
 /// A switch's PoE unit totals as last read.
@@ -526,6 +549,7 @@ impl ConfigStore {
             mac_table_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
             port_status_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
             poe_unit_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            link_traps: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             session_pool: crate::session_pool::SessionPool::with_vendor_sessions(),
             poe_operations: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         }
@@ -538,6 +562,26 @@ impl ConfigStore {
         self.record_poe_operation(&event);
         // No receiver is the normal case when nobody watches the event stream.
         let _ = self.events.send(event);
+    }
+
+    /// Counts one link trap for the port (`up` or `down`).
+    pub fn record_link_trap(&self, switch_id: &str, port: &str, state: &str) {
+        let number = port.strip_prefix("port").unwrap_or(port).to_string();
+        let mut traps = self.link_traps.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let entry = traps.entry((switch_id.to_string(), number)).or_insert_with(|| LinkTraps {
+            port_id: port.to_string(),
+            down: 0,
+            up: 0,
+            last_state: state.to_string(),
+            last_at: chrono::Utc::now(),
+        });
+        if state == "down" {
+            entry.down += 1;
+        } else {
+            entry.up += 1;
+        }
+        entry.last_state = state.to_string();
+        entry.last_at = chrono::Utc::now();
     }
 
     /// Keeps `poe_operations` in step with the PoE events, which every PoE

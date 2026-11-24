@@ -4912,6 +4912,108 @@ port3       Enabled   Delivering        7.00           2.10                   Lo
         assert!(!body.contains(r#"switch_port_poe_class{switch="test-sw-forti",port="port2""#), "no class means no series:\n{body}");
     }
 
+    // ---- link traps ----
+
+    use async_snmp::{Oid, Value as SnmpValue, VarBind};
+    use crate::traps::{link_trap, LinkState};
+
+    fn link_down_oid() -> Oid {
+        Oid::from_slice(&[1, 3, 6, 1, 6, 3, 1, 1, 5, 3])
+    }
+
+    fn link_up_oid() -> Oid {
+        Oid::from_slice(&[1, 3, 6, 1, 6, 3, 1, 1, 5, 4])
+    }
+
+    /// The varbinds a FortiSwitch 108F puts in a linkDown/linkUp trap (recorded with snmptrapd).
+    fn link_varbinds(index: u32, descr: &str, oper: i32) -> Vec<VarBind> {
+        vec![
+            VarBind::new(Oid::from_slice(&[1, 3, 6, 1, 2, 1, 2, 2, 1, 1, index]), SnmpValue::Integer(index as i32)),
+            VarBind::new(Oid::from_slice(&[1, 3, 6, 1, 2, 1, 2, 2, 1, 2, index]), SnmpValue::OctetString(descr.as_bytes().to_vec().into())),
+            VarBind::new(Oid::from_slice(&[1, 3, 6, 1, 2, 1, 2, 2, 1, 8, index]), SnmpValue::Integer(oper)),
+        ]
+    }
+
+    #[test]
+    fn link_traps_are_recognised_with_the_port_name_from_the_trap() {
+        let down = link_trap(&link_down_oid(), &link_varbinds(9, "port9", 2)).expect("linkDown");
+        assert_eq!((down.state, down.port.as_str()), (LinkState::Down, "port9"));
+        let up = link_trap(&link_up_oid(), &link_varbinds(9, "port9", 1)).expect("linkUp");
+        assert_eq!(up.state, LinkState::Up);
+        // Without ifDescr the interface number is all there is.
+        let bare = link_trap(&link_up_oid(), &link_varbinds(9, "port9", 1)[..1]).expect("linkUp");
+        assert_eq!(bare.port, "9");
+        // The config-change trap the switch sends on every change is not a link event.
+        assert!(link_trap(&Oid::from_slice(&[1, 3, 6, 1, 2, 1, 47, 2, 0, 1]), &[]).is_none());
+    }
+
+    #[tokio::test]
+    async fn a_link_trap_from_a_known_switch_is_counted_and_published_and_other_sources_are_ignored() {
+        let store = create_fortiswitch_test_store();
+        store.config.write().await.switches[0].management_ip = Some("127.0.0.1".to_string());
+        let mut rx = store.events.subscribe();
+
+        crate::traps::handle_link_trap(&store, "127.0.0.1".parse().unwrap(), &link_down_oid(), &link_varbinds(9, "port9", 2)).await;
+        crate::traps::handle_link_trap(&store, "127.0.0.1".parse().unwrap(), &link_down_oid(), &link_varbinds(9, "port9", 2)).await;
+        crate::traps::handle_link_trap(&store, "127.0.0.1".parse().unwrap(), &link_up_oid(), &link_varbinds(9, "port9", 1)).await;
+        crate::traps::handle_link_trap(&store, "203.0.113.9".parse().unwrap(), &link_down_oid(), &link_varbinds(9, "port9", 2)).await;
+
+        let counts = store.link_traps.lock().unwrap().get(&("test-sw-forti".to_string(), "9".to_string())).cloned().expect("counted");
+        assert_eq!((counts.down, counts.up, counts.last_state.as_str()), (2, 1, "up"));
+        assert_eq!(store.link_traps.lock().unwrap().len(), 1, "a trap from an unknown address counts nowhere");
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            let json = serde_json::to_value(&event).unwrap();
+            if json["event"] == "link-change" {
+                events.push((json["data"]["port_id"].as_str().unwrap().to_string(), json["data"]["state"].as_str().unwrap().to_string()));
+            }
+        }
+        assert_eq!(events, vec![("port9".to_string(), "down".to_string()), ("port9".to_string(), "down".to_string()), ("port9".to_string(), "up".to_string())]);
+    }
+
+    #[tokio::test]
+    async fn a_trap_sent_over_udp_reaches_the_counters() {
+        let store = create_fortiswitch_test_store();
+        store.config.write().await.switches[0].management_ip = Some("127.0.0.1".to_string());
+        let receiver = async_snmp::NotificationReceiver::bind("127.0.0.1:0").await.expect("bind");
+        let addr = receiver.local_addr();
+        let serving = tokio::spawn(crate::traps::serve(store.clone(), receiver));
+
+        let client = async_snmp::Client::builder((addr.ip().to_string(), addr.port()), async_snmp::Auth::v2c("public"))
+            .connect()
+            .await
+            .expect("client");
+        client.send_trap(&link_down_oid(), 1234, link_varbinds(5, "port5", 2)).await.expect("send");
+
+        let mut seen = false;
+        for _ in 0..50 {
+            if store.link_traps.lock().unwrap().contains_key(&("test-sw-forti".to_string(), "5".to_string())) {
+                seen = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        serving.abort();
+        assert!(seen, "the trap never arrived");
+        assert_eq!(store.link_traps.lock().unwrap()[&("test-sw-forti".to_string(), "5".to_string())].down, 1);
+    }
+
+    #[tokio::test]
+    async fn poe_read_and_metrics_show_the_link_trap_counts() {
+        let store = store_with_admin_enabled_in_the_snmp_cache().await;
+        store.config.write().await.switches[0].management_ip = Some("127.0.0.1".to_string());
+        crate::traps::handle_link_trap(&store, "127.0.0.1".parse().unwrap(), &link_down_oid(), &link_varbinds(1, "port1", 2)).await;
+        crate::traps::handle_link_trap(&store, "127.0.0.1".parse().unwrap(), &link_up_oid(), &link_varbinds(1, "port1", 1)).await;
+        crate::traps::handle_link_trap(&store, "127.0.0.1".parse().unwrap(), &link_down_oid(), &link_varbinds(1, "port1", 2)).await;
+
+        let (_, _, body) = poe_json(&store, Some("1")).await;
+        assert_eq!(body["port"]["link_traps"]["down"], 2, "{body}");
+        assert_eq!(body["port"]["link_traps"]["up"], 1);
+        let (_, _, metrics) = metrics_text(&store).await;
+        assert!(metrics.contains(r#"switch_port_link_traps_total{switch="test-sw-forti",port="port1",state="down"} 2"#), "{metrics}");
+        assert!(metrics.contains(r#"switch_port_link_traps_total{switch="test-sw-forti",port="port1",state="up"} 1"#), "{metrics}");
+    }
+
     // ---- SNMP community secrets through the API ----
 
     #[tokio::test]

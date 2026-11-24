@@ -35,6 +35,7 @@ pub async fn get_metrics(State(store): State<ConfigStore>) -> Response {
     let counters: [Family<Labels, Counter>; 5] = Default::default();
     let unit_gauges: [Family<Labels, Gauge>; 3] = Default::default();
     let rewalks = Family::<Labels, Counter>::default();
+    let link_traps = Family::<Labels, Counter>::default();
 
     for (switch, cached) in store.poe_unit_cache.read().await.iter() {
         let at = labels(&[("switch", switch)]);
@@ -48,6 +49,14 @@ pub async fn get_metrics(State(store): State<ConfigStore>) -> Response {
     for switch in store.config.read().await.switches.iter() {
         if let Some(target) = crate::snmp::lookup::target_for(switch) {
             rewalks.get_or_create(&labels(&[("switch", &switch.id)])).inc_by(crate::snmp::lookup::rewalks_for(&target));
+        }
+    }
+
+    for ((switch, _), counts) in store.link_traps.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).iter() {
+        for (state, count) in [("down", counts.down), ("up", counts.up)] {
+            link_traps
+                .get_or_create(&labels(&[("switch", switch), ("port", &counts.port_id), ("state", state)]))
+                .inc_by(count);
         }
     }
 
@@ -124,6 +133,12 @@ pub async fn get_metrics(State(store): State<ConfigStore>) -> Response {
         "switch_snmp_rewalks",
         "Extra SNMP walks needed because a result was short, since the service started",
         rewalks,
+    );
+
+    registry.register(
+        "switch_port_link_traps",
+        "Link down and up traps received from the switch for the port, since the service started",
+        link_traps,
     );
 
     let mut body = String::new();
