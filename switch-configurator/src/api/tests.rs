@@ -4362,7 +4362,7 @@ mod integration_tests {
 
     // ---- batch PoE ----
 
-    use crate::api::poe_batch::{normalize_ports, run_batch, PoeAction};
+    use crate::api::poe_batch::{normalize_ports, run_in_chunks, PoeAction, CHUNK_PORTS};
 
     type PoeCall = Vec<String>;
     type PoeScript = std::sync::Arc<dyn Fn(usize, &[String]) -> Result<Vec<String>, crate::vendors::traits::VendorError> + Send + Sync>;
@@ -4384,6 +4384,7 @@ mod integration_tests {
             let mut vendor = crate::vendors::tests::MockVendor::new();
             vendor.expect_supports_session_reuse().returning(|| true);
             vendor.expect_disconnect().returning(|| Ok(()));
+            vendor.expect_resume_session().returning(|| Ok(()));
             let calls = self.calls.clone();
             let script = self.script.clone();
             vendor.expect_execute_raw_commands().returning(move |commands| {
@@ -4511,7 +4512,7 @@ mod integration_tests {
         let mut rx = store.events.subscribe();
         let switch_config = store.config.read().await.switches[0].clone();
 
-        let outcomes = run_batch(&store, "test-sw-forti", &switch_config, PoeAction::Off, &ports(&["1", "2"])).await;
+        let outcomes = run_in_chunks(&store, "test-sw-forti", &switch_config, PoeAction::Off, &ports(&["1", "2"])).await;
 
         assert_eq!(opens.load(std::sync::atomic::Ordering::SeqCst), 1, "one session for the whole batch");
         {
@@ -4552,7 +4553,7 @@ mod integration_tests {
         let mut rx = store.events.subscribe();
         let switch_config = store.config.read().await.switches[0].clone();
 
-        let outcomes = run_batch(&store, "test-sw-forti", &switch_config, PoeAction::On, &ports(&["1", "2", "3"])).await;
+        let outcomes = run_in_chunks(&store, "test-sw-forti", &switch_config, PoeAction::On, &ports(&["1", "2", "3"])).await;
 
         assert_eq!(calls.lock().unwrap().iter().filter(|c| !is_read_back(c)).count(), 3, "the refusal of port 2 must not stop port 3");
         let status: Vec<&str> = outcomes.iter().map(|o| o.status.as_str()).collect();
@@ -4576,7 +4577,7 @@ mod integration_tests {
         let (store, calls, _opens) = poe_batch_store(script);
         let switch_config = store.config.read().await.switches[0].clone();
 
-        let outcomes = run_batch(&store, "test-sw-forti", &switch_config, PoeAction::Off, &ports(&["1", "2", "3", "4"])).await;
+        let outcomes = run_in_chunks(&store, "test-sw-forti", &switch_config, PoeAction::Off, &ports(&["1", "2", "3", "4"])).await;
 
         assert_eq!(calls.lock().unwrap().len(), 2, "a dead session must not be asked again");
         let status: Vec<&str> = outcomes.iter().map(|o| o.status.as_str()).collect();
@@ -4589,7 +4590,7 @@ mod integration_tests {
         let (store, calls, _opens) = poe_batch_store(accept_all());
         let switch_config = store.config.read().await.switches[0].clone();
 
-        let outcomes = run_batch(&store, "test-sw-forti", &switch_config, PoeAction::Reset, &ports(&["1", "2"])).await;
+        let outcomes = run_in_chunks(&store, "test-sw-forti", &switch_config, PoeAction::Reset, &ports(&["1", "2"])).await;
 
         let calls = calls.lock().unwrap();
         let order: Vec<String> = calls
@@ -4617,7 +4618,7 @@ mod integration_tests {
         let (store, calls, _opens) = poe_batch_store(script);
         let switch_config = store.config.read().await.switches[0].clone();
 
-        let outcomes = run_batch(&store, "test-sw-forti", &switch_config, PoeAction::Reset, &ports(&["1", "2"])).await;
+        let outcomes = run_in_chunks(&store, "test-sw-forti", &switch_config, PoeAction::Reset, &ports(&["1", "2"])).await;
 
         let calls = calls.lock().unwrap();
         assert!(calls[1].iter().any(|c| c == "edit port1") && calls[1].iter().any(|c| c.contains("poe-status enable")),
@@ -4643,7 +4644,7 @@ mod integration_tests {
         let (store, _calls, _opens) = poe_batch_store(script);
         let switch_config = store.config.read().await.switches[0].clone();
 
-        let outcomes = run_batch(&store, "test-sw-forti", &switch_config, PoeAction::Off, &ports(&["2"])).await;
+        let outcomes = run_in_chunks(&store, "test-sw-forti", &switch_config, PoeAction::Off, &ports(&["2"])).await;
 
         assert_eq!(outcomes[0].status, "completed", "{outcomes:?}");
         assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 2);
@@ -4655,7 +4656,7 @@ mod integration_tests {
         let (store, _calls, _opens) = poe_batch_store(accept_all_reading(vec![("3", true), ("4", false)]));
         let switch_config = store.config.read().await.switches[0].clone();
 
-        let outcomes = run_batch(&store, "test-sw-forti", &switch_config, PoeAction::Off, &ports(&["3", "4"])).await;
+        let outcomes = run_in_chunks(&store, "test-sw-forti", &switch_config, PoeAction::Off, &ports(&["3", "4"])).await;
 
         assert_eq!(outcomes[0].status, "failed", "{outcomes:?}");
         assert!(outcomes[0].detail.as_deref().unwrap().contains("still enabled"), "{outcomes:?}");
@@ -4663,13 +4664,73 @@ mod integration_tests {
         assert_eq!(outcomes[1].detail, None, "confirmed ports carry no note: {outcomes:?}");
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn single_port_poe_off_fails_when_the_switch_still_shows_it_enabled() {
+        let (store, _calls, _opens) = poe_batch_store(accept_all_reading(vec![("1", true)]));
+        let switch_config = store.config.read().await.switches[0].clone();
+
+        let result = poe_set_impl(&store, "test-sw-forti", &switch_config, "1", false).await;
+
+        let err = result.expect_err("an unchanged setting must not be reported as done");
+        assert!(err.contains("still enabled"), "{err}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn single_port_poe_off_is_done_when_the_switch_shows_it_disabled() {
+        let (store, calls, _opens) = poe_batch_store(accept_all_reading(vec![("1", false)]));
+        let switch_config = store.config.read().await.switches[0].clone();
+
+        poe_set_impl(&store, "test-sw-forti", &switch_config, "port1", false).await.expect("confirmed");
+
+        assert!(is_read_back(calls.lock().unwrap().last().unwrap()), "the setting is read back");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn single_port_reset_fails_when_the_port_is_not_back_on() {
+        let (store, _calls, _opens) = poe_batch_store(accept_all_reading(vec![("2", false)]));
+        let switch_config = store.config.read().await.switches[0].clone();
+
+        let err = poe_reset_impl(&store, "test-sw-forti", &switch_config, "2").await.expect_err("still disabled");
+
+        assert!(err.contains("still disabled"), "{err}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_large_batch_runs_in_chunks_that_finish_one_after_the_other() {
+        let (store, calls, _opens) = poe_batch_store(accept_all_reading((1..=24).map(|n| (PORT_NAMES[n - 1], false)).collect()));
+        let switch_config = store.config.read().await.switches[0].clone();
+        let all: Vec<String> = (1..=(CHUNK_PORTS + 4)).map(|n| n.to_string()).collect();
+        let mut rx = store.events.subscribe();
+
+        let outcomes = run_in_chunks(&store, "test-sw-forti", &switch_config, PoeAction::Off, &all).await;
+
+        assert_eq!(outcomes.len(), all.len());
+        assert!(outcomes.iter().all(|o| o.status == "completed"), "{outcomes:?}");
+        // One list per port plus one read-back per chunk (two chunks).
+        assert_eq!(calls.lock().unwrap().len(), all.len() + 2);
+        assert!(!store.status.is_currently_configuring("test-sw-forti").await, "the turn is released at the end");
+        let (events, summary) = collect_poe_events(&mut rx).await;
+        // The first chunk is over (terminal events sent, turn released) before the second one starts.
+        let last_of_first = events.iter().rposition(|e| e.2 == CHUNK_PORTS.to_string() && e.1 != "in-progress").unwrap();
+        let first_of_second = events.iter().position(|e| e.2 == (CHUNK_PORTS + 1).to_string()).unwrap();
+        assert!(last_of_first < first_of_second, "chunks overlap: {events:?}");
+        for port in &all {
+            assert_eq!(events.iter().filter(|e| &e.2 == port && e.1 != "in-progress").count(), 1, "one terminal event for port {port}");
+        }
+        assert_eq!(summary.expect("one summary")["completed"].as_array().unwrap().len(), all.len());
+    }
+
+    const PORT_NAMES: [&str; 24] = [
+        "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", "24",
+    ];
+
     #[tokio::test]
     async fn batch_without_a_readable_setting_completes_with_a_not_confirmed_note() {
         // The read-back prints nothing usable (accept_all returns no output at all).
         let (store, _calls, _opens) = poe_batch_store(accept_all());
         let switch_config = store.config.read().await.switches[0].clone();
 
-        let outcomes = run_batch(&store, "test-sw-forti", &switch_config, PoeAction::On, &ports(&["3"])).await;
+        let outcomes = run_in_chunks(&store, "test-sw-forti", &switch_config, PoeAction::On, &ports(&["3"])).await;
 
         assert_eq!(outcomes[0].status, "completed");
         assert!(outcomes[0].detail.as_deref().unwrap().starts_with("not confirmed"), "{outcomes:?}");
@@ -5000,6 +5061,64 @@ mod integration_tests {
         assert_eq!(ports.len(), 1, "only PoE ports are listed: {body}");
         assert!(ports[0]["poe_admin"].is_null() && ports[0]["poe_status"].is_null());
         assert_eq!(ports[0]["last_operation"]["status"], "failed");
+    }
+
+    async fn store_with_admin_enabled_in_the_snmp_cache() -> ConfigStore {
+        let store = create_fortiswitch_test_store();
+        store.port_status_cache.write().await.insert(
+            "test-sw-forti".to_string(),
+            crate::config::CachedPortStatus {
+                entries: vec![crate::models::PortStatusEntry {
+                    port_id: "port1".into(),
+                    link_status: Some("up".into()),
+                    poe_admin: Some("enabled".into()),
+                    poe_status: Some("searching".into()),
+                    ..Default::default()
+                }],
+                raw_output: String::new(),
+                fetched_at: chrono::Utc::now(),
+                generation_id: uuid::Uuid::new_v4(),
+            },
+        );
+        store
+    }
+
+    #[tokio::test]
+    async fn poe_read_shows_the_confirmed_setting_while_the_snmp_agent_still_lags() {
+        // The 108F's agent shows a PoE change ~30 s late; the batch has just confirmed it on the console.
+        let store = store_with_admin_enabled_in_the_snmp_cache().await;
+        store.emit_event(crate::config::SseEvent::PoeSet {
+            switch_id: "test-sw-forti".into(),
+            port_id: "1".into(),
+            action: "off".into(),
+            stage: "completed".into(),
+            detail: None,
+            status: None,
+        });
+
+        let (_, _, body) = poe_json(&store, Some("1")).await;
+
+        assert_eq!(body["port"]["poe_admin"], "disabled", "{body}");
+        assert_eq!(body["port"]["poe_admin_from"], "last_operation");
+    }
+
+    #[tokio::test]
+    async fn poe_read_trusts_snmp_again_once_the_agent_has_caught_up() {
+        let store = store_with_admin_enabled_in_the_snmp_cache().await;
+        store.poe_operations.lock().unwrap().insert(
+            ("test-sw-forti".to_string(), "1".to_string()),
+            crate::config::PoeOperation {
+                action: "off".into(),
+                status: "completed".into(),
+                detail: None,
+                at: chrono::Utc::now() - chrono::Duration::seconds(120),
+            },
+        );
+
+        let (_, _, body) = poe_json(&store, Some("1")).await;
+
+        assert_eq!(body["port"]["poe_admin"], "enabled", "an old operation no longer overrides what the switch reports: {body}");
+        assert!(body["port"]["poe_admin_from"].is_null());
     }
 
     #[tokio::test]

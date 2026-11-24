@@ -506,7 +506,9 @@ pub struct PoeOperation {
 impl ConfigStore {
     pub fn new(config: AppConfig, api_port: u16) -> Self {
         let status = crate::status::StatusTracker::new();
-        let (tx, _) = tokio::sync::broadcast::channel(64);
+        // A 64-port reset sends ~600 events in one burst; a listener that falls behind
+        // silently loses the oldest, so the buffer has to hold a whole batch.
+        let (tx, _) = tokio::sync::broadcast::channel(2048);
         Self {
             config: Arc::new(RwLock::new(config)),
             status,

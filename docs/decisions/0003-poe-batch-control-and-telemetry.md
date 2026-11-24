@@ -143,8 +143,9 @@ and changelog entry. Principle: **publish raw facts, draw no conclusions**
   read-back (≤ ~10 s). No stagger option until someone needs it.
 - **Vendors:** FortiSwitch refusals are detected; Aruba keeps today's behaviour
   (no evidence of its refusal markers; documented limitation).
-- **Not yet:** the single-port endpoints do not verify; they are one-port
-  batches only in spirit. Moving them onto the same core is a follow-up.
+- **Single-port endpoints (0.31.1):** keep their own stages (`done`, not
+  `completed`) but confirm through the same read-back. Batches run in chunks of
+  16 ports, one queue turn each (the console needs ~6 s per port).
 
 ### R3 — 0.30.0: `/metrics` (Prometheus text, optional) (shipped)
 - Served from the same cache the PoE read uses (no delay, no switch traffic at

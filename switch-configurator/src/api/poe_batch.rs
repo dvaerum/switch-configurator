@@ -26,6 +26,12 @@ use crate::vendors::traits::COMMAND_REFUSED;
 /// Bounds how long one request can hold the switch's turn.
 pub const MAX_PORTS_PER_REQUEST: usize = 64;
 
+/// A batch is run in chunks of this many ports, each on its own turn of the
+/// switch's queue: the console needs ~6 s per port, so one turn for 64 ports
+/// would keep everything else waiting for minutes. A reset therefore powers
+/// the ports of one chunk off together, not all 64.
+pub const CHUNK_PORTS: usize = 16;
+
 /// Seconds a reset leaves the ports unpowered, as in the single-port reset.
 const RESET_WAIT_SECONDS: u64 = 3;
 
@@ -149,22 +155,7 @@ pub async fn poe_batch(
 
     let (store_bg, id_bg, ports_bg) = (store.clone(), id.clone(), ports.clone());
     tokio::spawn(async move {
-        // Taken here, not in the handler, so the request returns 202 at once
-        // and the batch waits in the switch's queue like any other operation.
-        let guard = match store_bg.status.acquire_configuring_queued(id_bg.clone(), QUEUE_MAX_WAIT_ASYNC).await {
-            Some(guard) => guard,
-            None => {
-                let message = format!("Gave up after waiting {}s for the switch's turn", QUEUE_MAX_WAIT_ASYNC.as_secs());
-                let outcomes: Vec<PortOutcome> = ports_bg
-                    .iter()
-                    .map(|p| PortOutcome { port: p.clone(), status: "failed".into(), detail: Some(message.clone()) })
-                    .collect();
-                finish(&store_bg, &id_bg, action, &outcomes).await;
-                return;
-            }
-        };
-        let outcomes = run_batch(&store_bg, &id_bg, &switch_config, action, &ports_bg).await;
-        guard.release().await;
+        let outcomes = run_in_chunks(&store_bg, &id_bg, &switch_config, action, &ports_bg).await;
         info!("PoE {} batch on '{}' finished: {} ports", action.name(), id_bg, outcomes.len());
     });
 
@@ -211,14 +202,11 @@ fn reason(error: &crate::vendors::traits::VendorError) -> String {
     }
 }
 
-/// Sends every port's terminal event and the batch summary, and records the failures.
-async fn finish(store: &ConfigStore, id: &str, action: PoeAction, outcomes: &[PortOutcome]) {
-    let mut completed = Vec::new();
-    let mut failed = Vec::new();
+/// Sends each port's terminal event and records the failures.
+async fn emit_terminal(store: &ConfigStore, id: &str, action: PoeAction, outcomes: &[PortOutcome]) {
     for outcome in outcomes {
         if outcome.status == "completed" {
             emit_port(store, id, action, &outcome.port, "completed", outcome.detail.clone());
-            completed.push(outcome.port.clone());
         } else {
             let detail = outcome.detail.clone().unwrap_or_default();
             emit_port(store, id, action, &outcome.port, "failed", Some(detail.clone()));
@@ -232,9 +220,18 @@ async fn finish(store: &ConfigStore, id: &str, action: PoeAction, outcomes: &[Po
                     format!("poe_{}", action.name()),
                 )
                 .await;
-            failed.push(PoeBatchFailure { port_id: outcome.port.clone(), detail });
         }
     }
+}
+
+/// The batch summary, sent after every port's terminal event.
+fn emit_summary(store: &ConfigStore, id: &str, action: PoeAction, outcomes: &[PortOutcome]) {
+    let completed: Vec<String> = outcomes.iter().filter(|o| o.status == "completed").map(|o| o.port.clone()).collect();
+    let failed: Vec<PoeBatchFailure> = outcomes
+        .iter()
+        .filter(|o| o.status != "completed")
+        .map(|o| PoeBatchFailure { port_id: o.port.clone(), detail: o.detail.clone().unwrap_or_default() })
+        .collect();
     store.emit_event(SseEvent::PoeBatch {
         switch_id: id.to_string(),
         action: action.name().to_string(),
@@ -244,10 +241,44 @@ async fn finish(store: &ConfigStore, id: &str, action: PoeAction, outcomes: &[Po
     });
 }
 
-/// Runs a validated batch on one pooled session and returns one outcome per
-/// port, in the order given. Never returns early: a port that cannot be done
-/// is reported, not skipped.
-pub async fn run_batch(
+/// A whole batch, in chunks of `CHUNK_PORTS`, each waiting for its own turn of
+/// the switch's queue. Sends every port's terminal event as its chunk ends and
+/// the summary at the end; returns one outcome per port, in the order given.
+pub async fn run_in_chunks(
+    store: &ConfigStore,
+    id: &str,
+    switch_config: &SwitchConfig,
+    action: PoeAction,
+    ports: &[String],
+) -> Vec<PortOutcome> {
+    let mut outcomes: Vec<PortOutcome> = Vec::with_capacity(ports.len());
+    for chunk in ports.chunks(CHUNK_PORTS) {
+        // Taken here, not in the handler, so the request returned 202 at once
+        // and each chunk waits in the switch's queue like any other operation.
+        let part = match store.status.acquire_configuring_queued(id.to_string(), QUEUE_MAX_WAIT_ASYNC).await {
+            Some(guard) => {
+                let part = run_chunk(store, id, switch_config, action, chunk).await;
+                guard.release().await;
+                part
+            }
+            None => {
+                let message = format!("Gave up after waiting {}s for the switch's turn", QUEUE_MAX_WAIT_ASYNC.as_secs());
+                chunk
+                    .iter()
+                    .map(|p| PortOutcome { port: p.clone(), status: "failed".into(), detail: Some(message.clone()) })
+                    .collect()
+            }
+        };
+        emit_terminal(store, id, action, &part).await;
+        outcomes.extend(part);
+    }
+    emit_summary(store, id, action, &outcomes);
+    outcomes
+}
+
+/// Runs the ports on one pooled session and returns one outcome per port. Never
+/// returns early: a port that cannot be done is reported, not skipped.
+async fn run_chunk(
     store: &ConfigStore,
     id: &str,
     switch_config: &SwitchConfig,
@@ -301,7 +332,6 @@ pub async fn run_batch(
             None => PortOutcome { port: port.clone(), status: "completed".into(), detail: notes.get(&i).cloned() },
         })
         .collect();
-    finish(store, id, action, &outcomes).await;
     outcomes
 }
 
@@ -395,7 +425,7 @@ async fn drive_console(
 
 /// What the read-back said about one port.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum Verdict {
+pub(crate) enum Verdict {
     /// The setting is as asked.
     Confirmed,
     /// Nothing to check it with; the note says why.
@@ -408,7 +438,7 @@ enum Verdict {
 /// that just changed it. Not over SNMP: on a FortiSwitch 108F-POE (7.2.8) the
 /// agent showed a change only ~30 s after the console had applied it, so an
 /// SNMP read-back would report a correctly changed port as failed.
-async fn read_back(
+pub(crate) async fn read_back(
     session: &mut crate::session_pool::Session,
     switch_config: &SwitchConfig,
     ports: &[&str],
@@ -450,4 +480,20 @@ async fn read_back(
             (port.to_string(), verdict)
         })
         .collect()
+}
+
+/// The single-port endpoints' check: Err only when the switch reports the
+/// opposite of what was asked; a port that cannot be read back is not an error.
+pub(crate) async fn confirm_single(
+    session: &mut crate::session_pool::Session,
+    switch_config: &SwitchConfig,
+    port_id: &str,
+    enabled: bool,
+) -> Result<(), String> {
+    let port = port_id.trim().to_lowercase();
+    let port = port.strip_prefix("port").unwrap_or(&port).to_string();
+    match read_back(session, switch_config, &[port.as_str()], enabled).await.remove(&port) {
+        Some(Verdict::Wrong(reason)) => Err(reason),
+        _ => Ok(()),
+    }
 }

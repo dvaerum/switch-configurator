@@ -30,6 +30,61 @@ pub enum VendorError {
 /// is still usable after that, unlike after any other command error.
 pub const COMMAND_REFUSED: &str = "the switch refused";
 
+/// CLIs answer a refused command with text, not an error, so a command list
+/// that is not checked would report success for a change that never happened.
+/// Returns the first command whose output holds one of the vendor's `markers`,
+/// with the switch's own words (the screen redraw and echoed command around
+/// them are dropped).
+pub fn check_refusals(commands: &[String], outputs: &[String], markers: &[&str]) -> Result<(), VendorError> {
+    for (command, output) in commands.iter().zip(outputs) {
+        let complaint = output.lines().find_map(|line| {
+            markers.iter().find_map(|marker| line.find(marker).map(|at| line[at..].trim().to_string()))
+        });
+        if let Some(complaint) = complaint {
+            return Err(VendorError::CommandError(format!("{} '{}': {}", COMMAND_REFUSED, command, complaint)));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod refusal_tests {
+    use super::*;
+
+    fn cmds(list: &[&str]) -> Vec<String> {
+        list.iter().map(|c| c.to_string()).collect()
+    }
+
+    #[test]
+    fn a_fortios_refusal_names_the_command_and_the_switchs_words() {
+        let outputs = cmds(&["config switch physical-port\r\nOK\r\n", "edit port99\r\nCommand fail. Return code 1\r\n\r\nS108 # "]);
+        let err = check_refusals(&cmds(&["config switch physical-port", "edit port99"]), &outputs, &["command parse error", "Command fail"])
+            .expect_err("the second command was refused");
+        let text = err.to_string();
+        assert!(text.contains(COMMAND_REFUSED) && text.contains("'edit port99'") && text.contains("Command fail. Return code 1"), "{text}");
+    }
+
+    #[test]
+    fn an_aruba_refusal_is_found_through_the_screen_redraw_noise() {
+        // From a real 2530-24G-PoE+: the CLI redraws the line before it prints the complaint.
+        let outputs = cmds(&["\u{1b}[24;1H\u{1b}[1;24r\u{1b}[24;1HInvalid input: interface\r\n"]);
+        let err = check_refusals(&cmds(&["interface 999 power-over-ethernet"]), &outputs, &["Invalid input:"]).unwrap_err();
+        assert!(err.to_string().ends_with("Invalid input: interface"), "{err}");
+    }
+
+    #[test]
+    fn a_cisco_refusal_is_found() {
+        let outputs = cmds(&["show bogus-command\r\n            ^\r\n% Invalid input detected at '^' marker.\r\n"]);
+        assert!(check_refusals(&cmds(&["show bogus-command"]), &outputs, &["% Invalid input detected"]).is_err());
+    }
+
+    #[test]
+    fn accepted_commands_pass() {
+        let outputs = cmds(&["edit port1\r\nOK\r\n", ""]);
+        assert!(check_refusals(&cmds(&["edit port1", "next"]), &outputs, &["Command fail"]).is_ok());
+    }
+}
+
 /// Trait that all switch vendor implementations must implement
 #[async_trait]
 pub trait SwitchVendor: Send + Sync {

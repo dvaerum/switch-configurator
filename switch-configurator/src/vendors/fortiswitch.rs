@@ -1700,18 +1700,7 @@ impl SwitchVendor for FortiswitchSwitch {
             .ok_or_else(|| VendorError::SshError("Not connected".to_string()))?;
         let outputs = client.execute_commands(commands).await
             .map_err(|e| VendorError::CommandError(e.to_string()))?;
-        // FortiOS answers a refused command with text, not an error, so the
-        // PoE operations would otherwise report "done" for a port that never changed.
-        for (command, output) in commands.iter().zip(&outputs) {
-            if is_command_rejected(output) {
-                return Err(VendorError::CommandError(format!(
-                    "{} '{}': {}",
-                    super::traits::COMMAND_REFUSED,
-                    command,
-                    refusal_text(output)
-                )));
-            }
-        }
+        super::traits::check_refusals(commands, &outputs, &["command parse error", "Command fail"])?;
         Ok(outputs)
     }
 
@@ -3023,16 +3012,6 @@ pub fn parse_poe_inline_settings(output: &str) -> std::collections::HashMap<Stri
             Some((port.to_string(), enabled))
         })
         .collect()
-}
-
-/// The switch's own complaint from a refused command's output (the echoed
-/// command and the trailing prompt are dropped).
-fn refusal_text(raw: &str) -> String {
-    raw.lines()
-        .map(str::trim)
-        .filter(|l| l.contains("command parse error") || l.contains("Command fail"))
-        .collect::<Vec<_>>()
-        .join("; ")
 }
 
 /// Parse `get switch physical-port` output into structured per-port status.

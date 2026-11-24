@@ -1829,7 +1829,7 @@ pub async fn poe_off(
     poe_set(store, id, port_id, false).await
 }
 
-async fn poe_set_impl(
+pub(crate) async fn poe_set_impl(
     store: &ConfigStore,
     id: &str,
     switch_config: &SwitchConfig,
@@ -1868,9 +1868,12 @@ async fn poe_set_impl(
         ));
     }
 
-    info!("PoE turned {} on port {}", action, port_id);
+    // The switch accepting the command does not mean the port changed.
+    let confirmed = super::poe_batch::confirm_single(&mut session, switch_config, port_id, turn_on).await;
     session.release().await;
+    confirmed.map_err(|e| format!("PoE {} on port {}: {}", action, port_id, e))?;
 
+    info!("PoE turned {} on port {}", action, port_id);
     Ok(())
 }
 
@@ -2733,6 +2736,9 @@ pub async fn get_poe_port(
     }
 }
 
+/// How long after a confirmed PoE operation `GET /poe` prefers that result over SNMP.
+const POE_ADMIN_SNMP_LAG_SECS: i64 = 60;
+
 async fn poe_view(
     store: &ConfigStore,
     id: &str,
@@ -2795,14 +2801,22 @@ async fn poe_view(
         .filter(|e| model.port_supports_poe(e.port_id.strip_prefix("port").unwrap_or(&e.port_id)))
         .map(|e| {
             let number = e.port_id.strip_prefix("port").unwrap_or(&e.port_id).to_string();
+            let last = operations.get(&(id.to_string(), number.clone()));
+            // A FortiSwitch's SNMP agent shows a PoE change ~30 s late (docs/learnings/
+            // snmp-fortiswitch.md), so for a minute after an operation that was confirmed on the
+            // console, report that setting instead of the stale one, and say where it came from.
+            let confirmed = last
+                .filter(|op| op.status == "completed" && (chrono::Utc::now() - op.at) < chrono::Duration::seconds(POE_ADMIN_SNMP_LAG_SECS))
+                .map(|op| if op.action == "off" { "disabled" } else { "enabled" });
             json!({
                 "port_id": e.port_id,
                 "link_status": e.link_status,
-                "poe_admin": e.poe_admin,
+                "poe_admin": confirmed.map(String::from).or(e.poe_admin),
+                "poe_admin_from": confirmed.map(|_| "last_operation"),
                 "poe_status": e.poe_status,
                 "poe_class": e.poe_class,
                 "poe_counters": e.poe_counters,
-                "last_operation": operations.get(&(id.to_string(), number)),
+                "last_operation": last,
             })
         })
         .collect();
@@ -2959,8 +2973,10 @@ pub(crate) async fn poe_reset_impl(
         }
     }
 
-    info!("PoE re-enabled on port {}", port_id);
+    let confirmed = super::poe_batch::confirm_single(&mut session, switch_config, port_id, true).await;
     session.release().await;
+    confirmed.map_err(|e| format!("PoE reset on port {}: {}", port_id, e))?;
 
+    info!("PoE re-enabled on port {}", port_id);
     Ok(())
 }

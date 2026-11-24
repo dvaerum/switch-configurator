@@ -584,7 +584,7 @@ Turn PoE on, off or power-cycle several ports in one request. It runs on one con
 ```
 
 - `action`: `on`, `off` or `reset` (all ports off together, one 3 s wait, all ports on again).
-- `ports`: 1 to 64 ports; `3` and `port3` are the same port and duplicates are dropped.
+- `ports`: 1 to 64 ports; `3` and `port3` are the same port and duplicates are dropped. The ports run in chunks of 16, each on its own turn of the switch's queue, so one big batch does not keep other requests waiting for minutes; each port's terminal event is sent when its chunk ends, and a `reset` powers the ports of one chunk off together.
 - Everything is validated before anything runs: `404` unknown switch, `400` for an unknown action, an empty or blank list, more than 64 ports, a model without PoE, or ports without PoE (one error names **all** of them).
 - `202 Accepted` echoes the normalised list: `{"status": "accepted", "switch_id", "action", "ports": [...], "hint"}`.
 
@@ -759,7 +759,8 @@ Per-port PoE facts for a PoE-capable switch, taken from the same cached port sta
 ```
 
 - `poe_admin`: the PoE setting (`enabled` / `disabled`). `poe_status`: what the port does with it (`searching`, `delivering`, `fault`, `disabled`, ...). `poe_class`: IEEE class 0-4 of the detected device (only meaningful while one is detected). `poe_counters`: the switch's own `mps_absent`, `invalid_signature`, `power_denied`, `overload` and `short` counts since it started. All of these come from SNMP and are `null` when the switch is read over the console.
-- **Lag:** on a FortiSwitch the SNMP agent shows a PoE change up to ~30 s after the switch applied it (`docs/learnings/snmp-fortiswitch.md`), so right after a batch `poe_admin` can still show the old value while `last_operation` already says `completed`.
+- **Lag:** on a FortiSwitch the SNMP agent shows a PoE change up to ~30 s after the switch applied it (`docs/learnings/snmp-fortiswitch.md`), which is why `poe_admin_from` exists.
+- `poe_admin_from`: `last_operation` when `poe_admin` is the setting a `poe-on` / `poe-off` / `poe-reset` confirmed in the last minute instead of what the (lagging) SNMP agent reports; `null` otherwise.
 - `last_operation`: the latest `poe-on` / `poe-off` / `poe-reset` on that port since the service started, or `null`. `status` is `in-progress`, `completed` or `failed` (`detail` holds the reason). It is kept in memory only.
 - The response has the cache headers of the port-status lookup (`Age`, `Cache-Control`, `x-data-source`) but no `ETag`, because `last_operation` changes without a new snapshot.
 - Errors: `404` unknown switch or a port without PoE, `400` a model without PoE or a vendor whose port status is not supported yet.
