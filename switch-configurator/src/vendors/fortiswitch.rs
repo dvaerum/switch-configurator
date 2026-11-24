@@ -1705,7 +1705,8 @@ impl SwitchVendor for FortiswitchSwitch {
         for (command, output) in commands.iter().zip(&outputs) {
             if is_command_rejected(output) {
                 return Err(VendorError::CommandError(format!(
-                    "the switch refused '{}': {}",
+                    "{} '{}': {}",
+                    super::traits::COMMAND_REFUSED,
                     command,
                     refusal_text(output)
                 )));

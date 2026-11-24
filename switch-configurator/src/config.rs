@@ -391,6 +391,10 @@ pub enum SseEvent {
         stage: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         detail: Option<String>,
+        /// `in-progress`, `completed` or `failed`; filled in from `stage` by
+        /// `ConfigStore::emit_event` when the emitter leaves it out.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        status: Option<String>,
     },
     /// Persistent PoE on/off progress for a specific port (distinct from
     /// `PoeReset`'s disable-wait-enable cycle: this leaves the port in the
@@ -404,7 +408,28 @@ pub enum SseEvent {
         stage: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         detail: Option<String>,
+        /// `in-progress`, `completed` or `failed`; filled in from `stage` by
+        /// `ConfigStore::emit_event` when the emitter leaves it out.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        status: Option<String>,
     },
+    /// The outcome of a whole batch (`POST /switches/{id}/poe`), sent after
+    /// every port's own terminal event. `status` is `failed` when any port failed.
+    #[serde(rename = "poe-batch")]
+    PoeBatch {
+        switch_id: String,
+        action: String,
+        status: String,
+        completed: Vec<String>,
+        failed: Vec<PoeBatchFailure>,
+    },
+}
+
+/// One port of a batch that did not end up as asked.
+#[derive(Debug, Clone, Serialize)]
+pub struct PoeBatchFailure {
+    pub port_id: String,
+    pub detail: String,
 }
 
 /// A cached mac-table (or similar read-only diagnostic) result for one
@@ -455,6 +480,16 @@ pub struct ConfigStore {
     pub poe_operations: Arc<std::sync::Mutex<std::collections::HashMap<(String, String), PoeOperation>>>,
 }
 
+/// `in-progress` until a stage says otherwise. `done` is the legacy
+/// single-port terminal stage; `completed` is the batch one.
+fn poe_status_for_stage(stage: &str) -> &'static str {
+    match stage {
+        "done" | "completed" => "completed",
+        "failed" => "failed",
+        _ => "in-progress",
+    }
+}
+
 /// What the latest PoE operation on a port is doing or did.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct PoeOperation {
@@ -485,7 +520,10 @@ impl ConfigStore {
         }
     }
 
-    pub fn emit_event(&self, event: SseEvent) {
+    pub fn emit_event(&self, mut event: SseEvent) {
+        if let SseEvent::PoeSet { stage, status, .. } | SseEvent::PoeReset { stage, status, .. } = &mut event {
+            status.get_or_insert_with(|| poe_status_for_stage(stage).to_string());
+        }
         self.record_poe_operation(&event);
         // No receiver is the normal case when nobody watches the event stream.
         let _ = self.events.send(event);
@@ -494,19 +532,18 @@ impl ConfigStore {
     /// Keeps `poe_operations` in step with the PoE events, which every PoE
     /// operation already emits at each stage.
     fn record_poe_operation(&self, event: &SseEvent) {
-        let (switch_id, port_id, action, stage, detail) = match event {
-            SseEvent::PoeSet { switch_id, port_id, action, stage, detail } => (switch_id, port_id, action.as_str(), stage, detail),
-            SseEvent::PoeReset { switch_id, port_id, stage, detail } => (switch_id, port_id, "reset", stage, detail),
+        let (switch_id, port_id, action, status, detail) = match event {
+            SseEvent::PoeSet { switch_id, port_id, action, status: Some(status), detail, .. } => {
+                (switch_id, port_id, action.as_str(), status, detail)
+            }
+            SseEvent::PoeReset { switch_id, port_id, status: Some(status), detail, .. } => {
+                (switch_id, port_id, "reset", status, detail)
+            }
             _ => return,
-        };
-        let status = match stage.as_str() {
-            "done" => "completed",
-            "failed" => "failed",
-            _ => "in-progress",
         };
         let operation = PoeOperation {
             action: action.to_string(),
-            status: status.to_string(),
+            status: status.clone(),
             // Other stages put progress (a countdown) in `detail`, which is not a reason.
             detail: if status == "failed" { detail.clone() } else { None },
             at: chrono::Utc::now(),

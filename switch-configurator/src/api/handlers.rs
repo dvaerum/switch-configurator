@@ -36,6 +36,7 @@ pub async fn events(
                         crate::config::SseEvent::Warning { .. } => "warning",
                         crate::config::SseEvent::PoeReset { .. } => "poe-reset",
                         crate::config::SseEvent::PoeSet { .. } => "poe-set",
+                        crate::config::SseEvent::PoeBatch { .. } => "poe-batch",
                     };
                     Some(Ok(axum::response::sse::Event::default()
                         .event(event_name)
@@ -1688,7 +1689,7 @@ async fn poe_op_guard(
 }
 
 /// Get the vendor-specific PoE enable/disable command sets for a port.
-fn poe_commands_for(switch_config: &SwitchConfig, port_id: &str) -> (Vec<String>, Vec<String>) {
+pub(crate) fn poe_commands_for(switch_config: &SwitchConfig, port_id: &str) -> (Vec<String>, Vec<String>) {
     match switch_config.model().vendor() {
         Vendor::Fortiswitch => {
             let fortiswitch = vendors::fortiswitch::FortiswitchSwitch::new(
@@ -1751,6 +1752,7 @@ async fn poe_set(
                     action: action_bg.clone(),
                     stage: "failed".to_string(),
                     detail: Some(msg.clone()),
+                    status: None,
                 });
                 error!("PoE {} not run for {}:{}: {}", action_bg, id_bg, port_bg, msg);
                 store_bg
@@ -1769,6 +1771,7 @@ async fn poe_set(
                     action: action_bg.clone(),
                     stage: "done".to_string(),
                     detail: None,
+                    status: None,
                 });
                 info!("PoE {} completed for {}:{}", action_bg, id_bg, port_bg);
             }
@@ -1779,6 +1782,7 @@ async fn poe_set(
                     action: action_bg.clone(),
                     stage: "failed".to_string(),
                     detail: Some(error_msg.clone()),
+                    status: None,
                 });
                 error!(
                     "PoE {} failed for {}:{}: {}",
@@ -1840,6 +1844,7 @@ async fn poe_set_impl(
             action: action.to_string(),
             stage: stage.to_string(),
             detail,
+            status: None,
         });
     };
 
@@ -1984,7 +1989,7 @@ const QUEUE_MAX_WAIT_SYNC: std::time::Duration = std::time::Duration::from_secs(
 
 /// Max time a fire-and-forget operation (202 Accepted: apply, PoE) waits for
 /// its turn. Nobody holds an HTTP connection open for these, so it can be long.
-const QUEUE_MAX_WAIT_ASYNC: std::time::Duration = std::time::Duration::from_secs(600);
+pub(crate) const QUEUE_MAX_WAIT_ASYNC: std::time::Duration = std::time::Duration::from_secs(600);
 
 /// 503 for a request that waited `waited` in the switch's queue and never got
 /// its turn — retrying later is the right response, unlike a plain 409.
@@ -2784,9 +2789,10 @@ async fn poe_view(
     parts.headers.remove(axum::http::header::CONTENT_TYPE);
 
     let operations = store.poe_operations.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
+    let model = switch_config.model();
     let ports = entries
         .into_iter()
-        .filter(|e| e.poe_status.is_some() || e.poe_admin.is_some())
+        .filter(|e| model.port_supports_poe(e.port_id.strip_prefix("port").unwrap_or(&e.port_id)))
         .map(|e| {
             let number = e.port_id.strip_prefix("port").unwrap_or(&e.port_id).to_string();
             json!({
@@ -2831,6 +2837,7 @@ pub async fn poe_reset(
                     port_id: port_bg.clone(),
                     stage: "failed".to_string(),
                     detail: Some(msg.clone()),
+                    status: None,
                 });
                 error!("PoE reset not run for {}:{}: {}", id_bg, port_bg, msg);
                 store_bg
@@ -2848,6 +2855,7 @@ pub async fn poe_reset(
                     port_id: port_bg.clone(),
                     stage: "done".to_string(),
                     detail: None,
+                    status: None,
                 });
                 info!("PoE reset completed for {}:{}", id_bg, port_bg);
             }
@@ -2857,6 +2865,7 @@ pub async fn poe_reset(
                     port_id: port_bg.clone(),
                     stage: "failed".to_string(),
                     detail: Some(error_msg.clone()),
+                    status: None,
                 });
                 error!("PoE reset failed for {}:{}: {}", id_bg, port_bg, error_msg);
                 store_bg
@@ -2898,6 +2907,7 @@ pub(crate) async fn poe_reset_impl(
             port_id: port_id.to_string(),
             stage: stage.to_string(),
             detail,
+            status: None,
         });
     };
 

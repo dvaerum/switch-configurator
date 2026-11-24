@@ -3482,6 +3482,7 @@ mod integration_tests {
             port_id: "5".to_string(),
             stage: "waiting".to_string(),
             detail: Some("3".to_string()),
+            status: None,
         };
         let json = serde_json::to_value(&ev).unwrap();
         assert_eq!(json["event"], "poe-reset");
@@ -3802,6 +3803,7 @@ mod integration_tests {
             action: "off".to_string(),
             stage: "done".to_string(),
             detail: None,
+            status: None,
         };
         let json = serde_json::to_value(&ev).unwrap();
         assert_eq!(json["event"], "poe-set");
@@ -4356,6 +4358,278 @@ mod integration_tests {
         );
     }
 
+    // ---- batch PoE ----
+
+    use crate::api::poe_batch::{normalize_ports, run_batch, ConfirmPlan, PoeAction};
+
+    type PoeCall = Vec<String>;
+    type PoeScript = std::sync::Arc<dyn Fn(usize, &[String]) -> Result<Vec<String>, crate::vendors::traits::VendorError> + Send + Sync>;
+
+    /// Mock switch recording every PoE command list; `script(call_index, commands)` decides the outcome.
+    struct PoeBatchOpener {
+        calls: std::sync::Arc<std::sync::Mutex<Vec<PoeCall>>>,
+        opens: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        script: PoeScript,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::session_pool::SessionOpener for PoeBatchOpener {
+        async fn open(
+            &self,
+            _config: &SwitchConfig,
+        ) -> Result<Box<dyn crate::vendors::SwitchVendor>, crate::vendors::traits::VendorError> {
+            self.opens.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let mut vendor = crate::vendors::tests::MockVendor::new();
+            vendor.expect_supports_session_reuse().returning(|| true);
+            vendor.expect_disconnect().returning(|| Ok(()));
+            let calls = self.calls.clone();
+            let script = self.script.clone();
+            vendor.expect_execute_raw_commands().returning(move |commands| {
+                let mut calls = calls.lock().unwrap();
+                let index = calls.len();
+                calls.push(commands.to_vec());
+                script(index, commands)
+            });
+            Ok(Box::new(vendor))
+        }
+    }
+
+    fn poe_batch_store(script: PoeScript) -> (ConfigStore, std::sync::Arc<std::sync::Mutex<Vec<PoeCall>>>, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        let mut store = create_fortiswitch_test_store();
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let opens = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        store.session_pool = crate::session_pool::SessionPool::new(
+            std::sync::Arc::new(PoeBatchOpener { calls: calls.clone(), opens: opens.clone(), script }),
+            std::time::Duration::from_secs(30),
+        );
+        (store, calls, opens)
+    }
+
+    fn accept_all() -> PoeScript {
+        std::sync::Arc::new(|_, _| Ok(vec![]))
+    }
+
+    fn ports(list: &[&str]) -> Vec<String> {
+        list.iter().map(|p| p.to_string()).collect()
+    }
+
+    fn quick_confirm() -> ConfirmPlan {
+        ConfirmPlan { attempts: 2, pause: std::time::Duration::from_millis(5) }
+    }
+
+    /// (stage, status, port) of every PoE event emitted while `body` ran, plus the batch summary.
+    async fn collect_poe_events(rx: &mut tokio::sync::broadcast::Receiver<SseEvent>) -> (Vec<(String, String, String)>, Option<serde_json::Value>) {
+        let mut stages = Vec::new();
+        let mut summary = None;
+        while let Ok(event) = rx.try_recv() {
+            let json = serde_json::to_value(&event).unwrap();
+            match json["event"].as_str() {
+                Some("poe-set") | Some("poe-reset") => stages.push((
+                    json["data"]["stage"].as_str().unwrap().to_string(),
+                    json["data"]["status"].as_str().unwrap().to_string(),
+                    json["data"]["port_id"].as_str().unwrap().to_string(),
+                )),
+                Some("poe-batch") => summary = Some(json["data"].clone()),
+                _ => {}
+            }
+        }
+        (stages, summary)
+    }
+
+    #[test]
+    fn batch_ports_are_trimmed_deduplicated_and_bounded() {
+        assert_eq!(normalize_ports(&ports(&[" 3 ", "port4", "3", "PORT4", "5"])).unwrap(), ports(&["3", "4", "5"]));
+        assert!(normalize_ports(&[]).is_err(), "an empty list does nothing and is a mistake");
+        assert!(normalize_ports(&ports(&["1", "  "])).is_err(), "a blank entry is a mistake");
+        let too_many: Vec<String> = (1..=65).map(|n| n.to_string()).collect();
+        assert!(normalize_ports(&too_many).is_err());
+        let limit: Vec<String> = (1..=64).map(|n| n.to_string()).collect();
+        assert_eq!(normalize_ports(&limit).unwrap().len(), 64);
+    }
+
+    #[tokio::test]
+    async fn batch_request_names_every_port_without_poe_before_anything_runs() {
+        let (store, calls, opens) = poe_batch_store(accept_all());
+
+        let response = crate::api::poe_batch::poe_batch(
+            axum::extract::State(store.clone()),
+            axum::extract::Path("test-sw-forti".to_string()),
+            axum::Json(crate::api::poe_batch::PoeBatchRequest { action: "off".into(), ports: ports(&["1", "99", "98"]) }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let text = String::from_utf8_lossy(&bytes).to_string();
+        assert!(text.contains("99") && text.contains("98"), "all offending ports must be named: {text}");
+        assert_eq!(opens.load(std::sync::atomic::Ordering::SeqCst), 0, "nothing may run on a bad request");
+        assert!(calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn batch_request_rejects_an_unknown_action_and_an_unknown_switch() {
+        let (store, _calls, _opens) = poe_batch_store(accept_all());
+        let call = |id: &str, action: &str| {
+            crate::api::poe_batch::poe_batch(
+                axum::extract::State(store.clone()),
+                axum::extract::Path(id.to_string()),
+                axum::Json(crate::api::poe_batch::PoeBatchRequest { action: action.into(), ports: ports(&["1"]) }),
+            )
+        };
+        assert_eq!(call("test-sw-forti", "explode").await.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(call("nope", "on").await.status(), StatusCode::NOT_FOUND);
+        assert_eq!(call("test-sw-forti", "on").await.status(), StatusCode::ACCEPTED);
+    }
+
+    #[tokio::test]
+    async fn batch_off_runs_one_session_one_list_per_port_and_completes_each_port() {
+        let (store, calls, opens) = poe_batch_store(accept_all());
+        let mut rx = store.events.subscribe();
+        let switch_config = store.config.read().await.switches[0].clone();
+
+        let outcomes = run_batch(&store, "test-sw-forti", &switch_config, PoeAction::Off, &ports(&["1", "2"]), quick_confirm()).await;
+
+        assert_eq!(opens.load(std::sync::atomic::Ordering::SeqCst), 1, "one session for the whole batch");
+        {
+            let calls = calls.lock().unwrap();
+            assert_eq!(calls.len(), 2);
+            assert!(calls[0].iter().any(|c| c == "edit port1") && calls[0].iter().any(|c| c.contains("poe-status disable")));
+            assert!(calls[1].iter().any(|c| c == "edit port2"));
+        }
+        assert!(outcomes.iter().all(|o| o.status == "completed"), "{outcomes:?}");
+        assert!(outcomes[0].detail.as_deref().unwrap_or("").contains("not confirmed"), "no SNMP reads here: {outcomes:?}");
+
+        let (events, summary) = collect_poe_events(&mut rx).await;
+        for port in ["1", "2"] {
+            let mine: Vec<_> = events.iter().filter(|e| e.2 == port).collect();
+            assert_eq!(mine.first().unwrap().0, "connecting");
+            let last = mine.last().unwrap();
+            assert_eq!((last.0.as_str(), last.1.as_str()), ("completed", "completed"), "{mine:?}");
+            assert_eq!(mine.iter().filter(|e| e.1 != "in-progress").count(), 1, "exactly one terminal event per port");
+        }
+        let summary = summary.expect("a summary event");
+        assert_eq!(summary["status"], "completed");
+        assert_eq!(summary["completed"].as_array().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn batch_reports_the_refused_port_and_keeps_going() {
+        let script: PoeScript = std::sync::Arc::new(|_, commands| {
+            if commands.iter().any(|c| c == "edit port2") {
+                Err(crate::vendors::traits::VendorError::CommandError(format!(
+                    "{} 'edit port2': Command fail. Return code 1",
+                    crate::vendors::traits::COMMAND_REFUSED
+                )))
+            } else {
+                Ok(vec![])
+            }
+        });
+        let (store, calls, _opens) = poe_batch_store(script);
+        let mut rx = store.events.subscribe();
+        let switch_config = store.config.read().await.switches[0].clone();
+
+        let outcomes = run_batch(&store, "test-sw-forti", &switch_config, PoeAction::On, &ports(&["1", "2", "3"]), quick_confirm()).await;
+
+        assert_eq!(calls.lock().unwrap().len(), 3, "the refusal of port 2 must not stop port 3");
+        let status: Vec<&str> = outcomes.iter().map(|o| o.status.as_str()).collect();
+        assert_eq!(status, ["completed", "failed", "completed"]);
+        assert!(outcomes[1].detail.as_deref().unwrap().contains("Command fail"));
+        let (_, summary) = collect_poe_events(&mut rx).await;
+        let summary = summary.unwrap();
+        assert_eq!(summary["status"], "failed");
+        assert_eq!(summary["failed"][0]["port_id"], "2");
+    }
+
+    #[tokio::test]
+    async fn batch_stops_on_a_lost_session_and_fails_the_rest_with_the_reason() {
+        let script: PoeScript = std::sync::Arc::new(|index, _| {
+            if index == 1 {
+                Err(crate::vendors::traits::VendorError::CommandError("serial port closed".to_string()))
+            } else {
+                Ok(vec![])
+            }
+        });
+        let (store, calls, _opens) = poe_batch_store(script);
+        let switch_config = store.config.read().await.switches[0].clone();
+
+        let outcomes = run_batch(&store, "test-sw-forti", &switch_config, PoeAction::Off, &ports(&["1", "2", "3", "4"]), quick_confirm()).await;
+
+        assert_eq!(calls.lock().unwrap().len(), 2, "a dead session must not be asked again");
+        let status: Vec<&str> = outcomes.iter().map(|o| o.status.as_str()).collect();
+        assert_eq!(status, ["completed", "failed", "failed", "failed"]);
+        assert!(outcomes[3].detail.as_deref().unwrap().contains("serial port closed"), "{outcomes:?}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn batch_reset_turns_all_ports_off_waits_once_then_turns_all_on() {
+        let (store, calls, _opens) = poe_batch_store(accept_all());
+        let switch_config = store.config.read().await.switches[0].clone();
+
+        let outcomes = run_batch(&store, "test-sw-forti", &switch_config, PoeAction::Reset, &ports(&["1", "2"]), quick_confirm()).await;
+
+        let calls = calls.lock().unwrap();
+        let order: Vec<String> = calls
+            .iter()
+            .map(|c| {
+                let port = c.iter().find(|x| x.starts_with("edit ")).unwrap().clone();
+                let verb = if c.iter().any(|x| x.contains("disable")) { "off" } else { "on" };
+                format!("{verb} {port}")
+            })
+            .collect();
+        assert_eq!(order, ["off edit port1", "off edit port2", "on edit port1", "on edit port2"]);
+        assert!(outcomes.iter().all(|o| o.status == "completed"), "{outcomes:?}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn batch_reset_powers_a_port_back_on_when_its_disable_failed() {
+        let script: PoeScript = std::sync::Arc::new(|index, _| {
+            if index == 0 {
+                Err(crate::vendors::traits::VendorError::CommandError(format!("{} 'x'", crate::vendors::traits::COMMAND_REFUSED)))
+            } else {
+                Ok(vec![])
+            }
+        });
+        let (store, calls, _opens) = poe_batch_store(script);
+        let switch_config = store.config.read().await.switches[0].clone();
+
+        let outcomes = run_batch(&store, "test-sw-forti", &switch_config, PoeAction::Reset, &ports(&["1", "2"]), quick_confirm()).await;
+
+        let calls = calls.lock().unwrap();
+        assert!(calls[1].iter().any(|c| c == "edit port1") && calls[1].iter().any(|c| c.contains("poe-status enable")),
+            "fail towards power right after the failed disable: {calls:?}");
+        assert_eq!(outcomes[0].status, "failed");
+        assert_eq!(outcomes[1].status, "completed");
+    }
+
+    #[tokio::test]
+    async fn batch_confirms_the_setting_over_snmp_and_fails_a_port_that_did_not_change() {
+        use crate::snmp::testing::{agent_rows, lab_fdb, lab_port_rows};
+        use crate::snmp::SnmpValue;
+        let mut rows = lab_port_rows();
+        // The switch accepted the commands, but port 3 stays enabled; port 4 really is disabled.
+        rows.peth_admin[3].1 = SnmpValue::Integer(2);
+        let fdb = lab_fdb();
+        let (addr, _agent) = agent_serving(agent_rows(&[&rows.if_name, &rows.if_oper_status, &rows.if_high_speed, &rows.duplex, &rows.peth_admin, &rows.peth_detection, &fdb.address, &fdb.port, &fdb.status])).await;
+        let (mut store, _opener) = forti_store_with_snmp(addr.port(), SnmpReadsMode::Auto).await;
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        store.session_pool = crate::session_pool::SessionPool::new(
+            std::sync::Arc::new(PoeBatchOpener {
+                calls,
+                opens: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                script: accept_all(),
+            }),
+            std::time::Duration::from_secs(30),
+        );
+        let switch_config = store.config.read().await.switches[0].clone();
+
+        let outcomes = run_batch(&store, "test-sw-forti", &switch_config, PoeAction::Off, &ports(&["3", "4"]), quick_confirm()).await;
+
+        assert_eq!(outcomes[0].status, "failed", "{outcomes:?}");
+        assert!(outcomes[0].detail.as_deref().unwrap().contains("still enabled"), "{outcomes:?}");
+        assert_eq!(outcomes[1].status, "completed", "{outcomes:?}");
+        assert_eq!(outcomes[1].detail, None, "confirmed ports carry no note: {outcomes:?}");
+    }
+
     // ---- SNMP community secrets through the API ----
 
     #[tokio::test]
@@ -4649,6 +4923,41 @@ mod integration_tests {
     }
 
     #[tokio::test]
+    async fn poe_read_over_the_console_still_lists_the_ports_and_their_last_operation() {
+        // Console output has no PoE fields, so every PoE field is null, but the port list and
+        // the in-memory operation must not depend on SNMP.
+        let store = create_fortiswitch_test_store();
+        store.port_status_cache.write().await.insert(
+            "test-sw-forti".to_string(),
+            crate::config::CachedPortStatus {
+                entries: vec![
+                    crate::models::PortStatusEntry { port_id: "port1".into(), link_status: Some("up".into()), ..Default::default() },
+                    crate::models::PortStatusEntry { port_id: "internal".into(), ..Default::default() },
+                ],
+                raw_output: String::new(),
+                fetched_at: chrono::Utc::now(),
+                generation_id: uuid::Uuid::new_v4(),
+            },
+        );
+        store.emit_event(crate::config::SseEvent::PoeSet {
+            switch_id: "test-sw-forti".into(),
+            port_id: "1".into(),
+            action: "off".into(),
+            stage: "failed".into(),
+            detail: Some("refused".into()),
+            status: None,
+        });
+
+        let (status, _, body) = poe_json(&store, None).await;
+
+        assert_eq!(status, StatusCode::OK);
+        let ports = body["ports"].as_array().unwrap();
+        assert_eq!(ports.len(), 1, "only PoE ports are listed: {body}");
+        assert!(ports[0]["poe_admin"].is_null() && ports[0]["poe_status"].is_null());
+        assert_eq!(ports[0]["last_operation"]["status"], "failed");
+    }
+
+    #[tokio::test]
     async fn poe_read_for_one_port_accepts_the_short_and_the_long_name() {
         let (addr, _agent) = agent_serving(lab_agent_rows()).await;
         let (store, _opener) = forti_store_with_snmp(addr.port(), SnmpReadsMode::Auto).await;
@@ -4691,6 +5000,7 @@ mod integration_tests {
                 action: "off".into(),
                 stage: stage.into(),
                 detail: detail.map(String::from),
+                status: None,
             })
         };
 
@@ -4709,6 +5019,7 @@ mod integration_tests {
             port_id: "port2".into(),
             stage: "failed".into(),
             detail: Some("the switch refused it".into()),
+            status: None,
         });
         let (_, _, body) = poe_json(&store, Some("2")).await;
         assert_eq!(body["port"]["last_operation"]["status"], "failed");

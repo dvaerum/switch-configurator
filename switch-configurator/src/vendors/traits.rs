@@ -26,6 +26,10 @@ pub enum VendorError {
     ParseError(String),
 }
 
+/// Starts the error text of a command the switch itself refused. The session
+/// is still usable after that, unlike after any other command error.
+pub const COMMAND_REFUSED: &str = "the switch refused";
+
 /// Trait that all switch vendor implementations must implement
 #[async_trait]
 pub trait SwitchVendor: Send + Sync {

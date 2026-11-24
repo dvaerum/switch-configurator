@@ -112,36 +112,38 @@ and changelog entry. Principle: **publish raw facts, draw no conclusions**
 - Watts are **not** in the default read (console-only on FortiSwitch); possible
   later behind an explicit option after hardware evidence (H4).
 
-### R2 — 0.29.0: batch PoE control
-- **API:** `POST /switches/{id}/poe-on`, `/poe-off`, `/poe-reset`, body
-  `{"ports":["1","2","3"]}`; 400 for empty/blank/more than **64** ports;
-  duplicates dropped (order kept); all ports validated **before anything runs**
-  (404 unknown switch; 400 no PoE; one 400 naming **all** offending ports);
-  202 echoing the normalised list.
-- **Status:** the per-port `poe-set` / `poe-reset` SSE events keep their `stage`
-  names unchanged and gain an additive `status` (`in-progress` | `failed` |
-  `completed`), mirrored in `last_operation`.
+### R2 — 0.29.0: batch PoE control (shipped)
+- **API:** `POST /switches/{id}/poe` with `{"action":"on|off|reset","ports":[...]}`
+  (the shape provision asked for; it pairs with `GET /switches/{id}/poe`).
+  400 for an unknown action, empty/blank/more than **64** ports; duplicates
+  dropped (order kept; `3` = `port3`); all ports validated **before anything
+  runs** (404 unknown switch; 400 no PoE; one 400 naming **all** offending
+  ports); 202 echoing the normalised list. The single-port endpoints are kept.
+- **Events:** the per-port `poe-set` / `poe-reset` events keep their stage names
+  and gain an additive `status` (`in-progress` | `completed` | `failed`), also
+  on the single-port endpoints (derived from the stage in `emit_event`). A batch
+  adds the stages `verifying` and a terminal `completed` | `failed` and does
+  **not** send the legacy `done`: provision counts one terminal event per port,
+  and a `done` followed by a later `failed` would count twice. A `poe-batch`
+  summary event follows the last port.
   - `completed` means the **admin setting reads back as requested** (SNMP,
-    through the gate, ≤ ~10 s). Power state is reported next to it and never
-    turns the status into `failed` (a device that is off or unplugged is
-    normal). For `poe-reset`: the setting is back to on.
-  - Refusal, or setting not reached → `failed` with the reason.
-  - SNMP reads unavailable → `completed` right after acceptance with the note
-    "not confirmed".
-  - The legacy `done` stage is still sent at acceptance.
-- **Core:** one module (`api/poe.rs`): plan → execute → confirm. The single-port
-  endpoints become the one-port case of the same core. One turn, one pooled
-  session, one command list per phase. Reset: **all ports off together → one
-  wait (3 s) → all on together** (the switch's own power budget denies what does
-  not fit; that is reported per port; verify on the lab 108F). No stagger option
-  until someone needs it. Transport error ⇒ session discarded, remaining ports
-  failed with the error, never silently skipped; enable keeps its single retry.
-- **Vendors:** FortiSwitch gets rejection detection; Aruba keeps today's
-  behaviour (no evidence of its refusal markers; documented limitation).
-- **Tests:** mock vendor recording command lists; FortiOS rejection text;
-  per-port partial failure; reset phase order; fail-towards-power; one queue
-  entry per batch; start-paused time for the wait. Early failing tests are
-  parked in the session scratchpad (`parked-batch-poe-tests.patch`).
+    through the gate, ≤ ~10 s). Power state is never part of it (a device that
+    is off or unplugged is normal). Reset: the setting is back to on.
+  - Refusal, or setting not reached → `failed` with the reason. SNMP reads
+    unavailable → `completed` with a `not confirmed` detail.
+- **Core:** `api/poe_batch.rs`: one session, one queue turn; **one command list
+  per port per phase** (not one per phase) so a refusal is attributed to its
+  port without changing the vendor trait. A refusal fails that port and the
+  batch carries on; any other error means the session is lost, so the rest fail
+  with that reason and nothing is asked again. Reset: all ports off together →
+  one wait (3 s) → all on together (the switch's own power budget denies what
+  does not fit; reported per port; verify on the lab 108F, H6); a port whose
+  disable failed is powered back on at once. The turn is held during the
+  read-back (≤ ~10 s). No stagger option until someone needs it.
+- **Vendors:** FortiSwitch refusals are detected; Aruba keeps today's behaviour
+  (no evidence of its refusal markers; documented limitation).
+- **Not yet:** the single-port endpoints do not verify; they are one-port
+  batches only in spirit. Moving them onto the same core is a follow-up.
 
 ### R3 — 0.30.0: `/metrics` (Prometheus text, optional)
 - Served from the same cache the PoE read uses (no delay, no switch traffic at

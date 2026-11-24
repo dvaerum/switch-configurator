@@ -550,6 +550,35 @@ curl -X POST http://localhost:4002/switches/it-02876-sw1/poe-on/5
 
 ---
 
+### PoE Batch
+
+Turn PoE on, off or power-cycle several ports in one request. It runs on one console session and one turn of the switch's queue (so it is queued like `apply`), instead of one session per port.
+
+**Endpoint:** `POST /switches/{id}/poe`
+
+```json
+{"action": "off", "ports": ["1", "2", "port3"]}
+```
+
+- `action`: `on`, `off` or `reset` (all ports off together, one 3 s wait, all ports on again).
+- `ports`: 1 to 64 ports; `3` and `port3` are the same port and duplicates are dropped.
+- Everything is validated before anything runs: `404` unknown switch, `400` for an unknown action, an empty or blank list, more than 64 ports, a model without PoE, or ports without PoE (one error names **all** of them).
+- `202 Accepted` echoes the normalised list: `{"status": "accepted", "switch_id", "action", "ports": [...], "hint"}`.
+
+**Events** (`/api/events`): the per-port events are the same `poe-set` (on/off) and `poe-reset` events as the single-port endpoints, so existing listeners keep working, and every one now carries `status` (`in-progress`, `completed` or `failed`). For a batch the stages are `connecting`, `setting` (or `disabling`, `waiting` with the seconds left, `enabling`), `verifying`, then exactly one terminal event per port: stage `completed` or `failed` (`detail` holds the reason). A batch does **not** send the legacy `done` stage.
+
+- `completed` means the PoE setting was read back over SNMP as asked. Power state is not part of it: an off or unplugged device is normal. Without SNMP reads (or if the switch does not answer) a port the switch accepted is `completed` with `detail` starting `not confirmed`.
+- `failed`: the switch refused the command, the setting did not change, or the session was lost (the remaining ports then fail with that reason, never silently skipped). A port whose disable fails during `reset` is turned back on before the batch carries on.
+- After the last port a `poe-batch` event gives the summary: `{"switch_id", "action", "status", "completed": ["1"], "failed": [{"port_id": "2", "detail": "..."}]}`; `status` is `failed` if any port failed.
+- `GET /switches/{id}/poe` shows each port's `last_operation` afterwards.
+
+```bash
+curl -X POST http://localhost:4002/switches/it-02876-sw1/poe \
+  -H 'content-type: application/json' -d '{"action":"reset","ports":["1","2","3"]}'
+```
+
+---
+
 ### MAC Address Table Lookup
 
 Query the switch's learned MAC-address table (FDB). Answers "what's physically wired to this port" — useful when multiple devices on the same VLAN/subnet are indistinguishable over IP alone. Synchronous (no SSE progress; the API waits for the switch and returns the result directly).
