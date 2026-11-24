@@ -447,19 +447,22 @@ pub(crate) async fn read_back(
     let unconfirmed = |why: String| -> HashMap<String, Verdict> {
         ports.iter().map(|p| (p.to_string(), Verdict::Unconfirmed(format!("not confirmed: {}", why)))).collect()
     };
-    if switch_config.model().vendor() != Vendor::Fortiswitch {
-        return unconfirmed("this switch type has no read-back yet".to_string());
-    }
+    // The command that lists every port's PoE setting, and how to read its output.
+    let (command, parse): (&str, fn(&str) -> HashMap<String, bool>) = match switch_config.model().vendor() {
+        Vendor::Fortiswitch => ("get switch poe inline", crate::vendors::fortiswitch::parse_poe_inline_settings),
+        Vendor::Aruba => ("show power-over-ethernet brief", crate::vendors::aruba::parse_poe_brief_settings),
+        _ => return unconfirmed("this switch type has no read-back yet".to_string()),
+    };
     let mut settings = HashMap::new();
     for attempt in 0..READ_BACK_ATTEMPTS {
         if attempt > 0 {
             tokio::time::sleep(READ_BACK_PAUSE).await;
         }
-        let output = match session.vendor().execute_raw_commands(&["get switch poe inline".to_string()]).await {
+        let output = match session.vendor().execute_raw_commands(&[command.to_string()]).await {
             Ok(outputs) => outputs.join("\n"),
             Err(e) => return unconfirmed(format!("the read-back failed: {}", reason(&e))),
         };
-        settings = crate::vendors::fortiswitch::parse_poe_inline_settings(&output);
+        settings = parse(&output);
         // Only a port that is listed with the old setting is worth waiting for.
         if ports.iter().all(|port| settings.get(*port).is_none_or(|&now| now == enabled)) {
             break;

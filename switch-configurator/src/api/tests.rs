@@ -4724,6 +4724,32 @@ mod integration_tests {
         "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", "24",
     ];
 
+    #[tokio::test(start_paused = true)]
+    async fn batch_on_an_aruba_switch_reads_the_setting_back_with_its_own_command() {
+        let script: PoeScript = std::sync::Arc::new(|_, commands| {
+            if commands.iter().any(|c| c == "show power-over-ethernet brief") {
+                Ok(vec![" 3      No   low      off     usage usage  0.0 W   0.0 W   Disabled     0   -  \r\n".to_string()])
+            } else {
+                Ok(vec![])
+            }
+        });
+        let mut store = create_test_config_store();
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        store.session_pool = crate::session_pool::SessionPool::new(
+            std::sync::Arc::new(PoeBatchOpener { calls: calls.clone(), opens: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)), script }),
+            std::time::Duration::from_secs(30),
+        );
+        let id = store.config.read().await.switches.iter().find(|s| s.model().supports_poe()).expect("a PoE switch").id.clone();
+        let switch_config = store.config.read().await.switches.iter().find(|s| s.id == id).unwrap().clone();
+
+        let off = run_in_chunks(&store, &id, &switch_config, PoeAction::Off, &ports(&["3"])).await;
+        let on = run_in_chunks(&store, &id, &switch_config, PoeAction::On, &ports(&["3"])).await;
+
+        assert_eq!((off[0].status.as_str(), off[0].detail.clone()), ("completed", None), "{off:?}");
+        assert_eq!(on[0].status, "failed", "the switch still shows the port disabled: {on:?}");
+        assert!(on[0].detail.as_deref().unwrap().contains("still disabled"), "{on:?}");
+    }
+
     #[tokio::test]
     async fn batch_without_a_readable_setting_completes_with_a_not_confirmed_note() {
         // The read-back prints nothing usable (accept_all returns no output at all).

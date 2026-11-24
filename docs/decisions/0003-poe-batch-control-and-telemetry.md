@@ -141,8 +141,9 @@ and changelog entry. Principle: **publish raw facts, draw no conclusions**
   does not fit; reported per port; verify on the lab 108F, H6); a port whose
   disable failed is powered back on at once. The turn is held during the
   read-back (≤ ~10 s). No stagger option until someone needs it.
-- **Vendors:** FortiSwitch refusals are detected; Aruba keeps today's behaviour
-  (no evidence of its refusal markers; documented limitation).
+- **Vendors:** FortiSwitch and Aruba refusals are detected and both read the
+  setting back (0.31.1/0.31.2, markers and output recorded on real switches);
+  Cisco has no PoE control.
 - **Single-port endpoints (0.31.1):** keep their own stages (`done`, not
   `completed`) but confirm through the same read-back. Batches run in chunks of
   16 ports, one queue turn each (the console needs ~6 s per port).

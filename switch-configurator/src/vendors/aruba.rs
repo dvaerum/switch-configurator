@@ -2407,6 +2407,25 @@ impl ArubaSwitch {
     }
 }
 
+/// The PoE setting of every port from `show power-over-ethernet brief` (the
+/// `Pwr Enab` column: `Yes` / `No`), keyed by port number.
+pub fn parse_poe_brief_settings(output: &str) -> std::collections::HashMap<String, bool> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let port = fields.next()?;
+            let enabled = match fields.next()? {
+                "Yes" => true,
+                "No" => false,
+                _ => return None,
+            };
+            port.parse::<u32>().ok()?;
+            Some((port.to_string(), enabled))
+        })
+        .collect()
+}
+
 /// Detect ArubaOS-Switch's documented "Invalid input:" marker for a
 /// rejected/unrecognized CLI command, so a command failure surfaces as a
 /// real error instead of parsing to a false empty success (the class of
@@ -6173,6 +6192,25 @@ interface 48
     fn test_is_command_rejected_detects_invalid_input() {
         let raw = "Invalid input: mac-address\n";
         assert!(is_command_rejected(raw));
+    }
+
+    #[test]
+    fn poe_brief_settings_are_read_from_the_real_2530_output() {
+        // Recorded from an Aruba 2530-24G-PoE+ (YA.16.10); port 2 shown disabled, port 3 delivering.
+        let raw = " Status and Configuration Information\r\n  Available: 195 W  Used: 4 W  Remaining: 191 W\r\n \
+PoE    Pwr  Pwr      Pre-std Alloc Alloc  PSE Pwr PD Pwr  PoE Port    PLC PLC \r\n \
+Port   Enab Priority Detect  Cfg   Actual Rsrvd   Draw    Status      Cls Type\r\n \
+------ ---- -------- ------- ----- ------ ------- ------- ----------- --- ----\r\n \
+1      Yes  low      off     usage usage  0.0 W   0.0 W   Searching    0   -  \r\n \
+2      No   low      off     usage usage  0.0 W   0.0 W   Disabled     0   -  \r\n \
+3      Yes  low      off     usage usage  4.0 W   3.2 W   Delivering   2   -  \r\n \
+Refer to command's help option for field definitions\r\nHP-2530-24G-PoEP# ";
+        let settings = parse_poe_brief_settings(raw);
+        assert_eq!(settings.len(), 3, "{settings:?}");
+        assert!(settings["1"]);
+        assert!(!settings["2"]);
+        assert!(settings["3"]);
+        assert!(parse_poe_brief_settings("Invalid input: foo").is_empty());
     }
 
     #[test]
