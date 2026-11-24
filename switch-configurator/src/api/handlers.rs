@@ -2712,7 +2712,7 @@ pub async fn poe_reset(
         .into_response()
 }
 
-async fn poe_reset_impl(
+pub(crate) async fn poe_reset_impl(
     store: &ConfigStore,
     id: &str,
     switch_config: &SwitchConfig,
@@ -2739,6 +2739,12 @@ async fn poe_reset_impl(
 
     emit("disabling", None);
     if let Err(e) = session.vendor().execute_raw_commands(&disable_cmds).await {
+        // The disable may have taken effect before it errored, so fail towards
+        // power. A failure here is only logged: the disable error is the one
+        // the caller needs, and a dead session cannot be helped.
+        if let Err(e2) = session.vendor().execute_raw_commands(&enable_cmds).await {
+            warn!("PoE re-enable after a failed disable on port {} also failed: {}", port_id, e2);
+        }
         session.discard().await;
         return Err(format!("Failed to disable PoE: {}", e));
     }

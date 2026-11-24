@@ -1698,8 +1698,20 @@ impl SwitchVendor for FortiswitchSwitch {
     async fn execute_raw_commands(&mut self, commands: &[String]) -> Result<Vec<String>, VendorError> {
         let client = self.client.as_mut()
             .ok_or_else(|| VendorError::SshError("Not connected".to_string()))?;
-        client.execute_commands(commands).await
-            .map_err(|e| VendorError::CommandError(e.to_string()))
+        let outputs = client.execute_commands(commands).await
+            .map_err(|e| VendorError::CommandError(e.to_string()))?;
+        // FortiOS answers a refused command with text, not an error, so the
+        // PoE operations would otherwise report "done" for a port that never changed.
+        for (command, output) in commands.iter().zip(&outputs) {
+            if is_command_rejected(output) {
+                return Err(VendorError::CommandError(format!(
+                    "the switch refused '{}': {}",
+                    command,
+                    refusal_text(output)
+                )));
+            }
+        }
+        Ok(outputs)
     }
 
     fn get_warnings(&self) -> Vec<String> {
@@ -2990,6 +3002,16 @@ impl FortiswitchSwitch {
 /// success.
 fn is_command_rejected(raw: &str) -> bool {
     raw.contains("command parse error") || raw.contains("Command fail. Return code")
+}
+
+/// The switch's own complaint from a refused command's output (the echoed
+/// command and the trailing prompt are dropped).
+fn refusal_text(raw: &str) -> String {
+    raw.lines()
+        .map(str::trim)
+        .filter(|l| l.contains("command parse error") || l.contains("Command fail"))
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 /// Parse `get switch physical-port` output into structured per-port status.
@@ -5394,6 +5416,37 @@ mod tests {
     async fn resume_session_fails_without_an_open_session() {
         let mut switch = create_test_switch();
         assert!(switch.resume_session().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn execute_raw_commands_reports_a_command_the_switch_refuses() {
+        let (client, console) = FakeConsole::spawn(Mode::LoggedIn);
+        console.set_output(
+            "set poe-status",
+            "command parse error before 'poe-status'\r\nCommand fail. Return code -61\r\n",
+        );
+        let mut switch = create_test_switch();
+        switch.client = Some(ConnectionClient::Serial(client));
+
+        let commands = switch.poe_disable_commands("port5");
+        let err = switch
+            .execute_raw_commands(&commands)
+            .await
+            .expect_err("a refused command must not be reported as done");
+
+        assert!(err.to_string().contains("command parse error"), "the switch's own text must reach the caller: {err}");
+    }
+
+    #[tokio::test]
+    async fn execute_raw_commands_passes_accepted_commands() {
+        let (client, _console) = FakeConsole::spawn(Mode::LoggedIn);
+        let mut switch = create_test_switch();
+        switch.client = Some(ConnectionClient::Serial(client));
+
+        let commands = switch.poe_disable_commands("port5");
+        let outputs = switch.execute_raw_commands(&commands).await.expect("accepted commands succeed");
+
+        assert_eq!(outputs.len(), commands.len());
     }
 
     #[tokio::test]

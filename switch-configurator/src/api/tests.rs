@@ -4303,6 +4303,58 @@ mod integration_tests {
         assert!(store.port_status_cache.read().await.is_empty());
     }
 
+    /// Mock switch whose PoE commands are recorded; the first command list
+    /// (the disable) is refused, later ones are accepted.
+    struct RefusingDisableOpener {
+        sent: std::sync::Arc<std::sync::Mutex<Vec<Vec<String>>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::session_pool::SessionOpener for RefusingDisableOpener {
+        async fn open(
+            &self,
+            _config: &SwitchConfig,
+        ) -> Result<Box<dyn crate::vendors::SwitchVendor>, crate::vendors::traits::VendorError> {
+            let mut vendor = crate::vendors::tests::MockVendor::new();
+            vendor.expect_supports_session_reuse().returning(|| true);
+            vendor.expect_disconnect().returning(|| Ok(()));
+            let sent = self.sent.clone();
+            vendor.expect_execute_raw_commands().returning(move |commands| {
+                let mut sent = sent.lock().unwrap();
+                sent.push(commands.to_vec());
+                if sent.len() == 1 {
+                    Err(crate::vendors::traits::VendorError::CommandError("the switch refused it".to_string()))
+                } else {
+                    Ok(vec![])
+                }
+            });
+            Ok(Box::new(vendor))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_poe_reset_turns_power_back_on_when_the_disable_fails() {
+        let mut store = create_fortiswitch_test_store();
+        let sent = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        store.session_pool = crate::session_pool::SessionPool::new(
+            std::sync::Arc::new(RefusingDisableOpener { sent: sent.clone() }),
+            std::time::Duration::from_secs(30),
+        );
+        let switch_config = store.config.read().await.switches[0].clone();
+
+        let result = poe_reset_impl(&store, "test-sw-forti", &switch_config, "1").await;
+
+        let err = result.expect_err("a failed disable fails the reset");
+        assert!(err.contains("the switch refused it"), "the cause must be reported: {err}");
+        let sent = sent.lock().unwrap();
+        assert_eq!(sent.len(), 2, "a second command list must follow the failed disable: {sent:?}");
+        assert!(
+            sent[1].iter().any(|c| c.contains("poe-status enable")),
+            "the follow-up must turn PoE back on (fail towards power): {:?}",
+            sent[1]
+        );
+    }
+
     // ---- SNMP community secrets through the API ----
 
     #[tokio::test]
