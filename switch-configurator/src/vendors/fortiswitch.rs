@@ -3092,6 +3092,7 @@ fn parse_port_status_single_line(raw: &str) -> Vec<PortStatusEntry> {
                 speed,
                 duplex,
                 poe_status,
+                poe_admin: None,
             })
         })
         .collect()

@@ -648,9 +648,9 @@ Query live per-port operational status (link/speed/duplex/PoE) — distinct from
 - `fresh=true`: skip the cache and fetch live
 - `max_age_seconds=N`: treat a cached result older than N seconds as stale (default 60)
 
-**Data source (`?source=`):** `auto` (default), `snmp` or `console`. With `snmp.reads` switched on for the switch, `auto` reads over SNMP (about 0.1s, no console session, no queue turn) and falls back to the console if the switch doesn't answer; `console` never uses SNMP; `snmp` never falls back (`400` if reads aren't enabled for the switch, `502` if it doesn't answer). A live (uncached) answer carries `x-data-source: snmp|console`, and a fallback adds `x-data-source-fallback: snmp-unavailable` (details are in the service log). Over SNMP the `poe_status` field is filled in (`searching`, `delivering`, `disabled`, `fault`, ...); the console path doesn't report it.
+**Data source (`?source=`):** `auto` (default), `snmp` or `console`. With `snmp.reads` switched on for the switch, `auto` reads over SNMP (about 0.1s, no console session, no queue turn) and falls back to the console if the switch doesn't answer; `console` never uses SNMP; `snmp` never falls back (`400` if reads aren't enabled for the switch, `502` if it doesn't answer). A live (uncached) answer carries `x-data-source: snmp|console`, and a fallback adds `x-data-source-fallback: snmp-unavailable` (details are in the service log). Over SNMP the `poe_status` field is filled in (`searching`, `delivering`, `disabled`, `fault`, ...) together with `poe_admin` (`enabled` / `disabled`, the PoE setting itself); the console path reports neither.
 
-**Caching:** same contract as the mac-table lookup (see [`docs/decisions/0001-cached-api-response-contract.md`](../decisions/0001-cached-api-response-contract.md)): `ETag`, `Age`, `Cache-Control: max-age`, `Last-Modified`, and `304 Not Modified` for a matching `If-None-Match`. The background refresher fetches this together with the mac-table in one session every 60s, so a normal request is answered from the cache in about a millisecond.
+**Caching:** same contract as the mac-table lookup (see [`docs/decisions/0001-cached-api-response-contract.md`](../decisions/0001-cached-api-response-contract.md)): `ETag`, `Age`, `Cache-Control: max-age`, `Last-Modified`, and `304 Not Modified` for a matching `If-None-Match`. The background refresher fetches this together with the mac-table in one session every 60s; for a switch with `snmp.reads` a second refresher re-reads it over SNMP every 10s without taking the console turn. A normal request is answered from the cache in about a millisecond.
 
 **Response:**
 
@@ -688,6 +688,28 @@ Query live per-port operational status (link/speed/duplex/PoE) — distinct from
 # Check whether a port that should have a device on it actually has link
 curl -s http://localhost:4002/switches/it-02876-sw1/port-status | jq '.entries[] | select(.port_id == "port1")'
 ```
+
+
+### PoE State
+
+Per-port PoE facts for a PoE-capable switch, taken from the same cached port status (so it never waits for the switch). Raw values only: the service draws no conclusions (no "healthy" or "rebooting" fields).
+
+**Endpoints:** `GET /switches/{id}/poe` (every PoE port) and `GET /switches/{id}/poe/{port_id}` (`3` and `port3` both work)
+
+```json
+{
+  "switch_id": "it-02876-sw1",
+  "ports": [
+    {"port_id": "port1", "link_status": "up", "poe_admin": "enabled", "poe_status": "delivering",
+     "last_operation": {"action": "reset", "status": "completed", "at": "2026-11-24T13:40:00Z"}}
+  ]
+}
+```
+
+- `poe_admin`: the PoE setting (`enabled` / `disabled`). `poe_status`: what the port does with it (`searching`, `delivering`, `fault`, `disabled`, ...). Both come from SNMP and are `null` when the switch is read over the console.
+- `last_operation`: the latest `poe-on` / `poe-off` / `poe-reset` on that port since the service started, or `null`. `status` is `in-progress`, `completed` or `failed` (`detail` holds the reason). It is kept in memory only.
+- The response has the cache headers of the port-status lookup (`Age`, `Cache-Control`, `x-data-source`) but no `ETag`, because `last_operation` changes without a new snapshot.
+- Errors: `404` unknown switch or a port without PoE, `400` a model without PoE or a vendor whose port status is not supported yet.
 
 ---
 

@@ -101,6 +101,15 @@ pub fn port_status_from(rows: &PortStatusRows, supports_poe: impl Fn(&str) -> bo
             None
         };
 
+        let poe_admin = if supports_poe(&name) {
+            name.strip_prefix("port")
+                .and_then(|n| n.parse::<u32>().ok())
+                .and_then(|port| int_at(&peth_admin, &[1, port]))
+                .map(|setting| if setting == 2 { "disabled" } else { "enabled" }.to_string())
+        } else {
+            None
+        };
+
         let entry = PortStatusEntry {
             port_id: name.clone(),
             link_status: oper.get(index).map(|_| if up { "up" } else { "down" }.to_string()),
@@ -115,6 +124,7 @@ pub fn port_status_from(rows: &PortStatusRows, supports_poe: impl Fn(&str) -> bo
                 None
             },
             poe_status,
+            poe_admin,
         };
 
         // The same name can be listed twice: keep the entry that has a speed.
@@ -239,6 +249,18 @@ mod tests {
         assert_eq!(entry(&entries, "port5").poe_status.as_deref(), Some("fault"));
         assert_eq!(entry(&entries, "port9").poe_status, None, "an SFP port has no PoE");
         assert_eq!(entry(&entries, "internal").poe_status, None);
+    }
+
+    #[test]
+    fn poe_admin_setting_is_reported_apart_from_the_power_state() {
+        let mut rows = lab_rows();
+        rows.peth_admin[3].1 = SnmpValue::Integer(2); // port4: admin disabled
+
+        let entries = port_status_from(&rows, poe_ports_1_to_8);
+
+        assert_eq!(entry(&entries, "port1").poe_admin.as_deref(), Some("enabled"));
+        assert_eq!(entry(&entries, "port4").poe_admin.as_deref(), Some("disabled"));
+        assert_eq!(entry(&entries, "port9").poe_admin, None, "an SFP port has no PoE");
     }
 
     #[test]

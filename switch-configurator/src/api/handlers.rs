@@ -2692,6 +2692,115 @@ pub async fn get_port_status(
     }
 }
 
+/// The PoE view of the cached port status: every PoE port with its setting
+/// (`poe_admin`), what it is doing with it (`poe_status`), link state and the
+/// latest PoE operation. Raw facts only; the caller draws conclusions.
+///
+/// GET /switches/{id}/poe
+pub async fn get_poe(State(store): State<ConfigStore>, Path(id): Path<String>) -> axum::response::Response {
+    match poe_view(&store, &id).await {
+        Ok((headers, ports)) => (StatusCode::OK, headers, Json(json!({"switch_id": id, "ports": ports}))).into_response(),
+        Err(response) => response,
+    }
+}
+
+/// GET /switches/{id}/poe/{port_id} (`3` and `port3` both work)
+pub async fn get_poe_port(
+    State(store): State<ConfigStore>,
+    Path((id, port_id)): Path<(String, String)>,
+) -> axum::response::Response {
+    let wanted = port_id.strip_prefix("port").unwrap_or(&port_id).to_string();
+    match poe_view(&store, &id).await {
+        Ok((headers, ports)) => {
+            let found = ports
+                .into_iter()
+                .find(|p| p["port_id"].as_str().map(|n| n.strip_prefix("port").unwrap_or(n)) == Some(wanted.as_str()));
+            match found {
+                Some(port) => (StatusCode::OK, headers, Json(json!({"switch_id": id, "port": port}))).into_response(),
+                None => (
+                    StatusCode::NOT_FOUND,
+                    Json(json!({"error": format!("Port '{}' has no PoE on switch '{}'", port_id, id)})),
+                )
+                    .into_response(),
+            }
+        }
+        Err(response) => response,
+    }
+}
+
+async fn poe_view(
+    store: &ConfigStore,
+    id: &str,
+) -> Result<(axum::http::HeaderMap, Vec<serde_json::Value>), axum::response::Response> {
+    let switch_config = {
+        let config = store.config.read().await;
+        match config.switches.iter().find(|s| s.id == id) {
+            Some(cfg) => cfg.clone(),
+            None => {
+                return Err((
+                    StatusCode::NOT_FOUND,
+                    Json(json!({"error": format!("Switch '{}' not found", id)})),
+                )
+                    .into_response());
+            }
+        }
+    };
+    if !switch_config.model().supports_poe() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("Switch '{}' ({:?}) has no PoE", id, switch_config.model())})),
+        )
+            .into_response());
+    }
+
+    // The port-status path serves the cache, then SNMP, then the console, and
+    // already sets the data-source and cache headers.
+    let response = get_port_status(
+        State(store.clone()),
+        Path(id.to_string()),
+        Query(PortStatusQuery { source: DataSource::Auto, fresh: false, max_age_seconds: None }),
+        None,
+    )
+    .await
+    .into_response();
+    let (mut parts, body) = response.into_parts();
+    if parts.status != StatusCode::OK {
+        return Err(axum::response::Response::from_parts(parts, body));
+    }
+    let bytes = axum::body::to_bytes(body, usize::MAX)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response())?;
+    let entries: Vec<crate::models::PortStatusEntry> = serde_json::from_slice::<serde_json::Value>(&bytes)
+        .ok()
+        .and_then(|v| serde_json::from_value(v["entries"].clone()).ok())
+        .ok_or_else(|| {
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "unreadable port status"}))).into_response()
+        })?;
+
+    // The body also holds in-memory state, so the port-status validator
+    // (a hash of the cached generation) would lie after a PoE operation.
+    parts.headers.remove(axum::http::header::ETAG);
+    parts.headers.remove(axum::http::header::CONTENT_LENGTH);
+    parts.headers.remove(axum::http::header::CONTENT_TYPE);
+
+    let operations = store.poe_operations.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
+    let ports = entries
+        .into_iter()
+        .filter(|e| e.poe_status.is_some() || e.poe_admin.is_some())
+        .map(|e| {
+            let number = e.port_id.strip_prefix("port").unwrap_or(&e.port_id).to_string();
+            json!({
+                "port_id": e.port_id,
+                "link_status": e.link_status,
+                "poe_admin": e.poe_admin,
+                "poe_status": e.poe_status,
+                "last_operation": operations.get(&(id.to_string(), number)),
+            })
+        })
+        .collect();
+    Ok((parts.headers, ports))
+}
+
 pub async fn poe_reset(
     State(store): State<ConfigStore>,
     Path((id, port_id)): Path<(String, String)>,

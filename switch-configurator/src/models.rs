@@ -1444,6 +1444,10 @@ pub struct PortStatusEntry {
     pub speed: Option<String>,
     pub duplex: Option<String>,
     pub poe_status: Option<String>,
+    /// The PoE setting itself ("enabled" / "disabled"), apart from what the
+    /// port is doing with it (`poe_status`). Only read over SNMP.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub poe_admin: Option<String>,
 }
 
 /// Granular SNMP state difference for efficient configuration

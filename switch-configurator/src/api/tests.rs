@@ -4095,6 +4095,7 @@ mod integration_tests {
                 speed: Some("1000Mbps".to_string()),
                 duplex: Some("full".to_string()),
                 poe_status: None,
+                poe_admin: None,
             }],
             raw_output: raw.to_string(),
             fetched_at: chrono::Utc::now(),
@@ -4608,6 +4609,113 @@ mod integration_tests {
 
         assert_eq!(opener.port_calls.load(Ordering::SeqCst), 1);
         assert!(store.port_status_cache.read().await.contains_key("test-sw-forti"));
+    }
+
+    async fn poe_json(store: &ConfigStore, port: Option<&str>) -> (StatusCode, axum::http::HeaderMap, Value) {
+        let response = match port {
+            None => get_poe(axum::extract::State(store.clone()), axum::extract::Path("test-sw-forti".to_string()))
+                .await
+                .into_response(),
+            Some(p) => get_poe_port(
+                axum::extract::State(store.clone()),
+                axum::extract::Path(("test-sw-forti".to_string(), p.to_string())),
+            )
+            .await
+            .into_response(),
+        };
+        let (parts, body) = response.into_parts();
+        let bytes = axum::body::to_bytes(body, usize::MAX).await.unwrap();
+        (parts.status, parts.headers, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    }
+
+    #[tokio::test]
+    async fn poe_read_lists_only_poe_ports_with_setting_and_power_state() {
+        let (addr, _agent) = agent_serving(lab_agent_rows()).await;
+        let (store, opener) = forti_store_with_snmp(addr.port(), SnmpReadsMode::Auto).await;
+
+        let (status, headers, body) = poe_json(&store, None).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(header(&headers, "x-data-source"), Some("snmp"));
+        assert!(headers.get("etag").is_none(), "the body also holds in-memory state, so the cache validator would lie");
+        let ports = body["ports"].as_array().unwrap();
+        assert_eq!(ports.len(), 10, "ports 1-10 carry PoE for the 124F model; `internal` has none: {body}");
+        assert!(ports.iter().all(|p| p["port_id"] != "internal"));
+        assert_eq!(ports[0]["port_id"], "port1");
+        assert_eq!(ports[0]["poe_admin"], "enabled");
+        assert_eq!(ports[0]["poe_status"], "searching");
+        assert!(ports[0]["last_operation"].is_null());
+        assert_eq!(opener.opens.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn poe_read_for_one_port_accepts_the_short_and_the_long_name() {
+        let (addr, _agent) = agent_serving(lab_agent_rows()).await;
+        let (store, _opener) = forti_store_with_snmp(addr.port(), SnmpReadsMode::Auto).await;
+
+        for name in ["3", "port3"] {
+            let (status, _, body) = poe_json(&store, Some(name)).await;
+            assert_eq!(status, StatusCode::OK, "{name}: {body}");
+            assert_eq!(body["port"]["port_id"], "port3");
+        }
+        let (status, _, _) = poe_json(&store, Some("99")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn poe_read_refuses_a_model_without_poe() {
+        let (addr, _agent) = agent_serving(lab_agent_rows()).await;
+        let (store, _opener) = forti_store_with_snmp(addr.port(), SnmpReadsMode::Auto).await;
+        store.config.write().await.switches[0].model = Some(SwitchModel::Fortiswitch124E);
+
+        let (status, _, body) = poe_json(&store, None).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    }
+
+    #[tokio::test]
+    async fn poe_read_for_an_unknown_switch_is_404() {
+        let store = create_fortiswitch_test_store();
+        let response = get_poe(axum::extract::State(store), axum::extract::Path("nope".to_string())).await.into_response();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn last_operation_follows_the_poe_events_of_a_port() {
+        let (addr, _agent) = agent_serving(lab_agent_rows()).await;
+        let (store, _opener) = forti_store_with_snmp(addr.port(), SnmpReadsMode::Auto).await;
+        let set = |stage: &str, detail: Option<&str>| {
+            store.emit_event(crate::config::SseEvent::PoeSet {
+                switch_id: "test-sw-forti".into(),
+                port_id: "2".into(),
+                action: "off".into(),
+                stage: stage.into(),
+                detail: detail.map(String::from),
+            })
+        };
+
+        set("connecting", None);
+        set("setting", None);
+        let (_, _, body) = poe_json(&store, Some("2")).await;
+        assert_eq!(body["port"]["last_operation"]["status"], "in-progress");
+        assert_eq!(body["port"]["last_operation"]["action"], "off");
+
+        set("done", None);
+        let (_, _, body) = poe_json(&store, Some("2")).await;
+        assert_eq!(body["port"]["last_operation"]["status"], "completed");
+
+        store.emit_event(crate::config::SseEvent::PoeReset {
+            switch_id: "test-sw-forti".into(),
+            port_id: "port2".into(),
+            stage: "failed".into(),
+            detail: Some("the switch refused it".into()),
+        });
+        let (_, _, body) = poe_json(&store, Some("2")).await;
+        assert_eq!(body["port"]["last_operation"]["status"], "failed");
+        assert_eq!(body["port"]["last_operation"]["action"], "reset");
+        assert_eq!(body["port"]["last_operation"]["detail"], "the switch refused it");
+        let (_, _, other) = poe_json(&store, Some("3")).await;
+        assert!(other["port"]["last_operation"].is_null(), "other ports are unaffected");
     }
 
     async fn mac_table_with(store: &ConfigStore, source: DataSource) -> (StatusCode, axum::http::HeaderMap, Value) {

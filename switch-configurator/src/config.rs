@@ -450,6 +450,22 @@ pub struct ConfigStore {
     pub port_status_cache: Arc<RwLock<std::collections::HashMap<String, CachedPortStatus>>>,
     /// Open vendor sessions kept between operations (see `session_pool`).
     pub session_pool: crate::session_pool::SessionPool,
+    /// The latest PoE operation per (switch id, port number), kept in memory
+    /// only: it is what `GET /switches/{id}/poe` reports as `last_operation`.
+    pub poe_operations: Arc<std::sync::Mutex<std::collections::HashMap<(String, String), PoeOperation>>>,
+}
+
+/// What the latest PoE operation on a port is doing or did.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PoeOperation {
+    /// "on", "off" or "reset".
+    pub action: String,
+    /// "in-progress", "completed" or "failed".
+    pub status: String,
+    /// The reason, for a failure.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    pub at: chrono::DateTime<chrono::Utc>,
 }
 
 impl ConfigStore {
@@ -465,11 +481,46 @@ impl ConfigStore {
             mac_table_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
             port_status_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
             session_pool: crate::session_pool::SessionPool::with_vendor_sessions(),
+            poe_operations: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
 
     pub fn emit_event(&self, event: SseEvent) {
+        self.record_poe_operation(&event);
+        // No receiver is the normal case when nobody watches the event stream.
         let _ = self.events.send(event);
+    }
+
+    /// Keeps `poe_operations` in step with the PoE events, which every PoE
+    /// operation already emits at each stage.
+    fn record_poe_operation(&self, event: &SseEvent) {
+        let (switch_id, port_id, action, stage, detail) = match event {
+            SseEvent::PoeSet { switch_id, port_id, action, stage, detail } => (switch_id, port_id, action.as_str(), stage, detail),
+            SseEvent::PoeReset { switch_id, port_id, stage, detail } => (switch_id, port_id, "reset", stage, detail),
+            _ => return,
+        };
+        let status = match stage.as_str() {
+            "done" => "completed",
+            "failed" => "failed",
+            _ => "in-progress",
+        };
+        let operation = PoeOperation {
+            action: action.to_string(),
+            status: status.to_string(),
+            // Other stages put progress (a countdown) in `detail`, which is not a reason.
+            detail: if status == "failed" { detail.clone() } else { None },
+            at: chrono::Utc::now(),
+        };
+        let port = port_id.strip_prefix("port").unwrap_or(port_id).to_string();
+        match self.poe_operations.lock() {
+            Ok(mut operations) => {
+                operations.insert((switch_id.clone(), port), operation);
+            }
+            // A poisoned lock only means another thread panicked mid-update; the map is still usable.
+            Err(poisoned) => {
+                poisoned.into_inner().insert((switch_id.clone(), port), operation);
+            }
+        }
     }
 }
 
