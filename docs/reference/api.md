@@ -550,6 +550,27 @@ curl -X POST http://localhost:4002/switches/it-02876-sw1/poe-on/5
 
 ---
 
+### Metrics
+
+`GET /metrics` serves the cached per-port facts in Prometheus text format (`text/plain; version=0.0.4`). It reads the same cache as `/port-status` and `/poe`, so a scrape never waits for a switch and never opens a console session; the data is as old as the last refresh (about 10 s for a switch with `snmp.reads`, otherwise up to 60 s). Raw facts only: no verdicts, and a switch with no cached data has no series at all.
+
+| Metric | Labels | Meaning |
+|---|---|---|
+| `switch_port_status_age_seconds` | `switch` | seconds since the port status was read |
+| `switch_port_link_up` | `switch`, `port` | 1 if the port has link |
+| `switch_port_poe_admin_enabled` | `switch`, `port` | 1 if PoE is enabled on the port (the setting; SNMP only) |
+| `switch_port_poe_state` | `switch`, `port`, `state` | state set over `disabled`, `searching`, `delivering`, `fault`, `test`, `unknown`: 1 for the current state (SNMP only) |
+
+PoE class, fault counters and time since the last link change are not exported yet: they need verifying on hardware first (`docs/decisions/0003-poe-batch-control-and-telemetry.md`, H2/H3).
+
+```yaml
+scrape_configs:
+  - job_name: switch-configurator
+    static_configs: [{targets: ["localhost:4002"]}]
+```
+
+---
+
 ### PoE Batch
 
 Turn PoE on, off or power-cycle several ports in one request. It runs on one console session and one turn of the switch's queue (so it is queued like `apply`), instead of one session per port.

@@ -145,13 +145,18 @@ and changelog entry. Principle: **publish raw facts, draw no conclusions**
 - **Not yet:** the single-port endpoints do not verify; they are one-port
   batches only in spirit. Moving them onto the same core is a follow-up.
 
-### R3 — 0.30.0: `/metrics` (Prometheus text, optional)
+### R3 — 0.30.0: `/metrics` (Prometheus text, optional) (shipped)
 - Served from the same cache the PoE read uses (no delay, no switch traffic at
-  scrape time); numbers are at most one refresh interval old.
-- `switch_snmp_up{switch}`, `switch_snmp_rewalks_total{switch}`, per-port PoE
-  admin/state/class, fault counters `..._total`, link state and
-  `switch_port_last_change_seconds`. Base units, `switch_` prefix. Raw data
-  only; no watts, no verdicts.
+  scrape time); numbers are at most one refresh interval old, and
+  `switch_port_status_age_seconds` says how old. A fresh registry is built per
+  scrape (`prometheus-client`, classic text format 0.0.4).
+- Shipped: `switch_port_status_age_seconds`, `switch_port_link_up`,
+  `switch_port_poe_admin_enabled`, `switch_port_poe_state` (state set). Base
+  units, `switch_` prefix. Raw data only; no watts, no verdicts; no series (not
+  zeros) for a switch without cached data.
+- Still open, needs hardware evidence (H2/H3): PoE class, the fault counters
+  `..._total`, `switch_port_last_change_seconds`, and
+  `switch_snmp_rewalks_total` (needs the gate to publish its re-walk count).
 - No auth (closed lab network); binds wherever the API binds.
 
 ### Prerequisite for R4 — shared library crate (other repo, needs its owner's OK)

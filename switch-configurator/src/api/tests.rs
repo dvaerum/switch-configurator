@@ -4630,6 +4630,76 @@ mod integration_tests {
         assert_eq!(outcomes[1].detail, None, "confirmed ports carry no note: {outcomes:?}");
     }
 
+    // ---- /metrics ----
+
+    async fn metrics_text(store: &ConfigStore) -> (StatusCode, String, String) {
+        let response = crate::api::metrics::get_metrics(axum::extract::State(store.clone())).await.into_response();
+        let (parts, body) = response.into_parts();
+        let bytes = axum::body::to_bytes(body, usize::MAX).await.unwrap();
+        let content_type = parts.headers.get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+        (parts.status, content_type, String::from_utf8(bytes.to_vec()).unwrap())
+    }
+
+    fn poe_entry(name: &str, link: &str, admin: Option<&str>, state: Option<&str>) -> crate::models::PortStatusEntry {
+        crate::models::PortStatusEntry {
+            port_id: name.into(),
+            link_status: Some(link.into()),
+            poe_admin: admin.map(String::from),
+            poe_status: state.map(String::from),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn metrics_publish_the_cached_port_facts_without_asking_the_switch() {
+        let (store, _calls, opens) = poe_batch_store(accept_all());
+        store.port_status_cache.write().await.insert(
+            "test-sw-forti".to_string(),
+            crate::config::CachedPortStatus {
+                entries: vec![
+                    poe_entry("port1", "up", Some("enabled"), Some("delivering")),
+                    poe_entry("port2", "down", Some("disabled"), Some("disabled")),
+                    poe_entry("internal", "up", None, None),
+                ],
+                raw_output: String::new(),
+                fetched_at: chrono::Utc::now() - chrono::Duration::seconds(12),
+                generation_id: uuid::Uuid::new_v4(),
+            },
+        );
+
+        let (status, content_type, body) = metrics_text(&store).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(content_type.starts_with("text/plain"), "{content_type}");
+        for line in [
+            r#"switch_port_link_up{switch="test-sw-forti",port="port1"} 1"#,
+            r#"switch_port_link_up{switch="test-sw-forti",port="port2"} 0"#,
+            r#"switch_port_poe_admin_enabled{switch="test-sw-forti",port="port1"} 1"#,
+            r#"switch_port_poe_admin_enabled{switch="test-sw-forti",port="port2"} 0"#,
+            r#"switch_port_poe_state{switch="test-sw-forti",port="port1",state="delivering"} 1"#,
+            r#"switch_port_poe_state{switch="test-sw-forti",port="port1",state="searching"} 0"#,
+            r#"switch_port_poe_state{switch="test-sw-forti",port="port2",state="disabled"} 1"#,
+        ] {
+            assert!(body.contains(line), "missing {line}\n{body}");
+        }
+        assert!(!body.contains(r#"port="internal",state"#) && !body.contains(r#"poe_admin_enabled{switch="test-sw-forti",port="internal""#),
+            "a port without PoE facts has no PoE series:\n{body}");
+        let age_line = body.lines().find(|l| l.starts_with("switch_port_status_age_seconds{")).expect("age series");
+        let age: f64 = age_line.rsplit(' ').next().unwrap().parse().unwrap();
+        assert!((12.0..60.0).contains(&age), "{age_line}");
+        assert_eq!(opens.load(std::sync::atomic::Ordering::SeqCst), 0, "a scrape never opens a console session");
+    }
+
+    #[tokio::test]
+    async fn metrics_are_empty_for_a_switch_without_cached_data_rather_than_zero() {
+        let store = create_fortiswitch_test_store();
+
+        let (status, _, body) = metrics_text(&store).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(!body.contains("test-sw-forti"), "no data means no series, not zeros:\n{body}");
+    }
+
     // ---- SNMP community secrets through the API ----
 
     #[tokio::test]
