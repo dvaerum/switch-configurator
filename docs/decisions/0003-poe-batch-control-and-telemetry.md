@@ -106,8 +106,9 @@ and changelog entry. Principle: **publish raw facts, draw no conclusions**
   `status` is `in-progress` | `completed` | `failed`; queued work shows as
   `in-progress`. There is no operation id: the port is the thing you ask about.
 - Walk `pethPsePortTable` once through the gate (not two column walks).
-- Fix: the refresher skips a switch while the console is busy even though SNMP
-  reads need no console; SNMP refreshes must not wait for the console turn.
+- Freshness: the 60 s lookup refresher is too slow and skips a busy switch, so a
+  separate SNMP-only refresher (every 10 s, no console turn) keeps the port-status
+  cache warm. Shipped in 0.27.4.
 - Watts are **not** in the default read (console-only on FortiSwitch); possible
   later behind an explicit option after hardware evidence (H4).
 

@@ -4497,6 +4497,30 @@ mod integration_tests {
     }
 
     #[tokio::test]
+    async fn snmp_port_status_refresh_updates_the_cache_even_while_the_console_is_busy() {
+        use std::sync::atomic::Ordering;
+        let (addr, _agent) = agent_serving(lab_agent_rows()).await;
+        let (store, opener) = forti_store_with_snmp(addr.port(), SnmpReadsMode::Auto).await;
+        let busy = store.status.try_acquire_configuring("test-sw-forti".to_string()).await.expect("turn is free");
+
+        refresh_snmp_port_status_once(&store).await;
+
+        assert_eq!(store.port_status_cache.read().await["test-sw-forti"].entries.len(), 11);
+        assert_eq!(opener.opens.load(Ordering::SeqCst), 0, "SNMP needs no console session");
+        assert!(store.status.is_currently_configuring("test-sw-forti").await, "the busy turn must be left alone");
+        busy.release().await;
+    }
+
+    #[tokio::test]
+    async fn snmp_port_status_refresh_skips_switches_without_snmp_reads() {
+        let store = create_fortiswitch_test_store();
+
+        refresh_snmp_port_status_once(&store).await;
+
+        assert!(store.port_status_cache.read().await.is_empty());
+    }
+
+    #[tokio::test]
     async fn auto_falls_back_to_the_console_when_snmp_does_not_answer_and_says_so() {
         use std::sync::atomic::Ordering;
         let (port, _silent) = silent_port().await;

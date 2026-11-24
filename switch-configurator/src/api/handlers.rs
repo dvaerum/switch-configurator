@@ -2357,6 +2357,71 @@ pub(crate) async fn refresh_all_lookups_once(store: &ConfigStore) {
 }
 
 
+/// How often port status (link and PoE) is re-read over SNMP in the
+/// background, so readers get cached data that is seconds old instead of
+/// waiting for the 60 s lookup refresher.
+pub(crate) const SNMP_PORT_STATUS_REFRESH_SECS: u64 = 10;
+
+/// Keeps the port-status cache fresh over SNMP. Never returns; spawn once.
+pub async fn spawn_snmp_port_status_refresher(store: ConfigStore) {
+    let mut ticker = tokio::time::interval(std::time::Duration::from_secs(SNMP_PORT_STATUS_REFRESH_SECS));
+    // A slow round must not be followed by a burst of catch-up rounds.
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        ticker.tick().await;
+        refresh_snmp_port_status_once(&store).await;
+    }
+}
+
+/// One round of `spawn_snmp_port_status_refresher`: every FortiSwitch with SNMP
+/// reads is walked concurrently. It takes no console turn (SNMP does not use
+/// the console), so a long apply or PoE operation does not stall it. A switch
+/// that does not answer keeps its previous cache entry; the lookup refresher
+/// and the endpoints still fall back to the console.
+pub(crate) async fn refresh_snmp_port_status_once(store: &ConfigStore) {
+    let switches: Vec<SwitchConfig> = {
+        let config = store.config.read().await;
+        config
+            .switches
+            .iter()
+            .filter(|s| s.model().vendor() == Vendor::Fortiswitch)
+            .cloned()
+            .collect()
+    };
+
+    let mut walks = tokio::task::JoinSet::new();
+    for switch_config in switches {
+        let Some(target) = crate::snmp::lookup::target_for(&switch_config) else {
+            continue;
+        };
+        let store = store.clone();
+        walks.spawn(async move {
+            let model = switch_config.model();
+            let poe = |name: &str| model.port_supports_poe(name.strip_prefix("port").unwrap_or(name));
+            match crate::snmp::lookup::fetch_port_status(&target, poe).await {
+                Ok((entries, raw)) => {
+                    store.port_status_cache.write().await.insert(
+                        switch_config.id.clone(),
+                        crate::config::CachedPortStatus {
+                            entries,
+                            raw_output: raw,
+                            fetched_at: chrono::Utc::now(),
+                            generation_id: uuid::Uuid::new_v4(),
+                        },
+                    );
+                    debug!("SNMP port-status refresher: refreshed '{}'", switch_config.id);
+                }
+                Err(e) => warn!("SNMP port-status refresher: '{}' failed: {:#}", switch_config.id, e),
+            }
+        });
+    }
+    while let Some(joined) = walks.join_next().await {
+        if let Err(e) = joined {
+            warn!("SNMP port-status refresher: a walk panicked: {}", e);
+        }
+    }
+}
+
 pub async fn get_mac_table(
     State(store): State<ConfigStore>,
     Path(id): Path<String>,

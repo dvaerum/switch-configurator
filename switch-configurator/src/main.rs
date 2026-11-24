@@ -226,6 +226,7 @@ async fn main() -> Result<()> {
     // live-fetch latency itself. Not joined below (see its own doc comment
     // for why a panic in one refresh cycle can't take down the service).
     tokio::spawn(api::handlers::spawn_lookup_refresher(store.clone()));
+    tokio::spawn(api::handlers::spawn_snmp_port_status_refresher(store.clone()));
 
     // Start file watcher if enabled
     let watcher_handle = if args.watch {
