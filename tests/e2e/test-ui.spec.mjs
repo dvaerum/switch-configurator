@@ -170,6 +170,74 @@ test.describe('PoE Tab', () => {
   });
 });
 
+// The demo backend cannot read PoE, so these feed the panel recorded data (shaped like
+// GET /switches/{id}/poe of a real 108F-POE) and a recorded event stream.
+const POE_FIXTURE = {
+  switch_id: 'demo-sw-01',
+  unit: { budget_watts: 65, consumption_watts: 4, threshold_percent: 80, status: 'on' },
+  ports: [1, 2, 3].map((n) => ({
+    port_id: `port${n}`, link_status: n === 3 ? 'up' : 'down', poe_admin: 'enabled',
+    poe_status: n === 3 ? 'delivering' : 'searching', poe_class: n === 3 ? 2 : 0,
+    poe_counters: { mps_absent: n === 3 ? 5 : 0, invalid_signature: 0, power_denied: 0, overload: 0, short: 0 },
+    link_traps: n === 3 ? { port_id: 'port3', down: 2, up: 2, last_state: 'up', last_at: '2026-11-24T17:00:00Z' } : null,
+    last_operation: null,
+  })),
+};
+
+test.describe('PoE Tab with data', () => {
+  test('shows the recorded state, counters and link traps per port', async ({ page }) => {
+    await page.route('**/switch/demo-sw-01/poe-data', (route) => route.fulfill({ json: POE_FIXTURE }));
+    await page.goto(`${UI_URL}/switch/demo-sw-01/poe`);
+    await expect(page.locator('#poe-unit')).toContainText('4 W of 65 W');
+    const row3 = page.locator('#poe-rows tr[data-port="3"]');
+    await expect(row3).toContainText('delivering');
+    await expect(row3).toContainText('5 / 0 / 0 / 0 / 0');
+    await expect(row3).toContainText('2 / 2');
+    await expect(page.locator('#poe-rows tr[data-port]')).toHaveCount(3);
+  });
+
+  test('runs a batch on the ticked ports and follows its events to the summary', async ({ page }) => {
+    let posted = null;
+    await page.route('**/switch/demo-sw-01/poe-data', (route) => route.fulfill({ json: POE_FIXTURE }));
+    await page.route('**/switch/demo-sw-01/poe-batch', (route) => {
+      posted = route.request().postDataJSON();
+      return route.fulfill({ status: 202, json: { status: 'accepted' } });
+    });
+    const event = (name, data) => `event: ${name}\ndata: ${JSON.stringify({ event: name, data })}\n\n`;
+    await page.route('**/events', (route) =>
+      route.fulfill({
+        status: 200,
+        headers: { 'content-type': 'text/event-stream' },
+        body:
+          event('poe-set', { switch_id: 'demo-sw-01', port_id: '1', action: 'off', stage: 'completed', status: 'completed' }) +
+          event('poe-set', { switch_id: 'demo-sw-01', port_id: '2', action: 'off', stage: 'failed', status: 'failed', detail: 'the switch refused it' }) +
+          event('poe-batch', { switch_id: 'demo-sw-01', action: 'off', status: 'failed', completed: ['1'], failed: [{ port_id: '2', detail: 'the switch refused it' }] }),
+      }),
+    );
+    page.on('dialog', (dialog) => dialog.accept());
+    await page.goto(`${UI_URL}/switch/demo-sw-01/poe`);
+    await expect(page.locator('#poe-rows tr[data-port="2"]')).toBeVisible();
+
+    await page.locator('#poe-rows tr[data-port="1"] input').check();
+    await page.locator('#poe-rows tr[data-port="2"] input').check();
+    await page.getByRole('button', { name: 'Turn off' }).click();
+
+    await expect(page.locator('#poe-message')).toContainText('1 failed, 1 completed');
+    await expect(page.locator('#poe-rows tr[data-port="1"]')).toContainText('completed');
+    await expect(page.locator('#poe-rows tr[data-port="2"]')).toContainText('failed: the switch refused it');
+    expect(posted).toEqual({ action: 'off', ports: ['1', '2'] });
+  });
+
+  test('never turns switch-supplied text into HTML', async ({ page }) => {
+    const evil = JSON.parse(JSON.stringify(POE_FIXTURE));
+    evil.ports[0].poe_status = '<img src=x onerror="window.__pwned=1">';
+    await page.route('**/switch/demo-sw-01/poe-data', (route) => route.fulfill({ json: evil }));
+    await page.goto(`${UI_URL}/switch/demo-sw-01/poe`);
+    await expect(page.locator('#poe-rows tr[data-port="1"]')).toContainText('<img src=x');
+    expect(await page.evaluate(() => window.__pwned)).toBeUndefined();
+  });
+});
+
 // ============================================================================
 // Edit Workflow — Draft Lifecycle
 // ============================================================================
@@ -237,6 +305,7 @@ test.describe('Edit VLANs CRUD', () => {
     await expect(page).toHaveURL(/\/edit\/vlans/);
 
     // Count initial VLANs
+    await expect(page.locator('tbody tr').first()).toBeVisible();
     const initialRows = await page.locator('tbody tr').count();
 
     // Fill add form
@@ -313,6 +382,7 @@ test.describe('Edit Ports CRUD', () => {
     // count() does not auto-wait: without this it can read the previous page's single row
     await expect(page).toHaveURL(/\/edit\/ports/);
 
+    await expect(page.locator('tbody tr').first()).toBeVisible();
     const initialRows = await page.locator('tbody tr').count();
 
     // Fill add form

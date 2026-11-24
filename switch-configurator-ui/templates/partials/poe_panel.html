@@ -106,7 +106,8 @@
             var t = p.link_traps;
             put(tr, 'traps', t ? (t.down + ' / ' + t.up) : '-', t ? ('last: ' + t.last_state + ' at ' + t.last_at) : '');
             // A batch that is running owns this cell until it ends.
-            if (!running) put(tr, 'last', describe(p.last_operation));
+            // (and a port the backend has no operation for keeps what the batch just showed)
+            if (!running && p.last_operation) put(tr, 'last', describe(p.last_operation));
         });
         Array.prototype.forEach.call(rows.querySelectorAll('tr[data-port]'), function (tr) {
             if (!seen[tr.dataset.port]) tr.remove();
