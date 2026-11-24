@@ -2800,6 +2800,8 @@ async fn poe_view(
                 "link_status": e.link_status,
                 "poe_admin": e.poe_admin,
                 "poe_status": e.poe_status,
+                "poe_class": e.poe_class,
+                "poe_counters": e.poe_counters,
                 "last_operation": operations.get(&(id.to_string(), number)),
             })
         })

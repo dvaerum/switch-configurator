@@ -119,6 +119,16 @@ pub fn lab_port_rows() -> PortStatusRows {
     for port in 1..=11u32 {
         rows.peth_admin.push(int(PETH_PORT_ADMIN_ENABLE, &[1, port], 1));
         rows.peth_detection.push(int(PETH_PORT_DETECTION_STATUS, &[1, port], 2));
+        rows.peth_class.push(int(PETH_PORT_POWER_CLASS, &[1, port], 1));
+        for column in [
+            PETH_PORT_MPS_ABSENT_COUNTER,
+            PETH_PORT_INVALID_SIGNATURE_COUNTER,
+            PETH_PORT_POWER_DENIED_COUNTER,
+            PETH_PORT_OVERLOAD_COUNTER,
+            PETH_PORT_SHORT_COUNTER,
+        ] {
+            rows.peth_counters.push(int(column, &[1, port], 0));
+        }
     }
     rows
 }
@@ -161,5 +171,5 @@ pub fn agent_rows(groups: &[&[Row]]) -> Vec<(Vec<u32>, Value)> {
 pub fn lab_agent_rows() -> Vec<(Vec<u32>, Value)> {
     let p = lab_port_rows();
     let f = lab_fdb();
-    agent_rows(&[&p.if_name, &p.if_oper_status, &p.if_high_speed, &p.duplex, &p.peth_admin, &p.peth_detection, &f.address, &f.port, &f.status])
+    agent_rows(&[&p.if_name, &p.if_oper_status, &p.if_high_speed, &p.duplex, &p.peth_admin, &p.peth_detection, &p.peth_class, &p.peth_counters, &f.address, &f.port, &f.status])
 }

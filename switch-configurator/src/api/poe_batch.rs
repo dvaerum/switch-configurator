@@ -3,7 +3,7 @@
 //!
 //! Every port gets its own events and its own outcome, and a port that fails
 //! does not stop the others. A port is `completed` only once the PoE setting
-//! has been read back over SNMP as asked (see `confirm_settings`); power state
+//! has been read back from the switch as asked (see `read_back`); power state
 //! never decides that, because a device that is off or unplugged is normal.
 //! Design: `docs/decisions/0003-poe-batch-control-and-telemetry.md`.
 
@@ -28,6 +28,12 @@ pub const MAX_PORTS_PER_REQUEST: usize = 64;
 
 /// Seconds a reset leaves the ports unpowered, as in the single-port reset.
 const RESET_WAIT_SECONDS: u64 = 3;
+
+/// A FortiSwitch applies a PoE change a few seconds after accepting the command
+/// (measured on a 108F: the first read-back still showed the old setting), so
+/// the read-back asks again until it matches or these run out.
+const READ_BACK_ATTEMPTS: u32 = 6;
+const READ_BACK_PAUSE: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PoeAction {
@@ -74,19 +80,6 @@ pub struct PortOutcome {
     pub status: String,
     /// The reason for a failure, or the note that a completed port was not confirmed.
     pub detail: Option<String>,
-}
-
-/// How long the SNMP read-back keeps asking before it gives up.
-#[derive(Debug, Clone, Copy)]
-pub struct ConfirmPlan {
-    pub attempts: u32,
-    pub pause: Duration,
-}
-
-impl Default for ConfirmPlan {
-    fn default() -> Self {
-        Self { attempts: 10, pause: Duration::from_secs(1) }
-    }
 }
 
 /// Trims, lower-cases, drops a `port` prefix and duplicates (order kept).
@@ -170,7 +163,7 @@ pub async fn poe_batch(
                 return;
             }
         };
-        let outcomes = run_batch(&store_bg, &id_bg, &switch_config, action, &ports_bg, ConfirmPlan::default()).await;
+        let outcomes = run_batch(&store_bg, &id_bg, &switch_config, action, &ports_bg).await;
         guard.release().await;
         info!("PoE {} batch on '{}' finished: {} ports", action.name(), id_bg, outcomes.len());
     });
@@ -260,12 +253,12 @@ pub async fn run_batch(
     switch_config: &SwitchConfig,
     action: PoeAction,
     ports: &[String],
-    confirm: ConfirmPlan,
 ) -> Vec<PortOutcome> {
     for port in ports {
         emit_port(store, id, action, port, "connecting", None);
     }
     let mut failure: Vec<Option<String>> = vec![None; ports.len()];
+    let mut notes: HashMap<usize, String> = HashMap::new();
 
     match store.session_pool.checkout(switch_config).await {
         Err(e) => {
@@ -277,28 +270,25 @@ pub async fn run_batch(
             if lost {
                 session.discard().await;
             } else {
-                session.release().await;
-            }
-        }
-    }
-
-    // Read the setting back for the ports the switch accepted.
-    let accepted: Vec<usize> = (0..ports.len()).filter(|&i| failure[i].is_none()).collect();
-    let mut notes: HashMap<usize, String> = HashMap::new();
-    if !accepted.is_empty() {
-        for &i in &accepted {
-            emit_port(store, id, action, &ports[i], "verifying", None);
-        }
-        let wanted: Vec<&str> = accepted.iter().map(|&i| ports[i].as_str()).collect();
-        let verdicts = confirm_settings(store, id, switch_config, &wanted, action.enabled_afterwards(), confirm).await;
-        for &i in &accepted {
-            match verdicts.get(ports[i].as_str()) {
-                Some(Verdict::Confirmed) => {}
-                Some(Verdict::Unconfirmed(note)) => {
-                    notes.insert(i, note.clone());
+                // Read the setting back, in the same session, for the ports the switch accepted.
+                let accepted: Vec<usize> = (0..ports.len()).filter(|&i| failure[i].is_none()).collect();
+                if !accepted.is_empty() {
+                    for &i in &accepted {
+                        emit_port(store, id, action, &ports[i], "verifying", None);
+                    }
+                    let wanted: Vec<&str> = accepted.iter().map(|&i| ports[i].as_str()).collect();
+                    let verdicts = read_back(&mut session, switch_config, &wanted, action.enabled_afterwards()).await;
+                    for &i in &accepted {
+                        match verdicts.get(ports[i].as_str()) {
+                            Some(Verdict::Confirmed) | None => {}
+                            Some(Verdict::Unconfirmed(note)) => {
+                                notes.insert(i, note.clone());
+                            }
+                            Some(Verdict::Wrong(reason)) => failure[i] = Some(reason.clone()),
+                        }
+                    }
                 }
-                Some(Verdict::Wrong(reason)) => failure[i] = Some(reason.clone()),
-                None => {}
+                session.release().await;
             }
         }
     }
@@ -414,83 +404,50 @@ enum Verdict {
     Wrong(String),
 }
 
-/// Reads the PoE setting back over SNMP (through the per-switch gate) until
-/// every port shows what was asked or the attempts run out.
-async fn confirm_settings(
-    store: &ConfigStore,
-    id: &str,
+/// Reads every port's PoE setting back from the switch itself, in the session
+/// that just changed it. Not over SNMP: on a FortiSwitch 108F-POE (7.2.8) the
+/// agent showed a change only ~30 s after the console had applied it, so an
+/// SNMP read-back would report a correctly changed port as failed.
+async fn read_back(
+    session: &mut crate::session_pool::Session,
     switch_config: &SwitchConfig,
     ports: &[&str],
     enabled: bool,
-    plan: ConfirmPlan,
 ) -> HashMap<String, Verdict> {
-    let mut verdicts: HashMap<String, Verdict> = HashMap::new();
-    let Some(target) = crate::snmp::lookup::target_for(switch_config) else {
-        for port in ports {
-            verdicts.insert(
-                port.to_string(),
-                Verdict::Unconfirmed("not confirmed: SNMP reads are not enabled for this switch".to_string()),
-            );
-        }
-        return verdicts;
+    let unconfirmed = |why: String| -> HashMap<String, Verdict> {
+        ports.iter().map(|p| (p.to_string(), Verdict::Unconfirmed(format!("not confirmed: {}", why)))).collect()
     };
-
-    let model = switch_config.model();
-    let poe = |name: &str| model.port_supports_poe(name.strip_prefix("port").unwrap_or(name));
-    let wanted = if enabled { "enabled" } else { "disabled" };
-    let mut pending: Vec<&str> = ports.to_vec();
-    let mut last_seen: HashMap<String, Option<String>> = HashMap::new();
-    let mut answered = false;
-    let mut last_error = String::new();
-
-    for attempt in 0..plan.attempts.max(1) {
+    if switch_config.model().vendor() != Vendor::Fortiswitch {
+        return unconfirmed("this switch type has no read-back yet".to_string());
+    }
+    let mut settings = HashMap::new();
+    for attempt in 0..READ_BACK_ATTEMPTS {
         if attempt > 0 {
-            tokio::time::sleep(plan.pause).await;
+            tokio::time::sleep(READ_BACK_PAUSE).await;
         }
-        match crate::snmp::lookup::fetch_port_status(&target, poe).await {
-            Ok((entries, raw)) => {
-                answered = true;
-                for port in &pending {
-                    let entry = entries.iter().find(|e| e.port_id.strip_prefix("port") == Some(*port));
-                    last_seen.insert(port.to_string(), entry.and_then(|e| e.poe_admin.clone()));
-                }
-                pending.retain(|port| {
-                    if last_seen.get(*port).and_then(|v| v.as_deref()) == Some(wanted) {
-                        verdicts.insert(port.to_string(), Verdict::Confirmed);
-                        false
-                    } else {
-                        true
-                    }
-                });
-                store.port_status_cache.write().await.insert(
-                    id.to_string(),
-                    crate::config::CachedPortStatus {
-                        entries,
-                        raw_output: raw,
-                        fetched_at: chrono::Utc::now(),
-                        generation_id: uuid::Uuid::new_v4(),
-                    },
-                );
-            }
-            Err(e) => last_error = format!("{:#}", e),
-        }
-        if pending.is_empty() {
+        let output = match session.vendor().execute_raw_commands(&["get switch poe inline".to_string()]).await {
+            Ok(outputs) => outputs.join("\n"),
+            Err(e) => return unconfirmed(format!("the read-back failed: {}", reason(&e))),
+        };
+        settings = crate::vendors::fortiswitch::parse_poe_inline_settings(&output);
+        // Only a port that is listed with the old setting is worth waiting for.
+        if ports.iter().all(|port| settings.get(*port).is_none_or(|&now| now == enabled)) {
             break;
         }
     }
-
-    for port in pending {
-        let verdict = match last_seen.get(port).cloned().flatten() {
-            Some(seen) => Verdict::Wrong(format!(
-                "the switch accepted the command but PoE is still {} on port {}",
-                seen, port
-            )),
-            None if answered => {
-                Verdict::Unconfirmed("not confirmed: the switch does not report the PoE setting of this port".to_string())
-            }
-            None => Verdict::Unconfirmed(format!("not confirmed: SNMP did not answer ({})", last_error)),
-        };
-        verdicts.insert(port.to_string(), verdict);
-    }
-    verdicts
+    ports
+        .iter()
+        .map(|port| {
+            let verdict = match settings.get(*port) {
+                Some(&now) if now == enabled => Verdict::Confirmed,
+                Some(&now) => Verdict::Wrong(format!(
+                    "the switch accepted the command but PoE is still {} on port {}",
+                    if now { "enabled" } else { "disabled" },
+                    port
+                )),
+                None => Verdict::Unconfirmed("not confirmed: the switch did not list the PoE setting of this port".to_string()),
+            };
+            (port.to_string(), verdict)
+        })
+        .collect()
 }

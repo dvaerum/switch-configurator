@@ -175,3 +175,13 @@ concurrent load through the raw walker (`raw`) or the gated lookup (`gated`).
 On the bench 124E (~582 entries) six readers x four rounds gave: `raw`: 106,
 199-201 (23 of 24 reads short, one timeout), 40 s; `gated`: 581-583 on all 24
 reads, 9 s.
+
+## PoE over SNMP and the console (FortiSwitch 108F-POE, 7.2.8)
+Measured on the lab 108F, no PoE device attached.
+- **`pethPsePortTable` (RFC 3621) is answered in full** by one walk of `1.3.6.1.2.1.105.1.1.1`: admin setting, detection status, class (`1`..`5` = class0..class4), and the counters MPSAbsent, InvalidSignature, PowerDenied, OverLoad, Short, one row per PoE port. The service walks it once and splits by column.
+- **No per-port watts over SNMP.** `1.3.6.1.4.1.12356.106` holds system info only (serial, version, CPU, memory). The main PSE group `1.3.6.1.2.1.105.1.3` gives the unit total (65 W budget, consumption, threshold). Per-port watts, voltage and current exist only on the console: `get switch poe inline` (all ports, with class) and `diagnose switch poe status <port>`.
+- **The SNMP agent lags the switch by up to ~30 s for PoE.** After `set poe-status disable` the console showed `Disabled` within a few seconds, but `pethPsePortAdminEnable` changed only ~30 s later. Never confirm a PoE change by SNMP read-back.
+- **The switch applies a PoE change a few seconds after the console accepts it.** A `get switch poe inline` right after the command still showed the old setting; the next one (~2 s later) the new one. A read-back has to retry briefly.
+- **`ifLastChange` is 0 for every interface**, including ports that just came up, so "time since the last link change" cannot be read from this agent.
+- Console timing: about 6 s per port for a PoE command list on the serial console; `execute poe-reset <port>` returns silently after about 1 s (what it does to the port was not measured).
+

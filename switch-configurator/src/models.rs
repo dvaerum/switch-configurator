@@ -1448,6 +1448,24 @@ pub struct PortStatusEntry {
     /// port is doing with it (`poe_status`). Only read over SNMP.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub poe_admin: Option<String>,
+    /// IEEE class of the attached device (0-4), as the switch last detected it.
+    /// Only meaningful while a device is detected; read over SNMP only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub poe_class: Option<u8>,
+    /// The switch's own PoE fault counters since it started; read over SNMP only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub poe_counters: Option<PoeCounters>,
+}
+
+/// RFC 3621 per-port event counters.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct PoeCounters {
+    /// The device stopped drawing the minimum current (it went away or was unplugged).
+    pub mps_absent: u64,
+    pub invalid_signature: u64,
+    pub power_denied: u64,
+    pub overload: u64,
+    pub short: u64,
 }
 
 /// Granular SNMP state difference for efficient configuration

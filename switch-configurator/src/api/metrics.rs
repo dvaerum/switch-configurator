@@ -9,6 +9,7 @@ use axum::extract::State;
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use prometheus_client::encoding::prometheus_text::encode;
+use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::family::Family;
 use prometheus_client::metrics::gauge::Gauge;
 use prometheus_client::registry::Registry;
@@ -30,6 +31,8 @@ pub async fn get_metrics(State(store): State<ConfigStore>) -> Response {
     let link_up = Family::<Labels, Gauge>::default();
     let poe_admin = Family::<Labels, Gauge>::default();
     let poe_state = Family::<Labels, Gauge>::default();
+    let poe_class = Family::<Labels, Gauge>::default();
+    let counters: [Family<Labels, Counter>; 5] = Default::default();
 
     let now = chrono::Utc::now();
     for (switch, cached) in store.port_status_cache.read().await.iter() {
@@ -44,6 +47,15 @@ pub async fn get_metrics(State(store): State<ConfigStore>) -> Response {
                 poe_admin
                     .get_or_create(&labels(&[("switch", switch), ("port", port)]))
                     .set((admin == "enabled") as i64);
+            }
+            if let Some(class) = entry.poe_class {
+                poe_class.get_or_create(&labels(&[("switch", switch), ("port", port)])).set(class as i64);
+            }
+            if let Some(c) = &entry.poe_counters {
+                let values = [c.mps_absent, c.invalid_signature, c.power_denied, c.overload, c.short];
+                for (family, value) in counters.iter().zip(values) {
+                    family.get_or_create(&labels(&[("switch", switch), ("port", port)])).inc_by(value);
+                }
             }
             if let Some(state) = &entry.poe_status {
                 for known in POE_STATES {
@@ -64,6 +76,22 @@ pub async fn get_metrics(State(store): State<ConfigStore>) -> Response {
         "PoE power state of the port as a state set: 1 for the current state, 0 for the others",
         poe_state,
     );
+
+    registry.register(
+        "switch_port_poe_class",
+        "IEEE class (0-4) of the device last detected on the port; meaningful only while one is detected",
+        poe_class,
+    );
+    let counter_help = [
+        ("switch_port_poe_mps_absent", "Times the device on the port stopped drawing the minimum current"),
+        ("switch_port_poe_invalid_signature", "Invalid PoE signatures detected on the port"),
+        ("switch_port_poe_power_denied", "Times power was denied to the port"),
+        ("switch_port_poe_overload", "Overload conditions on the port"),
+        ("switch_port_poe_short", "Short circuits detected on the port"),
+    ];
+    for ((name, help), family) in counter_help.into_iter().zip(counters) {
+        registry.register(name, help, family);
+    }
 
     let mut body = String::new();
     match encode(&mut body, &registry) {

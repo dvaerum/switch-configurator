@@ -14,7 +14,7 @@
 use std::collections::BTreeMap;
 
 use super::{Row, SnmpValue};
-use crate::models::{MacTableEntry, PortStatusEntry};
+use crate::models::{MacTableEntry, PoeCounters, PortStatusEntry};
 
 // IF-MIB / EtherLike-MIB / POWER-ETHERNET-MIB / BRIDGE-MIB columns.
 pub const IF_NAME: &[u32] = &[1, 3, 6, 1, 2, 1, 31, 1, 1, 1, 1];
@@ -23,6 +23,14 @@ pub const IF_HIGH_SPEED: &[u32] = &[1, 3, 6, 1, 2, 1, 31, 1, 1, 1, 15];
 pub const DOT3_DUPLEX_STATUS: &[u32] = &[1, 3, 6, 1, 2, 1, 10, 7, 2, 1, 19];
 pub const PETH_PORT_ADMIN_ENABLE: &[u32] = &[1, 3, 6, 1, 2, 1, 105, 1, 1, 1, 3];
 pub const PETH_PORT_DETECTION_STATUS: &[u32] = &[1, 3, 6, 1, 2, 1, 105, 1, 1, 1, 6];
+/// The whole pethPsePortEntry row; walked once and split by column, which the 108F answers in full.
+pub const PETH_PORT_TABLE: &[u32] = &[1, 3, 6, 1, 2, 1, 105, 1, 1, 1];
+pub const PETH_PORT_MPS_ABSENT_COUNTER: &[u32] = &[1, 3, 6, 1, 2, 1, 105, 1, 1, 1, 8];
+pub const PETH_PORT_POWER_CLASS: &[u32] = &[1, 3, 6, 1, 2, 1, 105, 1, 1, 1, 10];
+pub const PETH_PORT_INVALID_SIGNATURE_COUNTER: &[u32] = &[1, 3, 6, 1, 2, 1, 105, 1, 1, 1, 11];
+pub const PETH_PORT_POWER_DENIED_COUNTER: &[u32] = &[1, 3, 6, 1, 2, 1, 105, 1, 1, 1, 12];
+pub const PETH_PORT_OVERLOAD_COUNTER: &[u32] = &[1, 3, 6, 1, 2, 1, 105, 1, 1, 1, 13];
+pub const PETH_PORT_SHORT_COUNTER: &[u32] = &[1, 3, 6, 1, 2, 1, 105, 1, 1, 1, 14];
 /// The whole dot1dTpFdbEntry row (all three columns below).
 pub const FDB_TABLE: &[u32] = &[1, 3, 6, 1, 2, 1, 17, 4, 3, 1];
 pub const FDB_ADDRESS: &[u32] = &[1, 3, 6, 1, 2, 1, 17, 4, 3, 1, 1];
@@ -38,6 +46,9 @@ pub struct PortStatusRows {
     pub duplex: Vec<Row>,
     pub peth_admin: Vec<Row>,
     pub peth_detection: Vec<Row>,
+    pub peth_class: Vec<Row>,
+    /// The five fault-counter columns together.
+    pub peth_counters: Vec<Row>,
 }
 
 /// The walked columns the MAC table is built from.
@@ -69,6 +80,14 @@ pub fn port_status_from(rows: &PortStatusRows, supports_poe: impl Fn(&str) -> bo
     let duplex = by_index(&rows.duplex, DOT3_DUPLEX_STATUS);
     let peth_admin = by_index(&rows.peth_admin, PETH_PORT_ADMIN_ENABLE);
     let peth_detection = by_index(&rows.peth_detection, PETH_PORT_DETECTION_STATUS);
+    let peth_class = by_index(&rows.peth_class, PETH_PORT_POWER_CLASS);
+    let counter_columns = [
+        by_index(&rows.peth_counters, PETH_PORT_MPS_ABSENT_COUNTER),
+        by_index(&rows.peth_counters, PETH_PORT_INVALID_SIGNATURE_COUNTER),
+        by_index(&rows.peth_counters, PETH_PORT_POWER_DENIED_COUNTER),
+        by_index(&rows.peth_counters, PETH_PORT_OVERLOAD_COUNTER),
+        by_index(&rows.peth_counters, PETH_PORT_SHORT_COUNTER),
+    ];
 
     let int_at = |table: &BTreeMap<Vec<u32>, SnmpValue>, index: &[u32]| table.get(index).and_then(SnmpValue::as_int);
 
@@ -110,6 +129,34 @@ pub fn port_status_from(rows: &PortStatusRows, supports_poe: impl Fn(&str) -> bo
             None
         };
 
+        // The power table is indexed group.port; the port number is the digits of `portN`.
+        let poe_row: Option<Vec<u32>> = if supports_poe(&name) {
+            name.strip_prefix("port").and_then(|n| n.parse::<u32>().ok()).map(|port| vec![1, port])
+        } else {
+            None
+        };
+        // RFC 3621 numbers the classes class0(1) .. class4(5).
+        let poe_class = poe_row
+            .as_ref()
+            .and_then(|row| int_at(&peth_class, row))
+            .filter(|&c| (1..=5).contains(&c))
+            .map(|c| (c - 1) as u8);
+        // All five counters or none: a partly answered table is not worth guessing from.
+        let poe_counters = poe_row.as_ref().and_then(|row| {
+            let values: Vec<u64> = counter_columns
+                .iter()
+                .filter_map(|column| int_at(column, row))
+                .filter_map(|v| u64::try_from(v).ok())
+                .collect();
+            (values.len() == 5).then(|| PoeCounters {
+                mps_absent: values[0],
+                invalid_signature: values[1],
+                power_denied: values[2],
+                overload: values[3],
+                short: values[4],
+            })
+        });
+
         let entry = PortStatusEntry {
             port_id: name.clone(),
             link_status: oper.get(index).map(|_| if up { "up" } else { "down" }.to_string()),
@@ -125,6 +172,8 @@ pub fn port_status_from(rows: &PortStatusRows, supports_poe: impl Fn(&str) -> bo
             },
             poe_status,
             poe_admin,
+            poe_class,
+            poe_counters,
         };
 
         // The same name can be listed twice: keep the entry that has a speed.
@@ -191,6 +240,12 @@ mod tests {
 
     fn poe_ports_1_to_8(name: &str) -> bool {
         name.strip_prefix("port").and_then(|n| n.parse::<u32>().ok()).is_some_and(|n| n <= 8)
+    }
+
+    fn set_peth(rows: &mut [Row], column: &[u32], port: u32, value: i64) {
+        let mut oid = column.to_vec();
+        oid.extend([1, port]);
+        rows.iter_mut().find(|(o, _)| *o == oid).expect("row").1 = SnmpValue::Integer(value);
     }
 
     fn entry<'a>(entries: &'a [PortStatusEntry], name: &str) -> &'a PortStatusEntry {
@@ -261,6 +316,38 @@ mod tests {
         assert_eq!(entry(&entries, "port1").poe_admin.as_deref(), Some("enabled"));
         assert_eq!(entry(&entries, "port4").poe_admin.as_deref(), Some("disabled"));
         assert_eq!(entry(&entries, "port9").poe_admin, None, "an SFP port has no PoE");
+    }
+
+    #[test]
+    fn poe_class_and_fault_counters_come_from_the_power_table() {
+        let mut rows = lab_rows();
+        set_peth(&mut rows.peth_class, PETH_PORT_POWER_CLASS, 3, 4); // port3: class3 (RFC value 4)
+        set_peth(&mut rows.peth_counters, PETH_PORT_OVERLOAD_COUNTER, 3, 7);
+        set_peth(&mut rows.peth_counters, PETH_PORT_SHORT_COUNTER, 3, 2);
+
+        let entries = port_status_from(&rows, poe_ports_1_to_8);
+
+        let port3 = entry(&entries, "port3");
+        assert_eq!(port3.poe_class, Some(3));
+        let counters = port3.poe_counters.as_ref().expect("counters");
+        assert_eq!((counters.overload, counters.short, counters.power_denied), (7, 2, 0));
+        let port1 = entry(&entries, "port1");
+        assert_eq!(port1.poe_class, Some(0), "RFC value 1 is class0");
+        assert_eq!(entry(&entries, "port9").poe_class, None, "an SFP port has no PoE");
+        assert_eq!(entry(&entries, "port9").poe_counters, None);
+    }
+
+    #[test]
+    fn missing_class_and_counter_columns_leave_them_empty() {
+        let mut rows = lab_rows();
+        rows.peth_class.clear();
+        rows.peth_counters.clear();
+
+        let entries = port_status_from(&rows, poe_ports_1_to_8);
+
+        let port1 = entry(&entries, "port1");
+        assert_eq!((port1.poe_class, port1.poe_counters.clone()), (None, None));
+        assert_eq!(port1.poe_status.as_deref(), Some("searching"), "the rest still maps");
     }
 
     #[test]

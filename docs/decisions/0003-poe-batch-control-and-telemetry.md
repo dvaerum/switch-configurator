@@ -126,8 +126,9 @@ and changelog entry. Principle: **publish raw facts, draw no conclusions**
   **not** send the legacy `done`: provision counts one terminal event per port,
   and a `done` followed by a later `failed` would count twice. A `poe-batch`
   summary event follows the last port.
-  - `completed` means the **admin setting reads back as requested** (SNMP,
-    through the gate, ≤ ~10 s). Power state is never part of it (a device that
+  - `completed` means the **admin setting reads back as requested** from the
+    switch's own console (`get switch poe inline`, same session, asked again for
+    ≤ ~10 s). Changed from SNMP in 0.31.0: the 108F's SNMP agent lags ~30 s. Power state is never part of it (a device that
     is off or unplugged is normal). Reset: the setting is back to on.
   - Refusal, or setting not reached → `failed` with the reason. SNMP reads
     unavailable → `completed` with a `not confirmed` detail.
@@ -154,9 +155,11 @@ and changelog entry. Principle: **publish raw facts, draw no conclusions**
   `switch_port_poe_admin_enabled`, `switch_port_poe_state` (state set). Base
   units, `switch_` prefix. Raw data only; no watts, no verdicts; no series (not
   zeros) for a switch without cached data.
-- Still open, needs hardware evidence (H2/H3): PoE class, the fault counters
-  `..._total`, `switch_port_last_change_seconds`, and
-  `switch_snmp_rewalks_total` (needs the gate to publish its re-walk count).
+- Measured on the lab 108F (H2/H3, 0.31.0): class and the five counters answer
+  and are exported; **no per-port watts over SNMP** and **`ifLastChange` is 0
+  for every port**, so neither is exported. Still open:
+  `switch_snmp_rewalks_total` (needs the gate to publish its re-walk count) and
+  the unit totals from `pethMainPseTable` (65 W budget, consumption).
 - No auth (closed lab network); binds wherever the API binds.
 
 ### Prerequisite for R4 — shared library crate (other repo, needs its owner's OK)

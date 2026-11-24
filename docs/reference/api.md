@@ -559,9 +559,11 @@ curl -X POST http://localhost:4002/switches/it-02876-sw1/poe-on/5
 | `switch_port_status_age_seconds` | `switch` | seconds since the port status was read |
 | `switch_port_link_up` | `switch`, `port` | 1 if the port has link |
 | `switch_port_poe_admin_enabled` | `switch`, `port` | 1 if PoE is enabled on the port (the setting; SNMP only) |
+| `switch_port_poe_class` | `switch`, `port` | IEEE class (0-4) of the detected device; meaningful only while one is detected (SNMP only) |
+| `switch_port_poe_mps_absent_total`, `..._invalid_signature_total`, `..._power_denied_total`, `..._overload_total`, `..._short_total` | `switch`, `port` | the switch's own PoE event counters since it started (SNMP only) |
 | `switch_port_poe_state` | `switch`, `port`, `state` | state set over `disabled`, `searching`, `delivering`, `fault`, `test`, `unknown`: 1 for the current state (SNMP only) |
 
-PoE class, fault counters and time since the last link change are not exported yet: they need verifying on hardware first (`docs/decisions/0003-poe-batch-control-and-telemetry.md`, H2/H3).
+Time since the last link change is not exported: the 108F reports 0 for every port. Per-port watts are not exported either: they are not available over SNMP (`docs/learnings/snmp-fortiswitch.md`).
 
 ```yaml
 scrape_configs:
@@ -588,7 +590,7 @@ Turn PoE on, off or power-cycle several ports in one request. It runs on one con
 
 **Events** (`/api/events`): the per-port events are the same `poe-set` (on/off) and `poe-reset` events as the single-port endpoints, so existing listeners keep working, and every one now carries `status` (`in-progress`, `completed` or `failed`). For a batch the stages are `connecting`, `setting` (or `disabling`, `waiting` with the seconds left, `enabling`), `verifying`, then exactly one terminal event per port: stage `completed` or `failed` (`detail` holds the reason). A batch does **not** send the legacy `done` stage.
 
-- `completed` means the PoE setting was read back over SNMP as asked. Power state is not part of it: an off or unplugged device is normal. Without SNMP reads (or if the switch does not answer) a port the switch accepted is `completed` with `detail` starting `not confirmed`.
+- `completed` means the PoE setting was read back from the switch as asked (FortiSwitch: `get switch poe inline` on the same console session, asked again for up to ~10 s because the switch applies the change a few seconds after accepting it). Power state is not part of it: an off or unplugged device is normal. If the read-back is not possible (another switch type, or the switch prints nothing usable) a port the switch accepted is `completed` with `detail` starting `not confirmed`. The console needs about 6 s per port, so a large batch takes minutes.
 - `failed`: the switch refused the command, the setting did not change, or the session was lost (the remaining ports then fail with that reason, never silently skipped). A port whose disable fails during `reset` is turned back on before the batch carries on.
 - After the last port a `poe-batch` event gives the summary: `{"switch_id", "action", "status", "completed": ["1"], "failed": [{"port_id": "2", "detail": "..."}]}`; `status` is `failed` if any port failed.
 - `GET /switches/{id}/poe` shows each port's `last_operation` afterwards.
@@ -756,7 +758,8 @@ Per-port PoE facts for a PoE-capable switch, taken from the same cached port sta
 }
 ```
 
-- `poe_admin`: the PoE setting (`enabled` / `disabled`). `poe_status`: what the port does with it (`searching`, `delivering`, `fault`, `disabled`, ...). Both come from SNMP and are `null` when the switch is read over the console.
+- `poe_admin`: the PoE setting (`enabled` / `disabled`). `poe_status`: what the port does with it (`searching`, `delivering`, `fault`, `disabled`, ...). `poe_class`: IEEE class 0-4 of the detected device (only meaningful while one is detected). `poe_counters`: the switch's own `mps_absent`, `invalid_signature`, `power_denied`, `overload` and `short` counts since it started. All of these come from SNMP and are `null` when the switch is read over the console.
+- **Lag:** on a FortiSwitch the SNMP agent shows a PoE change up to ~30 s after the switch applied it (`docs/learnings/snmp-fortiswitch.md`), so right after a batch `poe_admin` can still show the old value while `last_operation` already says `completed`.
 - `last_operation`: the latest `poe-on` / `poe-off` / `poe-reset` on that port since the service started, or `null`. `status` is `in-progress`, `completed` or `failed` (`detail` holds the reason). It is kept in memory only.
 - The response has the cache headers of the port-status lookup (`Age`, `Cache-Control`, `x-data-source`) but no `ETag`, because `last_operation` changes without a new snapshot.
 - Errors: `404` unknown switch or a port without PoE, `400` a model without PoE or a vendor whose port status is not supported yet.

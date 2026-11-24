@@ -3005,6 +3005,26 @@ fn is_command_rejected(raw: &str) -> bool {
     raw.contains("command parse error") || raw.contains("Command fail. Return code")
 }
 
+/// The PoE setting of every port from `get switch poe inline` (the live
+/// state: the SNMP agent of the same switch lags 30 s behind it), keyed by
+/// port number. Rows are `portN <Enabled|Disabled> <state> ...`.
+pub fn parse_poe_inline_settings(output: &str) -> std::collections::HashMap<String, bool> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let port = fields.next()?.strip_prefix("port")?;
+            let enabled = match fields.next()? {
+                "Enabled" => true,
+                "Disabled" => false,
+                _ => return None,
+            };
+            port.parse::<u32>().ok()?;
+            Some((port.to_string(), enabled))
+        })
+        .collect()
+}
+
 /// The switch's own complaint from a refused command's output (the echoed
 /// command and the trailing prompt are dropped).
 fn refusal_text(raw: &str) -> String {
@@ -3094,6 +3114,8 @@ fn parse_port_status_single_line(raw: &str) -> Vec<PortStatusEntry> {
                 duplex,
                 poe_status,
                 poe_admin: None,
+                poe_class: None,
+                poe_counters: None,
             })
         })
         .collect()
@@ -3403,6 +3425,23 @@ mod tests {
     fn test_is_command_rejected_detects_real_failure_output() {
         let raw = "get switch mac-address list\r\r\n\r\ncommand parse error before 'mac-address'\r\nCommand fail. Return code -61\r\n\r\nS124FFTF24000746 # ";
         assert!(is_command_rejected(raw));
+    }
+
+    #[test]
+    fn poe_inline_settings_are_read_from_the_real_108f_output() {
+        // Recorded from a FortiSwitch 108F-POE (7.2.8); port2 had just been disabled.
+        let raw = "get switch poe inline\r\nUnit Power Budget: 65.00W\r\nUnit Power Consumption: 0.00W\r\n\r\n\
+Interface   Status    State             Max-Power(W)   Power-consumption(W)   Priority   Class   Error\r\n\
+------------------------------------------------------------------------------------------------------------\r\n\
+port1       Enabled   Searching         0.00           0.00                   Low        0       \r\n\
+port2       Disabled  Disabled          0.00           0.00                   Low        0       \r\n\
+port3       Enabled   Delivering        4.20           3.90                   Low        2       \r\n\r\nS108FPTV21002683 # ";
+        let settings = parse_poe_inline_settings(raw);
+        assert_eq!(settings.len(), 3, "{settings:?}");
+        assert!(settings["1"]);
+        assert!(!settings["2"]);
+        assert!(settings["3"]);
+        assert!(parse_poe_inline_settings("command parse error before 'poe'").is_empty());
     }
 
     #[test]

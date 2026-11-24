@@ -66,13 +66,12 @@ pub async fn fetch_port_status(
             let target = walking.clone();
             async move {
                 let session = Session::connect(&target).await?;
-                let (if_name, if_oper_status, if_high_speed, duplex, peth_admin, peth_detection) = tokio::try_join!(
+                let (if_name, if_oper_status, if_high_speed, duplex, peth) = tokio::try_join!(
                     session.walk(IF_NAME),
                     session.walk(IF_OPER_STATUS),
                     session.walk(IF_HIGH_SPEED),
                     session.walk(DOT3_DUPLEX_STATUS),
-                    session.walk(PETH_PORT_ADMIN_ENABLE),
-                    session.walk(PETH_PORT_DETECTION_STATUS),
+                    session.walk(PETH_PORT_TABLE),
                 )?;
                 if if_name.is_empty() {
                     bail!(
@@ -82,7 +81,22 @@ pub async fn fetch_port_status(
                     );
                 }
                 let entries = if_name.len();
-                Ok((PortStatusRows { if_name, if_oper_status, if_high_speed, duplex, peth_admin, peth_detection }, entries))
+                // The power table is walked once and split by column.
+                let column = |wanted: &[u32]| -> Vec<_> { peth.iter().filter(|(oid, _)| oid.starts_with(wanted)).cloned().collect() };
+                let peth_admin = column(PETH_PORT_ADMIN_ENABLE);
+                let peth_detection = column(PETH_PORT_DETECTION_STATUS);
+                let peth_class = column(PETH_PORT_POWER_CLASS);
+                let peth_counters: Vec<_> = [
+                    PETH_PORT_MPS_ABSENT_COUNTER,
+                    PETH_PORT_INVALID_SIGNATURE_COUNTER,
+                    PETH_PORT_POWER_DENIED_COUNTER,
+                    PETH_PORT_OVERLOAD_COUNTER,
+                    PETH_PORT_SHORT_COUNTER,
+                ]
+                .into_iter()
+                .flat_map(column)
+                .collect();
+                Ok((PortStatusRows { if_name, if_oper_status, if_high_speed, duplex, peth_admin, peth_detection, peth_class, peth_counters }, entries))
             }
         })
         .await?;
