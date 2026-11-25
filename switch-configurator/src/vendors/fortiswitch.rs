@@ -485,10 +485,7 @@ impl FortiswitchSwitch {
         // Phase 2: Create VLAN interfaces (SVIs) for Layer 3 functionality if IP config exists
         // This gives VLANs names and allows IP configuration
         for vlan in vlans {
-            let needs_svi = match &vlan.ip_config {
-                crate::models::VlanIpConfig::None => false,
-                _ => true,
-            };
+            let needs_svi = !matches!(&vlan.ip_config, crate::models::VlanIpConfig::None);
 
             if needs_svi {
                 commands.push("config system interface".to_string());
@@ -875,7 +872,7 @@ impl FortiswitchSwitch {
         }
 
         // Convert simple format "1" or "1/0/1" to FortiSwitch format
-        if let Some(last) = port_id.split('/').last() {
+        if let Some(last) = port_id.split('/').next_back() {
             return format!("port{}", last);
         }
 
@@ -1720,7 +1717,7 @@ impl SwitchVendor for FortiswitchSwitch {
             &current,
             self.config.vlans.len(),
             self.config.ports.len(),
-            &self.config.hostname(),
+            self.config.hostname(),
         )?;
 
         // Store current state for warnings retrieval
@@ -1849,7 +1846,7 @@ impl SwitchVendor for FortiswitchSwitch {
             let test_result = crate::validation::tests::execute_test(
                 test,
                 client,
-                &self.config.management_ip(),
+                self.config.management_ip(),
             ).await;
 
             match test_result {
@@ -2042,7 +2039,7 @@ impl FortiswitchSwitch {
                 ).unwrap();
                 super::traits::verify_hardware_model(
                     &output,
-                    &self.config.model(),
+                    self.config.model(),
                     &pattern,
                 )
             }

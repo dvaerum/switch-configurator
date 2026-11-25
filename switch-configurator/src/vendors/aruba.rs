@@ -13,13 +13,14 @@ pub struct ArubaSwitch {
     enforce_port_config: bool,
 }
 
+/// What an interface block declares: name, description, then the flags (mirror, monitor, PoE, MAC notify, enabled) and speed.
+type InterfaceHeader = (String, Option<String>, bool, bool, bool, bool, bool, crate::models::SpeedDuplex);
+
 /// Helper struct to track VLAN membership for each port
 #[derive(Debug, Clone)]
 struct PortVlanInfo {
-    port_id: String,
     untagged_vlan: Option<u16>,
     tagged_vlans: Vec<u16>,
-    has_mirror: bool,
     has_monitor: bool,
     poe_enabled: bool,
     mac_notify: bool,
@@ -28,12 +29,10 @@ struct PortVlanInfo {
 }
 
 impl PortVlanInfo {
-    fn new(port_id: String) -> Self {
+    fn new() -> Self {
         Self {
-            port_id,
             untagged_vlan: None,
             tagged_vlans: Vec::new(),
-            has_mirror: false,
             has_monitor: false,
             poe_enabled: true,  // Aruba ports have PoE enabled by default
             mac_notify: false,
@@ -96,8 +95,8 @@ impl ArubaSwitch {
             for source_port in &mirror.source_ports {
                 let normalized = self.normalize_port_id(source_port);
                 mirror_sources.entry(normalized.clone())
-                    .or_insert_with(Vec::new)
-                    .push((mirror.session_id.clone(), mirror.direction.clone()));
+                    .or_default()
+                    .push((mirror.session_id.clone(), mirror.direction));
             }
         }
 
@@ -331,14 +330,12 @@ impl ArubaSwitch {
         }
 
         // Enable SNMP traps
-        let mut has_link_change = false;
         for trap_type in &snmp_config.enabled_traps {
             let trap_name = match trap_type {
                 crate::models::TrapType::MacNotify => {
                     "mac-notify"
                 }
                 crate::models::TrapType::LinkChange => {
-                    has_link_change = true;
                     "link-change all"
                 }
                 crate::models::TrapType::All => "all",
@@ -360,7 +357,7 @@ impl ArubaSwitch {
     fn normalize_port_id(&self, port_id: &str) -> String {
         // Convert formats like "1/0/1" or "GigabitEthernet1/0/1" to Aruba format "1"
         // Aruba typically uses simple port numbers
-        if let Some(last) = port_id.split('/').last() {
+        if let Some(last) = port_id.split('/').next_back() {
             return last.to_string();
         }
         port_id.to_string()
@@ -368,6 +365,7 @@ impl ArubaSwitch {
 
     /// Check if a specific port supports PoE on this switch model
     /// Uses the centralized port capability system from SwitchModel
+    #[cfg(test)]
     fn port_supports_poe(&self, port_id: &str) -> bool {
         self.config.model().port_supports_poe(port_id)
     }
@@ -583,7 +581,7 @@ impl ArubaSwitch {
 
     /// Parse interface block for name, mirror/monitor status, PoE, MAC notify, and enabled status
     /// In Aruba config, interfaces contain names and port-specific settings - VLAN assignments are in VLAN blocks
-    fn parse_interface_name(&self, lines: &[&str], index: &mut usize) -> Option<(String, Option<String>, bool, bool, bool, bool, bool, crate::models::SpeedDuplex)> {
+    fn parse_interface_name(&self, lines: &[&str], index: &mut usize) -> Option<InterfaceHeader> {
         let line = lines[*index].trim();
 
         // Extract port ID from "interface <id>"
@@ -603,9 +601,7 @@ impl ArubaSwitch {
         let mut j = *index + 1;
         while j < lines.len() {
             // Strip ANSI escape sequences from the line first
-            let clean_line = regex::Regex::new(r"\x1b\[[0-9;?]*[A-Za-z]")
-                .unwrap()
-                .replace_all(lines[j], "");
+            let clean_line = crate::ssh::ANSI_ESCAPE_REGEX.replace_all(lines[j], "");
             let inner_line = clean_line.trim();
 
             // Exit on "exit" or if we hit a new top-level block
@@ -699,9 +695,7 @@ impl ArubaSwitch {
         let mut j = *index + 1;
         while j < lines.len() {
             // Strip ANSI escape sequences from the line first
-            let clean_line = regex::Regex::new(r"\x1b\[[0-9;?]*[A-Za-z]")
-                .unwrap()
-                .replace_all(lines[j], "");
+            let clean_line = crate::ssh::ANSI_ESCAPE_REGEX.replace_all(lines[j], "");
             let inner_line = clean_line.trim();
 
             // Exit on "exit" or if we hit a new top-level block (vlan, interface, etc.)
@@ -815,7 +809,7 @@ impl ArubaSwitch {
             .map_err(|e| VendorError::CommandError(e.to_string()))?;
 
         let empty_string = String::new();
-        let output = outputs.get(0).unwrap_or(&empty_string);
+        let output = outputs.first().unwrap_or(&empty_string);
         debug!("SNMP trap status output:\n{}", output);
 
         let mut link_change_enabled = false;
@@ -834,7 +828,7 @@ impl ArubaSwitch {
                 } else if trimmed.contains(": All") || trimmed.contains(":") {
                     link_change_enabled = true;
                     debug!("  Found: link-change traps ENABLED (port list: {})",
-                           trimmed.split(':').last().unwrap_or("unknown").trim());
+                           trimmed.split(':').next_back().unwrap_or("unknown").trim());
                 }
             }
 
@@ -875,12 +869,11 @@ impl ArubaSwitch {
             if trimmed.starts_with("snmp-server community") {
                 if let Some(rest) = trimmed.strip_prefix("snmp-server community ") {
                     // Extract community name (may be quoted)
-                    let parts: Vec<&str> = if rest.starts_with('"') {
+                    let parts: Vec<&str> = if let Some(quoted) = rest.strip_prefix('"') {
                         // Handle quoted names: "community" access_level
-                        let end_quote = rest[1..].find('"').map(|i| i + 1);
-                        if let Some(end) = end_quote {
-                            let name = &rest[1..end];
-                            let remaining = rest[end+1..].trim();
+                        if let Some(end) = quoted.find('"') {
+                            let name = &quoted[..end];
+                            let remaining = quoted[end+1..].trim();
                             vec![name, remaining]
                         } else {
                             continue;
@@ -986,7 +979,7 @@ impl ArubaSwitch {
             .await
             .map_err(|e| VendorError::CommandError(e.to_string()))?;
 
-        let running_config = outputs.get(0).unwrap_or(&String::new()).clone();
+        let running_config = outputs.first().unwrap_or(&String::new()).clone();
 
         // Parse existing trap receivers to remove them
         // IMPORTANT: Aruba switches require the full syntax including community string for removal
@@ -1086,7 +1079,7 @@ impl ArubaSwitch {
             .await
             .map_err(|e| VendorError::CommandError(e.to_string()))?;
 
-        let new_running_config = verify_outputs.get(0).unwrap_or(&String::new()).clone();
+        let new_running_config = verify_outputs.first().unwrap_or(&String::new()).clone();
         let mut actual_receivers = Vec::new();
         for line in new_running_config.lines() {
             let trimmed = line.trim();
@@ -1127,7 +1120,7 @@ impl ArubaSwitch {
     async fn apply_snmp_diff(
         &mut self,
         snmp_diff: &crate::models::SnmpStateDiff,
-        desired_config: Option<&crate::models::SnmpConfig>,
+        _desired_config: Option<&crate::models::SnmpConfig>,
     ) -> Result<ConfigResult, VendorError> {
         use crate::models::TrapType;
 
@@ -1226,9 +1219,6 @@ impl ArubaSwitch {
                     commands.push("snmp-server enable traps link-change all".to_string());
                     actions.push("enabled all traps".to_string());
                 }
-                _ => {
-                    debug!("Trap type {:?} not specifically handled", trap_type);
-                }
             }
         }
 
@@ -1250,9 +1240,6 @@ impl ArubaSwitch {
                     commands.push("no snmp-server enable traps mac-notify".to_string());
                     commands.push("no snmp-server enable traps link-change".to_string());
                     actions.push("disabled all traps".to_string());
-                }
-                _ => {
-                    debug!("Trap type {:?} not specifically handled for disable", trap_type);
                 }
             }
         }
@@ -1515,7 +1502,7 @@ impl SwitchVendor for ArubaSwitch {
         // Extract hardware identifier and verify against configured model
         state.warnings = super::traits::verify_hardware_model(
             &clean_config,
-            &self.config.model(),
+            self.config.model(),
             &Self::hardware_id_pattern(),
         );
 
@@ -1564,7 +1551,7 @@ impl SwitchVendor for ArubaSwitch {
                         interface_names.insert(port_id.clone(), name_val);
                     }
                     // Get or create port info entry
-                    let info = port_vlan_map.entry(port_id.clone()).or_insert_with(|| PortVlanInfo::new(port_id.clone()));
+                    let info = port_vlan_map.entry(port_id.clone()).or_insert_with(PortVlanInfo::new);
 
                     // Update port settings from interface block
                     info.has_monitor = has_monitor;
@@ -1582,12 +1569,12 @@ impl SwitchVendor for ArubaSwitch {
                     // Update port VLAN mappings
                     for port_id in untagged_ports {
                         port_vlan_map.entry(port_id.clone())
-                            .or_insert_with(|| PortVlanInfo::new(port_id.clone()))
+                            .or_insert_with(PortVlanInfo::new)
                             .untagged_vlan = Some(vlan.id);
                     }
                     for port_id in tagged_ports {
                         port_vlan_map.entry(port_id.clone())
-                            .or_insert_with(|| PortVlanInfo::new(port_id.clone()))
+                            .or_insert_with(PortVlanInfo::new)
                             .tagged_vlans.push(vlan.id);
                     }
                 }
@@ -1940,7 +1927,7 @@ impl SwitchVendor for ArubaSwitch {
             &current,
             self.config.vlans.len(),
             self.config.ports.len(),
-            &self.config.hostname(),
+            self.config.hostname(),
         )?;
 
         // Store current state for use in command generation
@@ -2062,7 +2049,7 @@ impl SwitchVendor for ArubaSwitch {
             let test_result = crate::validation::tests::execute_test(
                 test,
                 client,
-                &self.config.management_ip(),
+                self.config.management_ip(),
             ).await;
 
             match test_result {
@@ -2164,7 +2151,7 @@ impl ArubaSwitch {
         // Extract hardware identifier and verify against configured model
         state.warnings = super::traits::verify_hardware_model(
             &clean_config,
-            &self.config.model(),
+            self.config.model(),
             &Self::hardware_id_pattern(),
         );
 
@@ -2226,7 +2213,7 @@ impl ArubaSwitch {
                     }
                     let info = port_vlan_map
                         .entry(port_id.clone())
-                        .or_insert_with(|| PortVlanInfo::new(port_id.clone()));
+                        .or_insert_with(PortVlanInfo::new);
 
                     info.has_monitor = has_monitor;
                     info.poe_enabled = poe_enabled;
@@ -2245,13 +2232,13 @@ impl ArubaSwitch {
                     for port_id in untagged_ports {
                         port_vlan_map
                             .entry(port_id.clone())
-                            .or_insert_with(|| PortVlanInfo::new(port_id.clone()))
+                            .or_insert_with(PortVlanInfo::new)
                             .untagged_vlan = Some(vlan.id);
                     }
                     for port_id in tagged_ports {
                         port_vlan_map
                             .entry(port_id.clone())
-                            .or_insert_with(|| PortVlanInfo::new(port_id.clone()))
+                            .or_insert_with(PortVlanInfo::new)
                             .tagged_vlans
                             .push(vlan.id);
                     }
@@ -3654,7 +3641,7 @@ interface 3
                 assert!(result.is_some(), "Should parse interface 1");
                 let (port_id, _desc, _mirror, _monitor, _poe, mac_notify, _enabled, _speed) = result.unwrap();
                 assert_eq!(port_id, "1");
-                assert_eq!(mac_notify, true, "Interface 1 should have mac_notify=true");
+                assert!(mac_notify, "Interface 1 should have mac_notify=true");
                 break;
             }
             i += 1;
@@ -3668,7 +3655,7 @@ interface 3
                 assert!(result.is_some(), "Should parse interface 2");
                 let (port_id, _desc, _mirror, _monitor, _poe, mac_notify, _enabled, _speed) = result.unwrap();
                 assert_eq!(port_id, "2");
-                assert_eq!(mac_notify, false, "Interface 2 should have mac_notify=false (no explicit enable)");
+                assert!(!mac_notify, "Interface 2 should have mac_notify=false (no explicit enable)");
                 break;
             }
             i += 1;
@@ -5004,7 +4991,7 @@ vlan 10
 
         // Both ports should have poe_enabled = false for non-PoE switches
         for port in &state.ports {
-            assert_eq!(port.poe_enabled, false,
+            assert!(!port.poe_enabled,
                       "Port {} on non-PoE switch should have poe_enabled=false, got poe_enabled=true",
                       port.port_id);
         }
@@ -5033,7 +5020,7 @@ vlan 10
 
         // Both ports should have poe_enabled = true for PoE switches (default)
         for port in &state.ports {
-            assert_eq!(port.poe_enabled, true,
+            assert!(port.poe_enabled,
                       "Port {} on PoE switch should have poe_enabled=true by default, got poe_enabled=false",
                       port.port_id);
         }
@@ -5064,9 +5051,9 @@ vlan 10
         let port1 = state.ports.iter().find(|p| p.port_id == "1").unwrap();
         let port2 = state.ports.iter().find(|p| p.port_id == "2").unwrap();
 
-        assert_eq!(port1.poe_enabled, false,
+        assert!(!port1.poe_enabled,
                   "Port 1 with 'no power-over-ethernet' should have poe_enabled=false");
-        assert_eq!(port2.poe_enabled, true,
+        assert!(port2.poe_enabled,
                   "Port 2 without PoE command should default to poe_enabled=true");
     }
 
@@ -5127,19 +5114,19 @@ vlan 1020
         let port15 = state.ports.iter().find(|p| p.port_id == "15").unwrap();
 
         // Port 1: has poe-allocate-by but no "no power-over-ethernet" → PoE enabled (default)
-        assert_eq!(port1.poe_enabled, true,
+        assert!(port1.poe_enabled,
                   "Port 1 with poe-allocate-by but no 'no power-over-ethernet' should have poe_enabled=true");
 
         // Port 5: has "no power-over-ethernet" followed by "poe-allocate-by class" → PoE DISABLED
-        assert_eq!(port5.poe_enabled, false,
+        assert!(!port5.poe_enabled,
                   "Port 5 with 'no power-over-ethernet' should have poe_enabled=false even with 'poe-allocate-by class'");
 
         // Port 7: has poe-allocate-by but no "no power-over-ethernet" → PoE enabled (default)
-        assert_eq!(port7.poe_enabled, true,
+        assert!(port7.poe_enabled,
                   "Port 7 with poe-allocate-by but no 'no power-over-ethernet' should have poe_enabled=true");
 
         // Port 15: has "no power-over-ethernet" + "poe-allocate-by class" + monitor → PoE DISABLED
-        assert_eq!(port15.poe_enabled, false,
+        assert!(!port15.poe_enabled,
                   "Port 15 with 'no power-over-ethernet' should have poe_enabled=false even with 'poe-allocate-by class'");
     }
 
@@ -5696,20 +5683,20 @@ interface 48
         // Port 21 should have mac_notify enabled
         let port21 = state.ports.iter().find(|p| p.port_id == "21");
         assert!(port21.is_some(), "Should find port 21");
-        assert_eq!(port21.unwrap().mac_notify, true,
+        assert!(port21.unwrap().mac_notify,
                    "Port 21 should have mac_notify=true");
         assert_eq!(port21.unwrap().description, Some("Reception Desk".to_string()));
 
         // Port 30 should be disabled
         let port30 = state.ports.iter().find(|p| p.port_id == "30");
         assert!(port30.is_some(), "Should find port 30");
-        assert_eq!(port30.unwrap().enabled, false,
+        assert!(!port30.unwrap().enabled,
                    "Port 30 should be disabled");
 
         // Port 41 should be disabled with a name
         let port41 = state.ports.iter().find(|p| p.port_id == "41");
         assert!(port41.is_some(), "Should find port 41");
-        assert_eq!(port41.unwrap().enabled, false,
+        assert!(!port41.unwrap().enabled,
                    "Port 41 should be disabled");
         assert_eq!(port41.unwrap().description, Some("Quarantine Port".to_string()));
 
@@ -5747,7 +5734,7 @@ interface 48
         let ports_with_interface_blocks = ["1", "5", "11", "15", "16", "21", "30", "41", "47", "48"];
         for port_id in &ports_with_interface_blocks {
             if let Some(port) = state.ports.iter().find(|p| p.port_id == *port_id) {
-                assert_eq!(port.poe_enabled, false,
+                assert!(!port.poe_enabled,
                            "Port {} on non-PoE model (Aruba2530_48G_2SFP) with interface block should have poe_enabled=false",
                            port.port_id);
             }

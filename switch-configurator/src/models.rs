@@ -100,7 +100,7 @@ impl SwitchModel {
             Vendor::Aruba => port_id.parse().ok(),
             Vendor::Cisco => {
                 // Extract last number from "GigabitEthernet1/0/24"
-                port_id.split('/').last()?.parse().ok()
+                port_id.split('/').next_back()?.parse().ok()
             }
             Vendor::Fortiswitch => {
                 // Extract number from "port24"
@@ -135,9 +135,9 @@ impl SwitchModel {
             // - Ports 1-24: 1G copper with PoE+ (30W)
             // - Ports 25-26: 1G SFP (no PoE)
             Self::Aruba2530_24G_POE => {
-                if port_num >= 1 && port_num <= 24 {
+                if (1..=24).contains(&port_num) {
                     Some(PortCapabilities::poe_plus_1g_copper(port_num))
-                } else if port_num >= 25 && port_num <= 26 {
+                } else if (25..=26).contains(&port_num) {
                     Some(PortCapabilities {
                         port_type: PortType::Sfp,
                         poe_support: None,
@@ -155,7 +155,7 @@ impl SwitchModel {
             // - Ports 1, 3, 5, 7: 1G copper with PoE+ (30W)
             // - Ports 2, 4, 6, 8: 1G copper without PoE
             Self::Aruba2530_8G_POE => {
-                if port_num >= 1 && port_num <= 8 {
+                if (1..=8).contains(&port_num) {
                     let has_poe = matches!(port_num, 1 | 3 | 5 | 7);
                     Some(if has_poe {
                         PortCapabilities::poe_plus_1g_copper(port_num)
@@ -171,9 +171,9 @@ impl SwitchModel {
             // - Ports 1-48: 1G copper (no PoE)
             // - Ports 49-50: 10G SFP+ uplinks
             Self::Aruba2530_48G_2SFP => {
-                if port_num >= 1 && port_num <= 48 {
+                if (1..=48).contains(&port_num) {
                     Some(PortCapabilities::standard_1g_copper(port_num))
-                } else if port_num >= 49 && port_num <= 50 {
+                } else if (49..=50).contains(&port_num) {
                     Some(PortCapabilities::sfp_plus_10g_uplink(port_num))
                 } else {
                     None
@@ -184,9 +184,9 @@ impl SwitchModel {
             // - Ports 1-24: 1G copper (no PoE)
             // - Ports 25-28: 1G/10G SFP+ combo ports
             Self::Aruba2540_24G => {
-                if port_num >= 1 && port_num <= 24 {
+                if (1..=24).contains(&port_num) {
                     Some(PortCapabilities::standard_1g_copper(port_num))
-                } else if port_num >= 25 && port_num <= 28 {
+                } else if (25..=28).contains(&port_num) {
                     Some(PortCapabilities::sfp_plus_10g_uplink(port_num))
                 } else {
                     None
@@ -197,9 +197,9 @@ impl SwitchModel {
             // - Ports 1-48: 1G copper (no PoE)
             // - Ports 49-52: 10G SFP+ uplinks
             Self::Aruba2540_48G_4SFP => {
-                if port_num >= 1 && port_num <= 48 {
+                if (1..=48).contains(&port_num) {
                     Some(PortCapabilities::standard_1g_copper(port_num))
-                } else if port_num >= 49 && port_num <= 52 {
+                } else if (49..=52).contains(&port_num) {
                     Some(PortCapabilities::sfp_plus_10g_uplink(port_num))
                 } else {
                     None
@@ -210,9 +210,9 @@ impl SwitchModel {
             // Note: Some 2930F models have PoE on all 48 ports, some only on 1-24
             // We assume PoE+ for ports 1-48 for maximum compatibility
             Self::Aruba2930F => {
-                if port_num >= 1 && port_num <= 48 {
+                if (1..=48).contains(&port_num) {
                     Some(PortCapabilities::poe_plus_1g_copper(port_num))
-                } else if port_num >= 49 && port_num <= 52 {
+                } else if (49..=52).contains(&port_num) {
                     // 10G SFP+ uplinks
                     Some(PortCapabilities::sfp_plus_10g_uplink(port_num))
                 } else {
@@ -224,9 +224,9 @@ impl SwitchModel {
             // - Ports 1-24: 1G copper
             // - Ports 25-28: 1G SFP uplinks (confirmed on a real 124E, FortiSwitch 7.2.5)
             Self::Fortiswitch124E => {
-                if port_num >= 1 && port_num <= 24 {
+                if (1..=24).contains(&port_num) {
                     Some(PortCapabilities::standard_1g_copper(port_num))
-                } else if port_num >= 25 && port_num <= 28 {
+                } else if (25..=28).contains(&port_num) {
                     Some(PortCapabilities {
                         port_type: PortType::Sfp,
                         poe_support: None,
@@ -244,9 +244,9 @@ impl SwitchModel {
             // - Ports 1-24: 1G copper with PoE+ (30W)
             // - Ports 25-28: 10G SFP+ uplinks (confirmed on real hardware)
             Self::Fortiswitch124F_FPOE => {
-                if port_num >= 1 && port_num <= 24 {
+                if (1..=24).contains(&port_num) {
                     Some(PortCapabilities::poe_plus_1g_copper(port_num))
-                } else if port_num >= 25 && port_num <= 28 {
+                } else if (25..=28).contains(&port_num) {
                     Some(PortCapabilities::sfp_plus_10g_uplink(port_num))
                 } else {
                     None
@@ -257,7 +257,7 @@ impl SwitchModel {
             // - Ports 1-24: 1G copper with PoE++ (60W)
             // - Uplink module ports vary by configuration
             Self::CiscoCatalyst9300_24P_UPOE => {
-                if port_num >= 1 && port_num <= 24 {
+                if (1..=24).contains(&port_num) {
                     Some(PortCapabilities {
                         port_type: PortType::Copper,
                         poe_support: Some(PoEStandard::PoEPlusPlus),
@@ -539,8 +539,10 @@ impl PortCapabilities {
 
 /// IP address configuration for VLAN
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Default)]
 pub enum VlanIpConfig {
     /// No IP address configured
+    #[default]
     None,
     /// Get IP address from DHCP/BOOTP
     Dhcp,
@@ -551,11 +553,6 @@ pub enum VlanIpConfig {
     },
 }
 
-impl Default for VlanIpConfig {
-    fn default() -> Self {
-        VlanIpConfig::None
-    }
-}
 
 // Custom serialization/deserialization for VlanIpConfig
 impl serde::Serialize for VlanIpConfig {
@@ -665,8 +662,10 @@ pub enum PortMode {
 /// Speed and duplex configuration for port
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
+#[derive(Default)]
 pub enum SpeedDuplex {
     /// Auto-negotiation (default)
+    #[default]
     Auto,
     /// 10 Mbps half-duplex
     #[serde(rename = "10-half")]
@@ -688,11 +687,6 @@ pub enum SpeedDuplex {
     TenGFull,
 }
 
-impl Default for SpeedDuplex {
-    fn default() -> Self {
-        SpeedDuplex::Auto
-    }
-}
 
 impl SpeedDuplex {
     /// Convert to Aruba syntax (speed-duplex command)
@@ -1587,7 +1581,7 @@ impl StateDiff {
             || !self.mirrors_to_update.is_empty()
             || !self.mirror_dest_ports_to_configure.is_empty()
             || self.snmp_config_changed
-            || self.snmp_diff.as_ref().map_or(false, |d| d.has_changes())
+            || self.snmp_diff.as_ref().is_some_and(|d| d.has_changes())
             || self.management_vlan_changed
             || self.hostname.is_some()
     }
@@ -1624,7 +1618,7 @@ impl StateDiff {
         if !self.mirror_dest_ports_to_configure.is_empty() {
             parts.push(format!("mirror dest ports: [{}]", self.mirror_dest_ports_to_configure.join(", ")));
         }
-        if self.snmp_config_changed || self.snmp_diff.as_ref().map_or(false, |d| d.has_changes()) {
+        if self.snmp_config_changed || self.snmp_diff.as_ref().is_some_and(|d| d.has_changes()) {
             parts.push("SNMP config".to_string());
         }
         if self.management_vlan_changed {
@@ -1863,7 +1857,7 @@ mod tests {
 
         for speed in speeds {
             let aruba_str = speed.to_aruba_syntax();
-            let parsed = SpeedDuplex::from_aruba_output(&aruba_str);
+            let parsed = SpeedDuplex::from_aruba_output(aruba_str);
             assert_eq!(parsed, Some(speed), 
                       "Round-trip failed for {:?}: {} -> {:?}", speed, aruba_str, parsed);
         }

@@ -219,7 +219,7 @@ pub async fn save_overlay(
 
     match state.backend.post(&format!("/switches/{}/save-overlay", id), &save_body).await {
         Ok((status, resp)) => {
-            if status >= 200 && status < 300 {
+            if (200..300).contains(&status) {
                 tracing::info!("Saved overlay for {}: {:?}", id, resp);
                 state.drafts.discard(&id).await;
                 Redirect::to(&format!("/switch/{}", id)).into_response()

@@ -38,7 +38,7 @@ pub async fn start(
 
     // Watch the main config file directly
     watcher
-        .watch(&*config_path, RecursiveMode::NonRecursive)
+        .watch(&config_path, RecursiveMode::NonRecursive)
         .context("Failed to watch main configuration file")?;
     info!("Watching main config file: {:?}", config_path);
 

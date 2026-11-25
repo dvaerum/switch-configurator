@@ -1,21 +1,4 @@
-mod allowed_hosts;
-mod api;
-mod config;
-mod diff;
-mod logging;
-mod models;
-mod redact;
-mod secrets;
-mod session_pool;
-mod snmp;
-mod traps;
-mod snmp_reads;
-mod ssh;
-mod status;
-mod validation;
-mod vendors;
-mod watcher;
-
+use switch_configurator::{api, config, logging, status, traps, validation, watcher};
 use anyhow::Result;
 use clap::Parser;
 use std::path::PathBuf;
@@ -295,7 +278,7 @@ async fn apply_configuration_once(
         app_config
             .switches
             .iter()
-            .filter(|s| s.hostname.as_ref().map(|h| h.as_str()) == Some(target.as_str()))
+            .filter(|s| s.hostname.as_deref() == Some(target.as_str()))
             .collect()
     } else {
         app_config.switches.iter().collect()
@@ -360,13 +343,13 @@ async fn apply_configuration_once(
 /// dry-run), or `Err(reason)` describing the failure. The caller is responsible for
 /// counting outcomes and recording them in the status tracker.
 async fn configure_switch_once(
-    switch_config: &crate::models::SwitchConfig,
+    switch_config: &switch_configurator::models::SwitchConfig,
     runtime_config: &config::RuntimeConfig,
 ) -> std::result::Result<(), String> {
-    use crate::vendors::create_vendor_with_runtime;
+    use switch_configurator::vendors::create_vendor_with_runtime;
     use tracing::{error, warn};
 
-    let mut vendor = match create_vendor_with_runtime(switch_config, &runtime_config, switch_config.settings.enforce_port_config) {
+    let mut vendor = match create_vendor_with_runtime(switch_config, runtime_config, switch_config.settings.enforce_port_config) {
         Ok(v) => v,
         Err(e) => {
             error!("Failed to create vendor implementation: {}", e);

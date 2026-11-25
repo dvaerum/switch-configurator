@@ -678,6 +678,7 @@ pub fn create_store(config: AppConfig) -> LegacyConfigStore {
 
 /// Runtime execution mode configuration
 #[derive(Debug, Clone)]
+#[derive(Default)]
 pub struct RuntimeConfig {
     /// Debug mode: prompt before executing each command
     pub debug: bool,
@@ -689,16 +690,6 @@ pub struct RuntimeConfig {
     pub target_switch: Option<String>,
 }
 
-impl Default for RuntimeConfig {
-    fn default() -> Self {
-        Self {
-            debug: false,
-            dry_run: false,
-            one_off: false,
-            target_switch: None,
-        }
-    }
-}
 
 /// Scan a folder for YAML configuration files and load them with metadata
 ///
@@ -802,7 +793,7 @@ fn merge_configs(configs: Vec<ConfigWithMetadata>) -> Result<(AppConfig, Vec<Swi
             // Group config for merging
             switches_by_id
                 .entry(switch.id.clone())
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(ConfigWithMetadata {
                     config: AppConfig {
                         switches: vec![switch.clone()],
@@ -1143,6 +1134,13 @@ fn validate_switch_identity(
     Ok(conflicts)
 }
 
+/// A merged switch with the file each of its VLAN ids and ports came from.
+type MergedSwitch = (
+    SwitchConfig,
+    std::collections::HashMap<u16, std::path::PathBuf>,
+    std::collections::HashMap<String, std::path::PathBuf>,
+);
+
 /// Merge all configs for a single switch
 /// Merge one switch's configs. Also returns which source file each VLAN id
 /// came from, so a name collision across files can name both — the map is
@@ -1150,11 +1148,7 @@ fn validate_switch_identity(
 fn merge_single_switch(
     switch_id: String,
     mut configs: Vec<ConfigWithMetadata>,
-) -> Result<(
-    SwitchConfig,
-    std::collections::HashMap<u16, std::path::PathBuf>,
-    std::collections::HashMap<String, std::path::PathBuf>,
-)> {
+) -> Result<MergedSwitch> {
     use std::collections::BTreeMap;
 
     // Sort by priority (lower number = higher priority)
@@ -1288,28 +1282,25 @@ fn merge_snmp_configs(configs: &[ConfigWithMetadata]) -> Result<Option<crate::mo
             let merged = merged_snmp.as_mut().unwrap();
 
             // Merge communities list (replace if higher priority)
-            if !snmp.communities.is_empty() {
-                if communities_priority.is_none() || config.merge_priority < communities_priority.unwrap() {
+            if !snmp.communities.is_empty()
+                && (communities_priority.is_none() || config.merge_priority < communities_priority.unwrap()) {
                     merged.communities = snmp.communities.clone();
                     communities_priority = Some(config.merge_priority);
                 }
-            }
 
             // Merge trap_receivers list (replace if higher priority)
-            if !snmp.trap_receivers.is_empty() {
-                if trap_receivers_priority.is_none() || config.merge_priority < trap_receivers_priority.unwrap() {
+            if !snmp.trap_receivers.is_empty()
+                && (trap_receivers_priority.is_none() || config.merge_priority < trap_receivers_priority.unwrap()) {
                     merged.trap_receivers = snmp.trap_receivers.clone();
                     trap_receivers_priority = Some(config.merge_priority);
                 }
-            }
 
             // Merge enabled_traps list (replace if higher priority)
-            if !snmp.enabled_traps.is_empty() {
-                if enabled_traps_priority.is_none() || config.merge_priority < enabled_traps_priority.unwrap() {
+            if !snmp.enabled_traps.is_empty()
+                && (enabled_traps_priority.is_none() || config.merge_priority < enabled_traps_priority.unwrap()) {
                     merged.enabled_traps = snmp.enabled_traps.clone();
                     enabled_traps_priority = Some(config.merge_priority);
                 }
-            }
 
             // Merge the service's own read community block (replace if higher priority)
             if snmp.reads.is_some()
@@ -1451,13 +1442,6 @@ fn validate_has_vlans(switch: &SwitchConfig) -> Result<()> {
     Ok(())
 }
 
-/// Validate that all VLANs referenced in port configurations exist
-/// Strict validation: rejects any port referencing non-existent VLANs.
-/// Used by overlay save to catch errors before writing config files.
-fn validate_vlan_references_strict(switch: &mut SwitchConfig) -> Result<()> {
-    validate_vlan_references_inner(switch, true)
-}
-
 /// Lenient validation: filters out invalid tagged VLANs with warnings.
 /// Used during config load to be graceful about minor issues.
 fn validate_vlan_references(switch: &mut SwitchConfig) -> Result<()> {
@@ -1494,8 +1478,9 @@ fn validate_vlan_references_inner(switch: &mut SwitchConfig, strict: bool) -> Re
         // The only restriction we enforce is the range pattern below.
 
         // Check for number-hyphen-number patterns (e.g., "8-10") which Aruba interprets as ranges
-        let range_pattern = regex::Regex::new(r"\d+-\d+").unwrap();
-        if range_pattern.is_match(&vlan.name) {
+        static RANGE_PATTERN: std::sync::LazyLock<regex::Regex> =
+            std::sync::LazyLock::new(|| regex::Regex::new(r"\d+-\d+").unwrap());
+        if RANGE_PATTERN.is_match(&vlan.name) {
             error!(
                 "Switch '{}' VLAN {}: Name '{}' contains a number range pattern (e.g., '8-10') \
                 which Aruba switches interpret as a port/VLAN range. Use underscores or spaces instead.",
@@ -2286,15 +2271,15 @@ mod tests {
         let settings = Settings::default();
         assert_eq!(settings.ssh_timeout_secs, 30);
         assert_eq!(settings.max_retries, 3);
-        assert_eq!(settings.enforce_port_config, false);
+        assert!(!settings.enforce_port_config);
     }
 
     #[test]
     fn test_runtime_config_default() {
         let runtime_config = RuntimeConfig::default();
-        assert_eq!(runtime_config.debug, false);
-        assert_eq!(runtime_config.dry_run, false);
-        assert_eq!(runtime_config.one_off, false);
+        assert!(!runtime_config.debug);
+        assert!(!runtime_config.dry_run);
+        assert!(!runtime_config.one_off);
         assert_eq!(runtime_config.target_switch, None);
     }
 
@@ -2339,7 +2324,7 @@ port_mirrors: []
         for port in &config.ports {
             assert_eq!(port.mode, PortMode::Access);
             assert_eq!(port.vlan, 10);
-            assert_eq!(port.enabled, true);
+            assert!(port.enabled);
         }
     }
 
@@ -2491,7 +2476,7 @@ switches:
         // Settings are now per-switch
         assert_eq!(config.switches[0].settings.ssh_timeout_secs, 60);
         assert_eq!(config.switches[0].settings.max_retries, 5);
-        assert_eq!(config.switches[0].settings.enforce_port_config, true);
+        assert!(config.switches[0].settings.enforce_port_config);
     }
 
     #[test]
@@ -4104,7 +4089,7 @@ switches:
         name: only-in-this-overlay
 "#).unwrap();
 
-        let known = AppConfig::known_external_vlan_ids(&main_path, &[folder.clone()], "sw-1", &this_overlay_path);
+        let known = AppConfig::known_external_vlan_ids(&main_path, std::slice::from_ref(&folder), "sw-1", &this_overlay_path);
 
         assert!(known.contains(&101), "should include the main config's own VLAN");
         assert!(known.contains(&500), "should include another overlay's VLAN");
@@ -4479,7 +4464,7 @@ switches:
         )
         .unwrap();
 
-        let (config, failures) = AppConfig::load_multi(&main, &[folder.clone()]).unwrap();
+        let (config, failures) = AppConfig::load_multi(&main, std::slice::from_ref(&folder)).unwrap();
         assert!(failures.is_empty(), "{:?}", failures.iter().map(|f| &f.error).collect::<Vec<_>>());
         let snmp = config.switches[0].snmp.as_ref().unwrap();
         assert_eq!(snmp.communities[0].name, "listed", "communities still come from the main file");

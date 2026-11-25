@@ -1,8 +1,8 @@
 use super::traits::{SwitchVendor, VendorError};
 use crate::models::{
-    ConfigResult, ConnectionType, Credentials, MacTableEntry, MirrorDirection, Port, PortMirror, PortMode,
+    ConfigResult, MacTableEntry, MirrorDirection, Port, PortMirror, PortMode,
     PortStatusEntry,
-    StateDiff, SwitchConfig, SwitchModel,
+    StateDiff, SwitchModel,
     SwitchState, Vlan, VlanIpConfig,
 };
 use crate::validation::{ValidationConfig, ValidationResult, RollbackMethod};
@@ -38,36 +38,8 @@ mock! {
     }
 }
 
-fn create_test_switch_config() -> SwitchConfig {
-    SwitchConfig {
-        id: "test-sw-01".to_string(),
-        hostname: Some("test-switch".to_string()),
-        model: Some(SwitchModel::Aruba2930F),
-        management_ip: Some("192.168.1.1".to_string()),
-        credentials: Some(Credentials {
-            username: "admin".to_string(),
-            password: Some("password".to_string()),
-            ssh_key_path: None,
-            port: 22,
-            connection_type: ConnectionType::Ssh,
-            serial_device: None,
-            baud_rate: 9600,
-            jump_hosts: None,
-                enable_secret: None,
-        }),
-        vlans: vec![],
-        ports: vec![],
-        port_mirrors: vec![],
-        snmp: None,
-                    validation: None,
-        vendor_specific: std::collections::HashMap::new(),
-management_vlan: None,
-        settings: crate::config::Settings::default(),
-    }
-}
-
 #[cfg(test)]
-mod tests {
+mod vendor_tests {
     use super::*;
 
     #[tokio::test]
@@ -713,7 +685,7 @@ interface 1
         mock_vendor
             .expect_get_warnings()
             .times(1)
-            .returning(|| Vec::new());
+            .returning(Vec::new);
 
         let warnings = mock_vendor.get_warnings();
         assert!(warnings.is_empty());

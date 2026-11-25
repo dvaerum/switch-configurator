@@ -2,7 +2,6 @@ use askama::Template;
 use axum::extract::{Path, State};
 use axum::response::{IntoResponse, Redirect};
 
-use askama::Template as _;
 use super::AppState;
 
 #[derive(Debug, Clone)]
@@ -22,7 +21,6 @@ pub struct SwitchCard {
 #[derive(Debug, Clone)]
 pub struct OverlayFileInfo {
     pub filename: String,
-    pub full_path: String,
 }
 
 /// One config file that contributed to a switch's (failed) merge. `is_main`
@@ -87,7 +85,6 @@ fn build_validation_failures(status_json: &serde_json::Value) -> Vec<ValidationF
                         .file_name()
                         .map(|name| OverlayFileInfo {
                             filename: name.to_string_lossy().to_string(),
-                            full_path: src.clone(),
                         })
                 })
                 .collect();

@@ -80,7 +80,7 @@ fn diff_vlans(current: &SwitchState, desired: &SwitchConfig, diff: &mut StateDif
     let desired_ids: HashSet<u16> = desired_vlans.keys().copied().collect();
 
     // Check if the switch model supports VLAN descriptions
-    let supports_vlan_description = desired.model.as_ref().map_or(true, |m| m.supports_vlan_description());
+    let supports_vlan_description = desired.model.as_ref().is_none_or(|m| m.supports_vlan_description());
 
     // VLANs to add (in desired but not in current)
     for vlan_id in desired_ids.difference(&current_ids) {
@@ -151,7 +151,7 @@ fn diff_ports(current: &SwitchState, desired: &SwitchConfig, enforce_port_config
         .collect();
 
     // Check if the switch model supports PoE
-    let supports_poe = desired.model.as_ref().map_or(true, |m| m.supports_poe());
+    let supports_poe = desired.model.as_ref().is_none_or(|m| m.supports_poe());
 
     // For ports, we configure any port that is in the desired state
     // regardless of whether it exists in current or has different config
@@ -223,7 +223,7 @@ fn is_port_in_default_state(port: &Port) -> bool {
     let is_disabled = !port.enabled;
     let is_vlan_1 = port.vlan == 1;
     let is_access_mode = matches!(port.inferred_mode(), PortMode::Access);
-    let no_description = port.description.is_none() || port.description.as_ref().map_or(true, |d| d.is_empty());
+    let no_description = port.description.is_none() || port.description.as_ref().is_none_or(|d| d.is_empty());
     let no_tagged_vlans = port.tagged_vlans.is_empty();
     let no_mac_notify = !port.mac_notify;
 
@@ -234,6 +234,7 @@ fn is_port_in_default_state(port: &Port) -> bool {
 /// Check if two ports are functionally equivalent
 /// This handles cases where Access mode with no tagged VLANs is equivalent to
 /// Trunk mode with only the native VLAN in tagged_vlans
+#[cfg(test)]
 fn ports_equivalent(current: &Port, desired: &Port) -> bool {
     // Default: compare all fields including PoE
     ports_equivalent_for_model(current, desired, true)
@@ -556,14 +557,14 @@ fn compute_snmp_diff(
     // Traps to enable (in desired but not in current)
     for trap in &desired_traps {
         if !current_traps.contains(trap) {
-            snmp_diff.traps_to_enable.push((*trap).clone());
+            snmp_diff.traps_to_enable.push(*(*trap));
         }
     }
 
     // Traps to disable (in current but not in desired)
     for trap in &current_traps {
         if !desired_traps.contains(trap) {
-            snmp_diff.traps_to_disable.push((*trap).clone());
+            snmp_diff.traps_to_disable.push(*(*trap));
         }
     }
 
@@ -907,7 +908,7 @@ mod tests {
         assert!(diff.has_changes());
         assert_eq!(diff.ports_to_configure.len(), 1);
         assert_eq!(diff.ports_to_configure[0].vlan, 10);
-        assert_eq!(diff.ports_to_configure[0].poe_enabled, true);
+        assert!(diff.ports_to_configure[0].poe_enabled);
     }
 
     #[test]
@@ -1474,8 +1475,8 @@ mod tests {
         
         let port = &diff.ports_to_configure[0];
         assert_eq!(port.speed_duplex, SpeedDuplex::HundredFull);
-        assert_eq!(port.poe_enabled, false);
-        assert_eq!(port.mac_notify, true);
+        assert!(!port.poe_enabled);
+        assert!(port.mac_notify);
         assert_eq!(port.description, Some("New Description".to_string()));
     }
 
@@ -2092,7 +2093,7 @@ mod tests {
         // Should detect changes because this is a PoE switch
         assert!(diff.has_changes(), "PoE switch should detect poe_enabled differences");
         assert_eq!(diff.ports_to_configure.len(), 1);
-        assert_eq!(diff.ports_to_configure[0].poe_enabled, false);
+        assert!(!diff.ports_to_configure[0].poe_enabled);
     }
 
     #[test]

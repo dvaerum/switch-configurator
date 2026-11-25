@@ -211,7 +211,6 @@ impl SshClient {
     /// Clear any buffered data from the channel
     async fn clear_buffer(&self, channel: &mut russh::Channel<russh::client::Msg>) -> Result<()> {
         // Try to read any pending data with a short timeout
-        let buf = vec![0u8; 4096];
         loop {
             tokio::select! {
                 msg = channel.wait() => {
@@ -346,9 +345,7 @@ impl SshClient {
                             // Also check end of last line for prompt (handles command
                             // echo + prompt on same line, e.g. "no pageSwitch# ")
                             let has_prompt_at_end = if !has_prompt && !has_prompt_in_recent {
-                                let end_prompt_regex = regex::Regex::new(
-                                    r"[\w-]{2,}\s*(\([^\)]+\))?\s*[>#]\s*$"
-                                ).unwrap();
+                                let end_prompt_regex = &*crate::ssh::END_PROMPT_REGEX;
                                 end_prompt_regex.is_match(last_nonempty_line)
                             } else {
                                 false
@@ -393,9 +390,7 @@ impl SshClient {
                             .unwrap_or("")
                             .trim();
 
-                        let end_prompt_regex = regex::Regex::new(
-                            r"[\w-]{2,}\s*(\([^\)]+\))?\s*[>#]\s*$"
-                        ).unwrap();
+                        let end_prompt_regex = &*crate::ssh::END_PROMPT_REGEX;
                         if prompt_regex.is_match(last_nonempty_line)
                             || interactive_regex.is_match(&clean)
                             || end_prompt_regex.is_match(last_nonempty_line)
@@ -475,7 +470,7 @@ impl SshClient {
 
         // Send command with newline
         let cmd_with_newline = format!("{}\r", command);
-        channel.data(&cmd_with_newline.as_bytes()[..]).await
+        channel.data(cmd_with_newline.as_bytes()).await
             .context("Failed to send command")?;
 
         // Wait for prompt and get output
@@ -961,12 +956,9 @@ mod tests {
                 enable_secret: None,
         };
 
-        let start = std::time::Instant::now();
         let result = client.connect_with_retry(&creds, 3, 1).await;
-        let elapsed = start.elapsed();
 
-        // Should have taken at least 2 seconds (3 attempts with 1s delay between)
-        // But may be less depending on OS TCP timeout behavior
+        // Timing is not asserted: the OS TCP timeout can make the retries faster.
         assert!(result.is_err());
 
         // Verify error message mentions all failed attempts

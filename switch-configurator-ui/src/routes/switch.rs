@@ -374,6 +374,90 @@ pub fn parse_switch_view_from_yaml(switch_id: &str, yaml_content: &str) -> Optio
         .find(|v| v.id == switch_id)
 }
 
+fn empty_switch(id: &str) -> SwitchView {
+    SwitchView {
+        id: id.to_string(),
+        hostname: id.to_string(),
+        model: "unknown".to_string(),
+        management_ip: "".to_string(),
+        vlans: vec![],
+        ports: vec![],
+        mirrors: vec![],
+        has_poe: false,
+        snmp: None,
+    }
+}
+
+/// Natural sort for port IDs — handles pure numbers ("1", "24"),
+/// slash-separated ("1/0/1"), and prefixed ("GigabitEthernet1/0/1").
+fn natural_port_sort(a: &str, b: &str) -> std::cmp::Ordering {
+    // Extract trailing numeric segments for comparison
+    let a_nums = extract_port_numbers(a);
+    let b_nums = extract_port_numbers(b);
+    a_nums.cmp(&b_nums)
+}
+
+fn extract_port_numbers(port_id: &str) -> Vec<u32> {
+    port_id
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.parse::<u32>().unwrap_or(u32::MAX))
+        .collect()
+}
+
+/// Kicks off a PoE reset on the backend (returns 202) and forwards the status.
+/// Live progress is streamed separately over SSE (/events) and rendered by the
+/// poeReset() client script — this endpoint only starts the operation.
+pub async fn poe_reset(
+    State(state): State<AppState>,
+    Path((id, port_id)): Path<(String, String)>,
+) -> impl IntoResponse {
+    let path = format!("/switches/{}/poe-reset/{}", id, port_id);
+    match state.backend.post(&path, &serde_json::json!({})).await {
+        Ok((status, body)) => {
+            let code = axum::http::StatusCode::from_u16(status)
+                .unwrap_or(axum::http::StatusCode::BAD_GATEWAY);
+            (code, axum::Json(body)).into_response()
+        }
+        Err(e) => (
+            axum::http::StatusCode::BAD_GATEWAY,
+            axum::Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+/// Passes a backend answer (status and JSON body) through to the browser, or a
+/// 502 with the reason when the backend cannot be reached.
+fn passthrough(result: anyhow::Result<(u16, serde_json::Value)>) -> axum::response::Response {
+    match result {
+        Ok((status, body)) => {
+            let code = axum::http::StatusCode::from_u16(status).unwrap_or(axum::http::StatusCode::BAD_GATEWAY);
+            (code, axum::Json(body)).into_response()
+        }
+        Err(e) => (axum::http::StatusCode::BAD_GATEWAY, axum::Json(serde_json::json!({"error": e.to_string()}))).into_response(),
+    }
+}
+
+/// The PoE tab's data: per-port PoE state, link traps and unit totals from the backend.
+pub async fn poe_data(State(state): State<AppState>, Path(id): Path<String>) -> axum::response::Response {
+    passthrough(state.backend.get_with_status(&format!("/switches/{}/poe", id)).await)
+}
+
+/// Watts per port (a console read on the backend, so only when asked for).
+pub async fn poe_power_data(State(state): State<AppState>, Path(id): Path<String>) -> axum::response::Response {
+    passthrough(state.backend.get_with_status(&format!("/switches/{}/poe-power", id)).await)
+}
+
+/// Starts a PoE on / off / reset for several ports; progress arrives on the event stream.
+pub async fn poe_batch(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    axum::Json(body): axum::Json<serde_json::Value>,
+) -> axum::response::Response {
+    passthrough(state.backend.post(&format!("/switches/{}/poe", id), &body).await)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -533,88 +617,4 @@ switches:
         assert_eq!(view.filename, "1c35q4l9-switch-config.yaml");
         assert!(view.is_main);
     }
-}
-
-fn empty_switch(id: &str) -> SwitchView {
-    SwitchView {
-        id: id.to_string(),
-        hostname: id.to_string(),
-        model: "unknown".to_string(),
-        management_ip: "".to_string(),
-        vlans: vec![],
-        ports: vec![],
-        mirrors: vec![],
-        has_poe: false,
-        snmp: None,
-    }
-}
-
-/// Natural sort for port IDs — handles pure numbers ("1", "24"),
-/// slash-separated ("1/0/1"), and prefixed ("GigabitEthernet1/0/1").
-fn natural_port_sort(a: &str, b: &str) -> std::cmp::Ordering {
-    // Extract trailing numeric segments for comparison
-    let a_nums = extract_port_numbers(a);
-    let b_nums = extract_port_numbers(b);
-    a_nums.cmp(&b_nums)
-}
-
-fn extract_port_numbers(port_id: &str) -> Vec<u32> {
-    port_id
-        .split(|c: char| !c.is_ascii_digit())
-        .filter(|s| !s.is_empty())
-        .map(|s| s.parse::<u32>().unwrap_or(u32::MAX))
-        .collect()
-}
-
-/// Kicks off a PoE reset on the backend (returns 202) and forwards the status.
-/// Live progress is streamed separately over SSE (/events) and rendered by the
-/// poeReset() client script — this endpoint only starts the operation.
-pub async fn poe_reset(
-    State(state): State<AppState>,
-    Path((id, port_id)): Path<(String, String)>,
-) -> impl IntoResponse {
-    let path = format!("/switches/{}/poe-reset/{}", id, port_id);
-    match state.backend.post(&path, &serde_json::json!({})).await {
-        Ok((status, body)) => {
-            let code = axum::http::StatusCode::from_u16(status)
-                .unwrap_or(axum::http::StatusCode::BAD_GATEWAY);
-            (code, axum::Json(body)).into_response()
-        }
-        Err(e) => (
-            axum::http::StatusCode::BAD_GATEWAY,
-            axum::Json(serde_json::json!({"error": e.to_string()})),
-        )
-            .into_response(),
-    }
-}
-
-/// Passes a backend answer (status and JSON body) through to the browser, or a
-/// 502 with the reason when the backend cannot be reached.
-fn passthrough(result: anyhow::Result<(u16, serde_json::Value)>) -> axum::response::Response {
-    match result {
-        Ok((status, body)) => {
-            let code = axum::http::StatusCode::from_u16(status).unwrap_or(axum::http::StatusCode::BAD_GATEWAY);
-            (code, axum::Json(body)).into_response()
-        }
-        Err(e) => (axum::http::StatusCode::BAD_GATEWAY, axum::Json(serde_json::json!({"error": e.to_string()}))).into_response(),
-    }
-}
-
-/// The PoE tab's data: per-port PoE state, link traps and unit totals from the backend.
-pub async fn poe_data(State(state): State<AppState>, Path(id): Path<String>) -> axum::response::Response {
-    passthrough(state.backend.get_with_status(&format!("/switches/{}/poe", id)).await)
-}
-
-/// Watts per port (a console read on the backend, so only when asked for).
-pub async fn poe_power_data(State(state): State<AppState>, Path(id): Path<String>) -> axum::response::Response {
-    passthrough(state.backend.get_with_status(&format!("/switches/{}/poe-power", id)).await)
-}
-
-/// Starts a PoE on / off / reset for several ports; progress arrives on the event stream.
-pub async fn poe_batch(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-    axum::Json(body): axum::Json<serde_json::Value>,
-) -> axum::response::Response {
-    passthrough(state.backend.post(&format!("/switches/{}/poe", id), &body).await)
 }

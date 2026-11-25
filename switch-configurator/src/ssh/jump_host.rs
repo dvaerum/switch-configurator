@@ -234,7 +234,6 @@ impl JumpHostSession {
 
                             // Forward data bidirectionally
                             let mut buf_tcp = vec![0u8; 8192];
-                            let buf_ssh = vec![0u8; 8192];
 
                             loop {
                                 tokio::select! {
@@ -297,20 +296,6 @@ impl JumpHostSession {
         );
 
         Ok(local_port)
-    }
-
-    /// Find an available local port for forwarding
-    fn find_free_port() -> Result<u16> {
-        use std::net::TcpListener;
-
-        // Bind to port 0 to let OS assign a free port
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .context("Failed to bind to local port")?;
-
-        let local_addr = listener.local_addr()
-            .context("Failed to get local address")?;
-
-        Ok(local_addr.port())
     }
 
     /// Get jump host info for logging

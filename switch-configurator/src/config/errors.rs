@@ -1,4 +1,4 @@
-/// Enhanced error messages for common configuration mistakes
+//! Enhanced error messages for common configuration mistakes
 
 use serde::Serialize;
 use std::path::PathBuf;

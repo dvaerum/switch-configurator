@@ -60,6 +60,14 @@ pub(crate) fn strip_pager_prompt(output: &mut Vec<u8>) -> bool {
     true
 }
 
+/// A shell prompt at the end of a line, e.g. `switch# ` or `switch(config)# `.
+pub(crate) static END_PROMPT_REGEX: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| regex::Regex::new(r"[\w-]{2,}\s*(\([^\)]+\))?\s*[>#]\s*$").unwrap());
+
+/// ANSI escape sequences, which a console wraps around its output.
+pub(crate) static ANSI_ESCAPE_REGEX: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| regex::Regex::new(r"\x1b\[[0-9;?]*[A-Za-z]").unwrap());
+
 #[cfg(test)]
 mod tests {
     use super::*;

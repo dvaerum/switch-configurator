@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **No more compiler or clippy warnings** (`switch-configurator` 0.35.2, `switch-configurator-ui` patch bump): the binary no longer compiles every module a second time (it uses the library), which had doubled most warnings. The rest are fixed: dead code removed or marked test-only, regexes compiled once instead of per loop, unused variables and imports dropped, complex types named, and two unreachable `match` arms removed in the Aruba and Cisco trap handling. No behaviour change.
+
 ### Added
 - **Cisco PoE read-back is for a single switch again** (`switch-configurator` 0.35.1): the `2/0/5` stack-member read-back that 0.35.0 added is removed, since stacks are not supported. A bare port number or `Gi1/0/N` is read back as before.
 - **Link-trap counts survive a restart** (`switch-configurator` 0.35.0): the per-port link-trap counts are saved to a state file after each trap and loaded at startup (`--state-file`; NixOS `stateFile`, default `/var/lib/switch-configurator/link-traps.json`, `null` for memory only), so `link_traps` in `GET /poe` and `switch_port_link_traps_total` no longer drop to zero when the service restarts. A corrupt state file stops the start with an error instead of being ignored; a failed save is logged and counting continues.

@@ -5,10 +5,8 @@ use switch_configurator::models::SwitchConfig;
 
 #[derive(Debug, Clone)]
 pub struct SwitchDraft {
-    pub switch_id: String,
     pub original: SwitchConfig,
     pub edited: SwitchConfig,
-    pub created_at: chrono::DateTime<chrono::Utc>,
 
     /// Which file each VLAN/port row came from — only populated for a draft
     /// seeded from a switch that failed validation (`merge-preview`, not
@@ -35,6 +33,7 @@ impl DraftStore {
         self.drafts.read().await.get(switch_id).cloned()
     }
 
+    #[cfg(test)]
     pub async fn create(&self, switch_id: String, config: SwitchConfig) -> SwitchDraft {
         self.create_with_sources(switch_id, config, HashMap::new(), HashMap::new()).await
     }
@@ -51,10 +50,8 @@ impl DraftStore {
         port_sources: HashMap<String, String>,
     ) -> SwitchDraft {
         let draft = SwitchDraft {
-            switch_id: switch_id.clone(),
             original: config.clone(),
             edited: config,
-            created_at: chrono::Utc::now(),
             vlan_sources,
             port_sources,
         };
@@ -76,6 +73,7 @@ impl DraftStore {
         self.drafts.write().await.remove(switch_id).is_some()
     }
 
+    #[cfg(test)]
     pub async fn has_draft(&self, switch_id: &str) -> bool {
         self.drafts.read().await.contains_key(switch_id)
     }
@@ -115,12 +113,11 @@ mod tests {
         let config = test_config();
 
         let draft = store.create("sw-01".to_string(), config.clone()).await;
-        assert_eq!(draft.switch_id, "sw-01");
         assert_eq!(draft.edited.vlans.len(), 1);
 
         let retrieved = store.get("sw-01").await;
         assert!(retrieved.is_some());
-        assert_eq!(retrieved.unwrap().switch_id, "sw-01");
+        assert_eq!(retrieved.unwrap().edited.vlans.len(), 1);
     }
 
     #[tokio::test]

@@ -17,6 +17,8 @@ pub struct StartDraftForm {
     pub tab: Option<String>,
 }
 
+type ParsedPreview = (SwitchConfig, std::collections::HashMap<u16, String>, std::collections::HashMap<String, String>);
+
 /// Pull the merged config and per-row source attribution out of a
 /// `/switches/{id}/merge-preview` response. Used both for an ordinary
 /// healthy switch (empty source maps — nothing to attribute) and a switch
@@ -25,7 +27,7 @@ pub struct StartDraftForm {
 /// doesn't need to know in advance which kind of switch it's editing.
 fn parse_merge_preview(
     json: &serde_json::Value,
-) -> Option<(SwitchConfig, std::collections::HashMap<u16, String>, std::collections::HashMap<String, String>)> {
+) -> Option<ParsedPreview> {
     let config: SwitchConfig = serde_json::from_value(json["config"].clone()).ok()?;
 
     let vlan_sources = json["vlan_sources"].as_object()
@@ -130,9 +132,7 @@ fn build_editable_vlans(
             std::path::Path::new(path).file_name().map(|n| format!("from {}", n.to_string_lossy()))
         });
 
-        let collision = vlans.iter()
-            .filter(|other| other.id != v.id && other.name == v.name)
-            .next();
+        let collision = vlans.iter().find(|other| other.id != v.id && other.name == v.name);
         let collision_note = collision.map(|other| {
             let other_source = vlan_sources.get(&other.id);
             let other_is_main = is_main_config_source(other_source, main_config_path);
@@ -329,12 +329,12 @@ pub struct EditablePort {
 
 /// Does the model have PoE at all? Unknown (no model recorded): keep the controls.
 fn model_has_poe(model: Option<&switch_configurator::models::SwitchModel>) -> bool {
-    model.map_or(true, |m| m.supports_poe())
+    model.is_none_or(|m| m.supports_poe())
 }
 
 /// Can this port do PoE on this model? Unknown model: keep the control.
 fn poe_applies(model: Option<&switch_configurator::models::SwitchModel>, port_id: &str) -> bool {
-    model.map_or(true, |m| m.port_supports_poe(port_id))
+    model.is_none_or(|m| m.port_supports_poe(port_id))
 }
 
 /// A PoE flag on a port that cannot do PoE is meaningless (and would otherwise
@@ -811,13 +811,6 @@ fn parse_speed_duplex(s: &str) -> SpeedDuplex {
         "1000-full" => SpeedDuplex::ThousandFull,
         "10g-full" => SpeedDuplex::TenGFull,
         _ => SpeedDuplex::Auto,
-    }
-}
-
-fn parse_port_mode(s: &str) -> PortMode {
-    match s {
-        "trunk" => PortMode::Trunk,
-        _ => PortMode::Access,
     }
 }
 

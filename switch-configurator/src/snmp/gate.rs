@@ -60,6 +60,12 @@ fn switch_lock(switch: &str) -> Arc<tokio::sync::Mutex<()>> {
     SWITCH_LOCKS.lock().unwrap().entry(switch.to_string()).or_default().clone()
 }
 
+impl<T: Send + Sync + 'static> Default for Gate<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<T: Send + Sync + 'static> Gate<T> {
     pub fn new() -> Self {
         Gate { flights: Mutex::new(HashMap::new()), last_entries: Mutex::new(HashMap::new()) }
@@ -126,7 +132,7 @@ impl<T: Send + Sync + 'static> Gate<T> {
             attempts += 1;
             match walk().await {
                 Ok((value, entries)) => {
-                    if best.as_ref().map_or(true, |(_, n)| entries > *n) {
+                    if best.as_ref().is_none_or(|(_, n)| entries > *n) {
                         best = Some((value, entries));
                     }
                 }

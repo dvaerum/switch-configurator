@@ -4,7 +4,6 @@ use crate::models::{
     Credentials, Port, PortMirror, SnmpConfig, SwitchConfig, SwitchModel, Vendor, Vlan,
 };
 use crate::vendors;
-use crate::vendors::traits::SwitchVendor;
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
@@ -468,7 +467,7 @@ pub async fn preview_diff(
 /// Save switch config changes to an overlay YAML file in the config folder
 pub async fn save_overlay(
     State(store): State<ConfigStore>,
-    Path(id): Path<String>,
+    Path(_id): Path<String>,
     Json(mut body): Json<SaveOverlayRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
     // Validate filename: no path traversal, must end in .yaml or .yml
@@ -810,7 +809,7 @@ pub async fn config_sources(
             if let Ok(entries) = std::fs::read_dir(folder) {
                 for entry in entries.flatten() {
                     let path = entry.path();
-                    if path.extension().map_or(false, |ext| ext == "yaml" || ext == "yml")
+                    if path.extension().is_some_and(|ext| ext == "yaml" || ext == "yml")
                         && file_declares_switch(&path, &id)
                     {
                         // Try to read the merge_priority from the file
@@ -1217,7 +1216,7 @@ pub async fn reload_switch_config(
     }
 
     // Re-initialize switch status with updated configuration
-    store.status.initialize_switches(&[switch_config.clone()]).await;
+    store.status.initialize_switches(std::slice::from_ref(&switch_config)).await;
 
     // Spawn background task to apply configuration
     let store_clone = store.clone();

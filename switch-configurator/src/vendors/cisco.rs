@@ -567,9 +567,6 @@ impl CiscoSwitch {
                     commands.push("snmp-server enable traps".to_string());
                     actions.push("enabled all traps".to_string());
                 }
-                _ => {
-                    debug!("Trap type {:?} not specifically handled", trap_type);
-                }
             }
         }
 
@@ -590,9 +587,6 @@ impl CiscoSwitch {
                     info!("Disabling all traps");
                     commands.push("no snmp-server enable traps".to_string());
                     actions.push("disabled all traps".to_string());
-                }
-                _ => {
-                    debug!("Trap type {:?} not specifically handled for disable", trap_type);
                 }
             }
         }
@@ -728,7 +722,7 @@ impl SwitchVendor for CiscoSwitch {
         ).unwrap();
         let warnings = super::traits::verify_hardware_model(
             &config,
-            &self.config.model(),
+            self.config.model(),
             &hardware_id_pattern,
         );
 
@@ -976,7 +970,7 @@ impl SwitchVendor for CiscoSwitch {
             &current,
             self.config.vlans.len(),
             self.config.ports.len(),
-            &self.config.hostname(),
+            self.config.hostname(),
         )?;
 
         // Store current state for use in command generation
@@ -1131,7 +1125,7 @@ impl SwitchVendor for CiscoSwitch {
             let test_result = crate::validation::tests::execute_test(
                 test,
                 client,
-                &self.config.management_ip(),
+                self.config.management_ip(),
             ).await;
 
             match test_result {

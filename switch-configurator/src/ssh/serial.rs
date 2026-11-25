@@ -434,9 +434,7 @@ impl SerialClient {
             self.maybe_complete_forced_password_change(new_password_if_forced, &post_login_state).await?;
         } else if state_check.contains('#') || state_check.contains('>') {
             // Already at a prompt — but check if we're in config mode and need to exit
-            let ansi_stripped = regex::Regex::new(r"\x1b\[[0-9;?]*[A-Za-z]")
-                .unwrap()
-                .replace_all(&state_check, "");
+            let ansi_stripped = crate::ssh::ANSI_ESCAPE_REGEX.replace_all(&state_check, "");
             if ansi_stripped.contains("(config") {
                 debug!("In config mode, sending 'end' to return to privileged exec mode");
                 self.send_raw("end\r").await?;
@@ -481,9 +479,7 @@ impl SerialClient {
                 // Check if "Session Terminated" appeared — the switch dropped a stale session.
                 // After this, it usually shows the login banner then eventually a login prompt.
                 // We need to clear this output and wait for the actual login prompt.
-                let ansi_stripped = regex::Regex::new(r"\x1b\[[0-9;?]*[A-Za-z]")
-                    .unwrap()
-                    .replace_all(&state_check, "");
+                let ansi_stripped = crate::ssh::ANSI_ESCAPE_REGEX.replace_all(&state_check, "");
                 if ansi_stripped.contains("Session Terminated") || ansi_stripped.contains("session terminated") {
                     warn!("Stale serial session detected ('Session Terminated'), waiting for fresh login prompt...");
                     // Clear residual banner text, send Enter to trigger fresh login prompt
@@ -651,9 +647,7 @@ impl SerialClient {
         let response = self.check_current_state(Duration::from_secs(3)).await?;
 
         // Check if we got any meaningful response (should have a prompt)
-        let clean_response = regex::Regex::new(r"\x1b\[[0-9;?]*[A-Za-z]")
-            .unwrap()
-            .replace_all(&response, "");
+        let clean_response = crate::ssh::ANSI_ESCAPE_REGEX.replace_all(&response, "");
 
         let clean_trimmed = clean_response.trim();
 
@@ -697,9 +691,7 @@ impl SerialClient {
         self.clear_buffer().await?;
         self.send_raw("\r").await?;
         let response = self.check_current_state(Duration::from_secs(3)).await?;
-        let clean = regex::Regex::new(r"\x1b\[[0-9;?]*[A-Za-z]")
-            .unwrap()
-            .replace_all(&response, "")
+        let clean = crate::ssh::ANSI_ESCAPE_REGEX.replace_all(&response, "")
             .into_owned();
 
         if clean.contains("login:")
@@ -944,9 +936,7 @@ impl SerialClient {
                                 // without a newline, e.g. "no pageIT-04269# ".
                                 // Safe because the confirmation wait will reject false positives.
                                 let has_prompt_at_end = if !has_prompt && !has_prompt_in_recent {
-                                    let end_prompt_regex = regex::Regex::new(
-                                        r"[\w-]{2,}\s*(\([^\)]+\))?\s*[>#]\s*$"
-                                    ).unwrap();
+                                    let end_prompt_regex = &*crate::ssh::END_PROMPT_REGEX;
                                     end_prompt_regex.is_match(last_nonempty_line)
                                 } else {
                                     false
@@ -1021,9 +1011,7 @@ impl SerialClient {
                                 .trim();
 
                             // Check for prompt: strict line match, recent lines, or end-of-line
-                            let end_prompt_regex = regex::Regex::new(
-                                r"[\w-]{2,}\s*(\([^\)]+\))?\s*[>#]\s*$"
-                            ).unwrap();
+                            let end_prompt_regex = &*crate::ssh::END_PROMPT_REGEX;
                             let has_prompt = prompt_regex.is_match(last_nonempty_line)
                                 || interactive_regex.is_match(&clean)
                                 || end_prompt_regex.is_match(last_nonempty_line)
@@ -1217,6 +1205,14 @@ impl SerialClient {
             debug!("Serial connection closed");
         }
         Ok(())
+    }
+}
+
+impl Drop for SerialClient {
+    fn drop(&mut self) {
+        if self.port.is_some() {
+            warn!("SerialClient dropped without explicit disconnect");
+        }
     }
 }
 
@@ -1694,7 +1690,7 @@ mod tests {
         let client = SerialClient::new("/dev/ttyUSB0".to_string(), 9600)
             .with_debug_mode(true);
 
-        assert_eq!(client.debug_mode, true);
+        assert!(client.debug_mode);
     }
 
     #[test]
@@ -1702,7 +1698,7 @@ mod tests {
         let client = SerialClient::new("/dev/ttyUSB0".to_string(), 9600)
             .with_dry_run(true);
 
-        assert_eq!(client.dry_run, true);
+        assert!(client.dry_run);
     }
 
     // Tests for connect_with_retry behavior
@@ -2018,13 +2014,5 @@ mod tests {
             !clean_trimmed.contains('#') && !clean_trimmed.contains('>'),
             "Should NOT contain a command prompt"
         );
-    }
-}
-
-impl Drop for SerialClient {
-    fn drop(&mut self) {
-        if self.port.is_some() {
-            warn!("SerialClient dropped without explicit disconnect");
-        }
     }
 }
