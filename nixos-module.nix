@@ -81,6 +81,16 @@ in
       '';
     };
 
+    stateFile = mkOption {
+      type = types.nullOr types.str;
+      default = "/var/lib/switch-configurator/link-traps.json";
+      description = ''
+        File that keeps the per-port link-trap counts across restarts (its
+        directory is created and owned by the service). `null` keeps them in
+        memory only, so they start at zero after each restart.
+      '';
+    };
+
     listenAddress = mkOption {
       type = types.str;
       default = "0.0.0.0";
@@ -291,6 +301,7 @@ in
         Restart = "on-failure";
         RestartSec = "10s";
         RuntimeDirectory = "switch-configurator";
+        StateDirectory = "switch-configurator";
         LoadCredential = mapAttrsToList (id: path: "${id}:${path}") cfg.loadCredentials;
 
         ExecStart = ''
@@ -304,6 +315,7 @@ in
             --port ${toString cfg.port} \
             --listen-address ${cfg.listenAddress} \
             ${optionalString (cfg.trapListen != null) "--trap-listen ${cfg.trapListen}"} \
+            ${optionalString (cfg.stateFile != null) "--state-file ${cfg.stateFile}"} \
             ${optionalString (cfg.socketPath != null) "--socket ${cfg.socketPath}"} \
             ${if cfg.enableFileWatching then "--watch" else "--watch=false"} \
             ${if cfg.applyOnStartup then "--apply-on-startup" else ""} \

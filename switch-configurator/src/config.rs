@@ -486,6 +486,8 @@ pub struct ConfigStore {
     pub poe_unit_cache: Arc<RwLock<std::collections::HashMap<String, CachedPoeUnit>>>,
     /// Link traps received per (switch id, port number), since the service started.
     pub link_traps: Arc<std::sync::Mutex<std::collections::HashMap<(String, String), LinkTraps>>>,
+    /// Where `link_traps` is saved after every trap, when the service has a state file.
+    link_traps_file: Arc<std::sync::OnceLock<PathBuf>>,
     /// Open vendor sessions kept between operations (see `session_pool`).
     pub session_pool: crate::session_pool::SessionPool,
     /// The latest PoE operation per (switch id, port number), kept in memory
@@ -494,7 +496,7 @@ pub struct ConfigStore {
 }
 
 /// How often a port's link went down and up according to traps, and the latest.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LinkTraps {
     /// The port as the switch names it in the trap (`port9`).
     pub port_id: String,
@@ -503,6 +505,30 @@ pub struct LinkTraps {
     /// `up` or `down`.
     pub last_state: String,
     pub last_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct SavedLinkTraps {
+    switch: String,
+    port: String,
+    #[serde(flatten)]
+    traps: LinkTraps,
+}
+
+/// Writes next to `file` and renames over it, so a crash never leaves half a file.
+fn save_link_traps(
+    file: &Path,
+    traps: &std::collections::HashMap<(String, String), LinkTraps>,
+) -> Result<()> {
+    let mut saved: Vec<SavedLinkTraps> = traps
+        .iter()
+        .map(|((switch, port), t)| SavedLinkTraps { switch: switch.clone(), port: port.clone(), traps: t.clone() })
+        .collect();
+    saved.sort_by(|a, b| (&a.switch, &a.port).cmp(&(&b.switch, &b.port)));
+    let tmp = file.with_extension("json.tmp");
+    std::fs::write(&tmp, serde_json::to_vec_pretty(&saved)?)?;
+    std::fs::rename(&tmp, file)?;
+    Ok(())
 }
 
 /// A switch's PoE unit totals as last read.
@@ -550,6 +576,7 @@ impl ConfigStore {
             port_status_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
             poe_unit_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
             link_traps: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            link_traps_file: Arc::new(std::sync::OnceLock::new()),
             session_pool: crate::session_pool::SessionPool::with_vendor_sessions(),
             poe_operations: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         }
@@ -582,6 +609,32 @@ impl ConfigStore {
         }
         entry.last_state = state.to_string();
         entry.last_at = chrono::Utc::now();
+        if let Some(file) = self.link_traps_file.get() {
+            // Counting must go on when the disk does not cooperate, so a failed save is only logged.
+            if let Err(e) = save_link_traps(file, &traps) {
+                tracing::warn!("Could not save the link-trap counts to {}: {:#}", file.display(), e);
+            }
+        }
+    }
+
+    /// Loads the saved link-trap counts from `file` (none yet is fine; a file
+    /// that cannot be read or parsed is an error) and saves to it from now on.
+    pub fn persist_link_traps_to(&self, file: PathBuf) -> Result<()> {
+        match std::fs::read_to_string(&file) {
+            Ok(text) => {
+                let saved: Vec<SavedLinkTraps> =
+                    serde_json::from_str(&text).with_context(|| format!("{} is not valid link-trap state", file.display()))?;
+                let mut traps = self.link_traps.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                for s in saved {
+                    traps.insert((s.switch, s.port), s.traps);
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e).with_context(|| format!("cannot read {}", file.display())),
+        }
+        self.link_traps_file
+            .set(file)
+            .map_err(|_| anyhow!("the link-trap state file is already set"))
     }
 
     /// Keeps `poe_operations` in step with the PoE events, which every PoE
@@ -1935,6 +1988,54 @@ fn extract_number_suffix(s: &str) -> Result<(&str, u32)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ========== link-trap persistence ==========
+
+    fn empty_store() -> ConfigStore {
+        ConfigStore::new(AppConfig { switches: vec![] }, 0)
+    }
+
+    #[test]
+    fn link_trap_counts_survive_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("link-traps.json");
+        let before = empty_store();
+        before.persist_link_traps_to(file.clone()).unwrap();
+        before.record_link_trap("sw1", "port9", "down");
+        before.record_link_trap("sw1", "port9", "up");
+        before.record_link_trap("sw1", "port9", "down");
+
+        let after = empty_store();
+        after.persist_link_traps_to(file).unwrap();
+        let traps = after.link_traps.lock().unwrap();
+        let port9 = &traps[&("sw1".to_string(), "9".to_string())];
+        assert_eq!((port9.down, port9.up, port9.last_state.as_str()), (2, 1, "down"));
+        assert_eq!(port9.port_id, "port9");
+    }
+
+    #[test]
+    fn a_missing_link_trap_file_starts_from_zero_and_a_broken_one_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = empty_store();
+        store.persist_link_traps_to(dir.path().join("none.json")).unwrap();
+        assert!(store.link_traps.lock().unwrap().is_empty());
+
+        let broken = dir.path().join("broken.json");
+        std::fs::write(&broken, "{not json").unwrap();
+        assert!(empty_store().persist_link_traps_to(broken).is_err(), "a corrupt file must be reported, not hidden");
+    }
+
+    #[test]
+    fn link_traps_keep_counting_when_the_file_cannot_be_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = empty_store();
+        let file = dir.path().join("link-traps.json");
+        store.persist_link_traps_to(file.clone()).unwrap();
+        // A directory in place of the file makes every save fail.
+        std::fs::create_dir(&file).unwrap();
+        store.record_link_trap("sw1", "port1", "up");
+        assert_eq!(store.link_traps.lock().unwrap().len(), 1);
+    }
 
     // ========== resolve_vlan_names tests ==========
 

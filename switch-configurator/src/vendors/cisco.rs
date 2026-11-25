@@ -1400,12 +1400,20 @@ pub fn parse_poe_inline_power(output: &str) -> Vec<crate::models::PoePortPower> 
         .collect()
 }
 
-/// The PoE setting per port number, for the first stack member (`Gi1/0/N`) only.
+/// The PoE setting per port: `unit/0/N` for every stack member, and the bare
+/// number `N` as well for the first member (what a single switch is addressed by).
 pub fn parse_poe_inline_settings(output: &str) -> std::collections::HashMap<String, bool> {
-    parse_poe_inline_power(output)
-        .into_iter()
-        .filter_map(|p| Some((p.port_id.strip_prefix("Gi1/0/")?.to_string(), p.enabled)))
-        .collect()
+    let mut settings = std::collections::HashMap::new();
+    for p in parse_poe_inline_power(output) {
+        let Some(path) = p.port_id.get(2..) else { continue };
+        if p.port_id.starts_with("Gi") {
+            if let Some(number) = path.strip_prefix("1/0/") {
+                settings.insert(number.to_string(), p.enabled);
+            }
+            settings.insert(path.to_string(), p.enabled);
+        }
+    }
+    settings
 }
 
 /// Detect Cisco IOS's documented "% Invalid input detected" marker for a
@@ -1471,9 +1479,19 @@ mod tests {
     #[test]
     fn poe_inline_settings_are_keyed_by_port_number_on_the_first_unit() {
         let settings = parse_poe_inline_settings(SHOW_POWER_INLINE);
-        assert_eq!(settings.len(), 3);
         assert!(!settings["1"] && settings["3"] && !settings["24"]);
         assert!(parse_poe_inline_settings("% Invalid input detected at '^' marker.").is_empty());
+    }
+
+    #[test]
+    fn poe_inline_settings_of_other_stack_members_are_keyed_by_unit_slot_port() {
+        let stack = "Interface Admin  Oper       Power   Device              Class Max\r\n--------- ------ ---------- ------- ------------------- ----- ----\r\nGi1/0/5   auto   on         7.2     Ieee PD             2     60.0 \r\nGi2/0/5   off    off        0.0     n/a                 n/a   60.0 \r\nGi3/0/12  auto   on         4.0     Ieee PD             1     60.0 \r\n";
+        let settings = parse_poe_inline_settings(stack);
+        assert!(settings["5"], "a bare number still means the first member");
+        assert!(settings["1/0/5"]);
+        assert!(!settings["2/0/5"]);
+        assert!(settings["3/0/12"]);
+        assert!(!settings.contains_key("12"), "member 3 must not answer to a bare number");
     }
 
     #[test]
@@ -1484,6 +1502,7 @@ mod tests {
             vec!["configure terminal", "interface GigabitEthernet1/0/3", "power inline never", "end"]
         );
         assert_eq!(switch.poe_enable_commands("Gi1/0/3")[2], "power inline auto");
+        assert_eq!(switch.poe_enable_commands("2/0/5")[1], "interface GigabitEthernet2/0/5", "a stack member");
     }
     use super::*;
     use crate::models::{ConnectionType, Credentials, SnmpAccess, SnmpCommunity, SnmpConfig, TrapType, SnmpTrapReceiver, SpeedDuplex, SwitchModel, VlanIpConfig};

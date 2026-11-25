@@ -33,6 +33,10 @@ struct Args {
     #[arg(long)]
     trap_listen: Option<String>,
 
+    /// Keep the per-port link-trap counts in this file, so they survive a restart.
+    #[arg(long)]
+    state_file: Option<PathBuf>,
+
     /// Configuration folders to scan for additional YAML files (can be specified multiple times)
     #[arg(long)]
     config_folder: Vec<PathBuf>,
@@ -222,6 +226,10 @@ async fn main() -> Result<()> {
 
         info!("========================================");
         info!("");
+    }
+
+    if let Some(file) = args.state_file.clone() {
+        store.persist_link_traps_to(file)?;
     }
 
     // Start API server
